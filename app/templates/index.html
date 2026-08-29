@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>电商商品工作台</title>
+  <style>
+    body { max-width: 1000px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, sans-serif; color: #243044; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    button, input { padding: .6rem .8rem; border: 1px solid #cbd5e1; border-radius: .4rem; }
+    button { background: #2563eb; color: white; cursor: pointer; border: 0; }
+    #products { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-top: 1rem; }
+    .card { padding: 1rem; border: 1px solid #e2e8f0; border-radius: .6rem; box-shadow: 0 1px 2px #0000000d; }
+    .price { color: #dc2626; font-size: 1.2rem; font-weight: 700; }
+    .muted { color: #64748b; }
+  </style>
+</head>
+<body>
+  <header><h1>电商商品工作台</h1><button id="crawl">采集样例商品</button></header>
+  <p id="message" class="muted">点击按钮从本地 fixture 采集商品。</p>
+  <form id="search"><input id="keyword" placeholder="搜索商品名称"><button>搜索</button></form>
+  <section id="products"></section>
+  <script>
+    const products = document.querySelector('#products');
+    const message = document.querySelector('#message');
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>'"]/g, char => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+      }[char]));
+    }
+    function render(data) {
+      products.innerHTML = data.items.map(p => `<article class="card"><h2>${escapeHtml(p.title)}</h2><p class="muted">${escapeHtml(p.category || '未分类')} · ${escapeHtml(p.rating ?? '-')} 分</p><p>${escapeHtml(p.description || '')}</p><p class="price">￥${Number(p.current_price).toFixed(2)}</p><a href="${escapeHtml(p.url)}" target="_blank" rel="noopener noreferrer">商品链接</a></article>`).join('');
+      message.textContent = `共 ${data.total} 件商品`;
+    }
+    async function load() {
+      const keyword = document.querySelector('#keyword').value.trim();
+      const response = await fetch(`/api/products?page_size=100${keyword ? `&keyword=${encodeURIComponent(keyword)}` : ''}`);
+      if (!response.ok) { message.textContent = '加载失败'; return; }
+      render(await response.json());
+    }
+    document.querySelector('#crawl').onclick = async () => {
+      message.textContent = '正在采集...';
+      const response = await fetch('/api/crawl/fixture', { method: 'POST' });
+      message.textContent = response.ok ? '采集完成' : '采集失败';
+      await load();
+    };
+    document.querySelector('#search').onsubmit = event => { event.preventDefault(); load(); };
+    load();
+  </script>
+</body>
+</html>

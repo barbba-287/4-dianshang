@@ -1,0 +1,5 @@
+"""Placeholder for runtime crawl artifacts.
+
+Screenshots, traces, and raw snapshots are generated here during local runs
+and intentionally excluded from version control.
+"""
