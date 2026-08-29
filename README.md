@@ -53,6 +53,11 @@ DATABASE_URL=mysql+pymysql://dianshang:dianshang@localhost:3306/dianshang?charse
 - `GET /docs`：OpenAPI 文档
 
 
+## 文档
+
+- [第一周架构图](docs/architecture.md)
+- [第一周验收记录](docs/week1-acceptance.md)
+
 ## Playwright 浏览器安装（国内网络）
 
 如果直接执行 `playwright install chromium` 下载缓慢或卡住，可以在 PowerShell 临时设置 Playwright 下载镜像，再安装 Chromium：
