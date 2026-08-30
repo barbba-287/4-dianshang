@@ -1,10 +1,32 @@
+# ===== 运行时依赖 =====
+# Web 框架
 fastapi>=0.115,<1
 uvicorn[standard]>=0.34,<1
+
+# 数据 / 配置
 sqlalchemy>=2.0,<3
 pydantic>=2.0,<3
 pydantic-settings>=2.0,<3
-playwright>=1.50,<2
-pytest>=8.0,<9
-httpx>=0.27,<1
-python-multipart>=0.0.9,<1
+python-multipart>=0.0.9,<1   # FastAPI UploadFile / Form 依赖
+
+# MySQL 驱动（可选；演示用 SQLite 时不需要）
 pymysql>=1.1,<2
+
+# 网页自动化
+playwright>=1.50,<2
+
+# 文档解析
+pypdf>=5.0,<6
+python-docx>=1.1,<2
+
+# 演示脚本
+requests>=2.32,<3
+
+# ===== 开发 / 演示依赖 =====
+# 数据库迁移
+alembic>=1.13,<2
+
+# 测试
+pytest>=8.0,<9
+httpx>=0.27,<1             # FastAPI TestClient 依赖
+reportlab>=4.0,<5          # 仅测试用于生成最小可复现 PDF

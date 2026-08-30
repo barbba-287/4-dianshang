@@ -17,6 +17,23 @@ class Settings(BaseSettings):
     crawl_max_retries: int = 2
     artifacts_dir: str = "artifacts"
 
+    # S1 任务工程化
+    worker_concurrency: int = 2
+    worker_lease_seconds: int = 60
+    worker_heartbeat_seconds: int = 5
+    worker_max_attempts: int = 3
+    worker_poll_seconds: float = 0.5
+
+    # S2 文档导入
+    upload_max_bytes: int = 20 * 1024 * 1024
+    imports_dir: str = "uploads"
+
+    # S3 RAG 检索
+    embedder_dim: int = 256
+    vector_store_path: str = "data/vectors.json"
+    rag_top_k: int = 5
+    rag_min_score: float = 0.2
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

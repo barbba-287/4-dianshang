@@ -5,6 +5,7 @@
 """
 
 import json
+from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -72,7 +73,12 @@ def _write_raw_snapshot(artifact_dir: Path, raw_products: list[dict[str, str | N
     )
 
 
-def collect_fixture(path: str | Path, *, attempt: int = 0) -> list[ProductRecord]:
+def collect_fixture(
+    path: str | Path,
+    *,
+    attempt: int = 0,
+    cancel_check: Callable[[], bool] | None = None,
+) -> list[ProductRecord]:
     settings = get_settings()
     fixture_path = Path(path).resolve()
     artifact_dir = settings.resolve_path(settings.artifacts_dir)
@@ -106,6 +112,8 @@ def collect_fixture(path: str | Path, *, attempt: int = 0) -> list[ProductRecord
             cards = page.locator("[data-product-card]")
             raw_products: list[dict[str, str | None]] = []
             for index in range(cards.count()):
+                if cancel_check is not None and cancel_check():
+                    raise CrawlError("CANCELLED", "采集被取消")
                 card = cards.nth(index)
                 raw_products.append(
                     {

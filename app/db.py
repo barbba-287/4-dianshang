@@ -9,7 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint, create_engine
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.config import get_settings
@@ -66,13 +66,93 @@ class CrawlJob(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     source: Mapped[str] = mapped_column(String(64), default="fixture")
     keyword: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    type: Mapped[str] = mapped_column(String(32), default="crawl_fixture", index=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
     retry_count: Mapped[int] = mapped_column(default=0)
+    max_retries: Mapped[int] = mapped_column(default=2)
+    attempt: Mapped[int] = mapped_column(default=0)
+    worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+# ---------- S2 文档导入 ----------
+
+
+DOCUMENT_SOURCE_TYPES = ("pdf", "docx")
+DOCUMENT_STATUSES = ("parsing", "ready", "failed")
+LINK_RELATIONS = ("mention", "spec")
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_type: Mapped[str] = mapped_column(String(16), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    filename: Mapped[str] = mapped_column(String(512))
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class DocumentVersion(Base):
+    __tablename__ = "document_versions"
+    __table_args__ = (
+        UniqueConstraint("document_id", "version_no", name="uq_doc_version_no"),
+        UniqueConstraint("document_id", "sha256", name="uq_doc_sha256"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
+    version_no: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    storage_uri: Mapped[str] = mapped_column(String(512))
+    status: Mapped[str] = mapped_column(String(16), default="parsing", index=True)
+    parser_version: Mapped[str] = mapped_column(String(32), default="v1")
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class DocumentChunk(Base):
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        UniqueConstraint("document_version_id", "chunk_no", name="uq_chunk_no"),
+        UniqueConstraint("document_version_id", "content_hash", name="uq_chunk_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_version_id: Mapped[int] = mapped_column(ForeignKey("document_versions.id"), index=True)
+    chunk_no: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    page_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    paragraph_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    content_hash: Mapped[str] = mapped_column(String(64))
+
+
+class DocumentProductLink(Base):
+    __tablename__ = "document_product_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_version_id", "product_id", "relation", name="uq_doc_product_link"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_version_id: Mapped[int] = mapped_column(ForeignKey("document_versions.id"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    relation: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 def init_db() -> None:

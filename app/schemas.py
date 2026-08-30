@@ -69,3 +69,121 @@ class CrawlJobResponse(BaseModel):
     finished_at: datetime | None
     error_code: str | None
     error_message: str | None
+
+
+class CrawlJobDetailResponse(CrawlJobResponse):
+    """任务详情（S1）：相比 CrawlJobResponse 暴露并发控制相关字段。"""
+
+    type: str
+    max_retries: int
+    attempt: int
+    worker_id: str | None
+    lease_until: datetime | None
+    next_run_at: datetime | None
+    run_id: str | None
+    cancel_requested: bool
+
+
+# ---------- S2 文档相关 ---------- =========
+
+
+class DocumentUploadResponse(BaseModel):
+    document_id: int
+    version_id: int
+    job_id: int
+    version_no: int
+    status: str
+
+
+class DocumentVersionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    document_id: int
+    version_no: int
+    sha256: str
+    size_bytes: int
+    storage_uri: str
+    status: str
+    parser_version: str
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+    published_at: datetime | None
+    chunk_count: int | None = None
+
+
+# ---------- S3 RAG ----------
+
+
+class RagCitation(BaseModel):
+    chunk_id: int
+    document_id: int
+    document_version_id: int
+    snippet: str
+    score: float
+    locator: dict
+
+
+class RagQueryRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=500)
+    top_k: int | None = Field(default=None, ge=1, le=20)
+    min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    product_id: int | None = None
+    source_type: str | None = None
+
+
+class RagQueryResponse(BaseModel):
+    answer: str | None
+    citations: list[RagCitation]
+    no_answer: bool
+    reason: str | None = None
+    retrieval_diagnostics: dict
+
+
+# ---------- S4 设置端点 ----------
+
+
+class SettingsResponse(BaseModel):
+    app_name: str
+    database_url: str
+    worker_concurrency: int
+    worker_max_attempts: int
+    worker_lease_seconds: int
+    worker_heartbeat_seconds: int
+    upload_max_bytes: int
+    imports_dir: str
+    embedder_dim: int
+    vector_store_path: str
+    rag_top_k: int
+    rag_min_score: float
+    document_count: int
+    chunk_count: int
+    vector_record_count: int
+
+
+# ---------- S5 Agent ----------
+
+
+class AgentActionRequest(BaseModel):
+    tool: str = Field(min_length=1, max_length=64)
+    input: dict = Field(default_factory=dict)
+    call_id: str | None = None
+
+
+class AgentActionResponse(BaseModel):
+    ok: bool
+    output: dict | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    duration_ms: int = 0
+    call_id: str | None = None
+
+
+class AgentToolSpec(BaseModel):
+    name: str
+    description: str
+    is_readonly: bool
+    input_schema: dict
+    output_schema: dict | None = None
+    max_calls_per_minute: int
