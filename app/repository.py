@@ -7,10 +7,12 @@
 """
 
 import secrets
+import hashlib
+import json
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.db import (
@@ -21,6 +23,12 @@ from app.db import (
     DocumentVersion,
     Product,
     ProductPriceHistory,
+    ProductSku,
+    Warehouse,
+    InboundOrder,
+    InboundLine,
+    InventoryTransaction,
+    InventoryBalance,
 )
 from app.jobs import JobClaimLost, JobStatus
 from app.schemas import ProductRecord
@@ -217,8 +225,12 @@ def claim_job(
         .where(
             and_(
                 CrawlJob.id == job_id,
-                CrawlJob.status.in_(
-                    [JobStatus.QUEUED.value, JobStatus.RETRY_WAIT.value]
+                or_(
+                    CrawlJob.status == JobStatus.QUEUED.value,
+                    and_(
+                        CrawlJob.status == JobStatus.RETRY_WAIT.value,
+                        or_(CrawlJob.next_run_at.is_(None), CrawlJob.next_run_at <= now),
+                    ),
                 ),
                 CrawlJob.cancel_requested.is_(False),
             )
@@ -239,6 +251,75 @@ def claim_job(
     job = db.get(CrawlJob, job_id)
     assert job is not None
     return job
+
+
+def recover_expired_jobs(db: Session, *, now: datetime | None = None) -> int:
+    """回收 lease 已过期的 running 任务，并返回回收数量。
+
+    回收视为一次执行失败：取消中的任务直接进入 cancelled；其余任务
+    增加 retry_count，未达到 max_retries 时立即进入 retry_wait，达到上限
+    则进入 failed。所有更新都带上 running + lease_until 条件，避免旧
+    worker 已经完成任务后被调度器错误覆盖。
+    """
+    now = now or _now()
+    running_expired = and_(
+        CrawlJob.status == JobStatus.RUNNING.value,
+        CrawlJob.lease_until.is_not(None),
+        CrawlJob.lease_until <= now,
+    )
+    cancelled = db.execute(
+        update(CrawlJob)
+        .where(running_expired, CrawlJob.cancel_requested.is_(True))
+        .values(
+            status=JobStatus.CANCELLED.value,
+            worker_id=None,
+            lease_until=None,
+            next_run_at=None,
+            finished_at=now,
+            error_code="CANCELLED",
+            error_message="任务租约过期时收到取消请求",
+        )
+    ).rowcount
+
+    retry_count = func.coalesce(CrawlJob.retry_count, 0) + 1
+    failed = db.execute(
+        update(CrawlJob)
+        .where(
+            running_expired,
+            CrawlJob.cancel_requested.is_(False),
+            func.coalesce(CrawlJob.max_retries, 2) <= retry_count,
+        )
+        .values(
+            status=JobStatus.FAILED.value,
+            retry_count=retry_count,
+            worker_id=None,
+            lease_until=None,
+            next_run_at=None,
+            finished_at=now,
+            error_code="LEASE_EXPIRED",
+            error_message="任务 worker 租约已过期，已达到最大重试次数",
+        )
+    ).rowcount
+    retry_wait = db.execute(
+        update(CrawlJob)
+        .where(
+            running_expired,
+            CrawlJob.cancel_requested.is_(False),
+            func.coalesce(CrawlJob.max_retries, 2) > retry_count,
+        )
+        .values(
+            status=JobStatus.RETRY_WAIT.value,
+            retry_count=retry_count,
+            worker_id=None,
+            lease_until=None,
+            next_run_at=now,
+            finished_at=None,
+            error_code="LEASE_EXPIRED",
+            error_message="任务 worker 租约已过期，等待重新执行",
+        )
+    ).rowcount
+    db.commit()
+    return int(cancelled or 0) + int(failed or 0) + int(retry_wait or 0)
 
 
 def renew_lease(
@@ -369,7 +450,155 @@ def compute_backoff_seconds(attempt: int, base: float = 1.0, cap: float = 60.0) 
     return max(0.0, raw + jitter)
 
 
-# ---------- S2 文档导入 Repository ----------
+# ---------- 仓储协同与库存 ----------
+
+
+def create_sku(db: Session, *, product_id: int, sku_code: str, variant_label: str | None = None, barcode: str | None = None, unit: str = "件") -> ProductSku:
+    if db.get(Product, product_id) is None:
+        raise ValueError("PRODUCT_NOT_FOUND")
+    if db.scalar(select(ProductSku).where(ProductSku.sku_code == sku_code)) is not None:
+        raise ValueError("SKU_CODE_EXISTS")
+    sku = ProductSku(product_id=product_id, sku_code=sku_code, variant_label=variant_label, barcode=barcode, unit=unit)
+    db.add(sku)
+    db.commit()
+    db.refresh(sku)
+    return sku
+
+
+def create_warehouse(db: Session, *, code: str, name: str, warehouse_type: str, integration_mode: str = "manual", external_ref: str | None = None) -> Warehouse:
+    if db.scalar(select(Warehouse).where(Warehouse.code == code)) is not None:
+        raise ValueError("WAREHOUSE_CODE_EXISTS")
+    warehouse = Warehouse(code=code, name=name, warehouse_type=warehouse_type, integration_mode=integration_mode, external_ref=external_ref)
+    db.add(warehouse)
+    db.commit()
+    db.refresh(warehouse)
+    return warehouse
+
+
+def _inbound_response_data(order: InboundOrder, lines: list[InboundLine]) -> dict:
+    return {
+        "id": order.id,
+        "warehouse_id": order.warehouse_id,
+        "reference_no": order.reference_no,
+        "status": order.status,
+        "note": order.note,
+        "lines": [
+            {
+                "id": line.id,
+                "sku_id": line.sku_id,
+                "expected_qty": line.expected_qty,
+                "received_qty": line.received_qty if order.status != "expected" else None,
+                "damaged_qty": line.damaged_qty,
+                "accepted_qty": (line.received_qty - line.damaged_qty) if order.status == "confirmed" else None,
+                "difference": (line.received_qty - line.expected_qty) if order.status != "expected" else None,
+            }
+            for line in lines
+        ],
+        "created_at": order.created_at,
+        "received_at": order.received_at,
+        "confirmed_at": order.confirmed_at,
+    }
+
+
+def create_inbound(db: Session, *, warehouse_id: int, reference_no: str, lines: list[dict], note: str | None = None, created_by: str | None = None) -> InboundOrder:
+    warehouse = db.get(Warehouse, warehouse_id)
+    if warehouse is None:
+        raise ValueError("WAREHOUSE_NOT_FOUND")
+    if not warehouse.is_active:
+        raise ValueError("WAREHOUSE_INACTIVE")
+    if db.scalar(select(InboundOrder).where(InboundOrder.reference_no == reference_no)) is not None:
+        raise ValueError("INBOUND_REFERENCE_EXISTS")
+    sku_ids = [int(item["sku_id"]) for item in lines]
+    if len(sku_ids) != len(set(sku_ids)):
+        raise ValueError("DUPLICATE_SKU")
+    if any(db.get(ProductSku, sku_id) is None or not db.get(ProductSku, sku_id).is_active for sku_id in sku_ids):
+        raise ValueError("SKU_NOT_FOUND")
+    order = InboundOrder(warehouse_id=warehouse_id, reference_no=reference_no, note=note, created_by=created_by)
+    db.add(order)
+    db.flush()
+    for item in lines:
+        db.add(InboundLine(inbound_order_id=order.id, sku_id=item["sku_id"], expected_qty=item["expected_qty"]))
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+def get_inbound(db: Session, *, inbound_id: int) -> tuple[InboundOrder, list[InboundLine]] | None:
+    order = db.get(InboundOrder, inbound_id)
+    if order is None:
+        return None
+    lines = db.scalars(select(InboundLine).where(InboundLine.inbound_order_id == inbound_id).order_by(InboundLine.id)).all()
+    return order, lines
+
+
+def receive_inbound(db: Session, *, inbound_id: int, lines: list[dict], idempotency_key: str | None = None, payload_hash: str | None = None) -> tuple[InboundOrder, list[InboundLine]]:
+    result = get_inbound(db, inbound_id=inbound_id)
+    if result is None:
+        raise ValueError("INBOUND_NOT_FOUND")
+    order, inbound_lines = result
+    if order.status != "expected":
+        if order.receive_idempotency_key == idempotency_key and order.receive_payload_hash == payload_hash:
+            return order, inbound_lines
+        raise ValueError("INBOUND_ALREADY_RECEIVED")
+    by_sku = {line.sku_id: line for line in inbound_lines}
+    if set(by_sku) != {int(item["sku_id"]) for item in lines}:
+        raise ValueError("INBOUND_LINES_MISMATCH")
+    for item in lines:
+        if item["damaged_qty"] > item["received_qty"]:
+            raise ValueError("DAMAGED_QTY_INVALID")
+        line = by_sku[int(item["sku_id"])]
+        line.received_qty = item["received_qty"]
+        line.damaged_qty = item["damaged_qty"]
+    order.status = "received"
+    order.received_at = _now()
+    order.receive_idempotency_key = idempotency_key
+    order.receive_payload_hash = payload_hash
+    db.commit()
+    return get_inbound(db, inbound_id=inbound_id)  # type: ignore[return-value]
+
+
+def confirm_inbound(db: Session, *, inbound_id: int, confirmed_by: str | None = None, idempotency_key: str | None = None) -> tuple[InboundOrder, list[InboundLine]]:
+    result = get_inbound(db, inbound_id=inbound_id)
+    if result is None:
+        raise ValueError("INBOUND_NOT_FOUND")
+    order, lines = result
+    if order.status == "confirmed":
+        return order, lines
+    if order.status != "received":
+        raise ValueError("INVALID_INBOUND_STATE")
+    order.confirm_idempotency_key = idempotency_key
+    order.confirm_payload_hash = hashlib.sha256((idempotency_key or "confirm").encode()).hexdigest()
+    for line in lines:
+        accepted = line.received_qty - line.damaged_qty
+        key = f"inbound:{order.id}:line:{line.id}:confirm"
+        transaction = db.scalar(select(InventoryTransaction).where(InventoryTransaction.idempotency_key == key))
+        if transaction is None:
+            db.add(InventoryTransaction(inbound_order_id=order.id, warehouse_id=order.warehouse_id, sku_id=line.sku_id, quantity_delta=accepted, movement_type="inbound_confirm", idempotency_key=key, created_by=confirmed_by))
+            balance = db.scalar(select(InventoryBalance).where(InventoryBalance.warehouse_id == order.warehouse_id, InventoryBalance.sku_id == line.sku_id))
+            if balance is None:
+                balance = InventoryBalance(warehouse_id=order.warehouse_id, sku_id=line.sku_id, on_hand_qty=0)
+                db.add(balance)
+            balance.on_hand_qty += accepted
+    order.status = "confirmed"
+    order.confirmed_at = _now()
+    db.commit()
+    return get_inbound(db, inbound_id=inbound_id)  # type: ignore[return-value]
+
+
+def list_inventory(db: Session, *, warehouse_id: int | None = None, sku_id: int | None = None, page: int = 1, page_size: int = 20) -> tuple[list[dict], int]:
+    filters = []
+    if warehouse_id is not None:
+        filters.append(InventoryBalance.warehouse_id == warehouse_id)
+    if sku_id is not None:
+        filters.append(InventoryBalance.sku_id == sku_id)
+    total = db.scalar(select(func.count(InventoryBalance.id)).where(*filters)) or 0
+    rows = db.execute(select(InventoryBalance, Warehouse, ProductSku).join(Warehouse, Warehouse.id == InventoryBalance.warehouse_id).join(ProductSku, ProductSku.id == InventoryBalance.sku_id).where(*filters).order_by(InventoryBalance.id).offset((page - 1) * page_size).limit(page_size)).all()
+    return [
+        {"warehouse_id": balance.warehouse_id, "warehouse_code": warehouse.code, "sku_id": balance.sku_id, "sku_code": sku.sku_code, "product_id": sku.product_id, "on_hand_qty": balance.on_hand_qty, "updated_at": balance.updated_at}
+        for balance, warehouse, sku in rows
+    ], int(total)
+
+
 
 
 def upsert_document(

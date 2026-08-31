@@ -14,9 +14,12 @@
 | S3 RAG 客服问答 | 本地假 Embedder + 内存向量库（JSON 持久化）、top_k + 分数阈值、引用与无答案兜底 |
 | S4 CLI 与设置 | `python -m app.cli` 子命令、`GET /api/settings` 运行时配置 |
 | S5 受控 Agent | 只读工具白名单、JSON Schema 服务端校验、限流、审计日志 |
-| S6 数据库迁移 | Alembic baseline、状态感知初始化、幂等升级、legacy 库 `stamp head` |
+| S6 数据库迁移 | Alembic baseline、状态感知初始化、幂等升级、legacy 库修复迁移 |
+| S7 服务稳定性 | worker 生命周期、lease 恢复、readiness、请求 ID、统一错误兜底 |
+| S7 安全硬化 | 上传签名/路径/SHA 校验、Agent 配额、审计摘要脱敏、可选 API Key |
+| 仓储协同 MVP | SKU、自有/第三方仓库、预计入库、仓库实收、差异确认、库存流水与余额 |
 
-未实现（明确剔除）：云 LLM / Embedding、Redis/Celery、外部向量库、多租户/权限/审计（除 Agent 调用外）、真实平台反爬、自动下单/支付/改价/删除。
+未实现（明确剔除）：云 LLM / Embedding、Redis/Celery、外部向量库、完整 ERP/WMS、真实平台交易写入、自动下单/支付/退款/改价/取消、完整多租户/RBAC、真实平台反爬。
 
 ## 启动
 
@@ -49,7 +52,7 @@ python -m uvicorn app.main:app --reload
 DATABASE_URL=mysql+pymysql://dianshang:dianshang@localhost:3306/dianshang?charset=utf8mb4
 ```
 
-然后用 `docker compose up -d mysql` 启动本地 MySQL。新库或已迁移库使用 `alembic upgrade head`；已有 legacy 数据库先执行 `alembic stamp head` 标记 baseline，再按需执行后续迁移。`python init_db.py` 和 `python -m app.cli init-db` 会按数据库状态自动选择初始化方式。
+然后用 `docker compose up -d mysql` 启动本地 MySQL。新库或已迁移库使用 `alembic upgrade head`；已有 legacy 数据库不要直接执行 `alembic stamp head`，使用 `python -m app.cli init-db`，它会标记 0001 baseline 后执行后续修复迁移。`python init_db.py` 和 `python -m app.cli init-db` 会按数据库状态自动选择初始化方式。
 
 ## 数据库迁移（Alembic，S6）
 
@@ -67,8 +70,8 @@ alembic history --verbose
 alembic revision --autogenerate -m "add orders table"
 alembic upgrade head
 
-# 已有 legacy 库：只标记 baseline，不重复创建已有表
-alembic stamp head
+# 已有 legacy 数据库：通常由 init-db 自动处理
+python -m app.cli init-db
 ```
 
 迁移配置：
@@ -186,6 +189,28 @@ curl -X POST http://127.0.0.1:8000/api/agent/invoke \
 
 Alembic 已是当前生产 schema 管理路径；`Base.metadata.create_all` 仅用于测试 fixture 和演示兜底，不列为生产替换项。
 
+## 仓储协同 MVP
+
+项目当前包含轻量仓储协同后端，不做完整 WMS。核心流程为：
+
+```text
+运营创建预计入库 → 仓库反馈实际 SKU/数量/破损 → 运营确认 → 库存流水与余额更新
+```
+
+支持自有仓和第三方仓的统一记录，库存确认使用事务和稳定幂等键，审核前不改变库存。当前接口：
+
+| Method | Path | 说明 |
+|---|---|---|
+| POST/GET | `/api/skus` | 创建/查询商品 SKU |
+| POST/GET | `/api/warehouses` | 创建/查询自有或第三方仓库 |
+| POST | `/api/inbounds` | 创建预计入库单 |
+| GET | `/api/inbounds/{id}` | 查看入库明细和差异 |
+| POST | `/api/inbounds/{id}/receive` | 提交仓库实收数量和破损数量 |
+| POST | `/api/inbounds/{id}/confirm` | 运营确认并更新库存 |
+| GET | `/api/inventory` | 查询仓库-SKU 库存余额 |
+
+当前只做手工/模拟闭环，不连接真实淘宝、抖音或京东 API。平台订单、发货、退货和第三方仓库回传后续通过统一事件协议接入，系统只感知状态并更新内部库存，不自动下单、退款、改价或取消订单。
+
 ## 演示与验收
 
 ```bash
@@ -196,15 +221,34 @@ python scripts/demo.py
 python -m pytest -q
 ```
 
-当前统计：第一周 9 + S1 15 + S2 14 + S3 15 + S4 5 + S5 21 + S6 7 = **86 passed**（以当前工作区 `python -m pytest -q` 为准）。
+当前统计：第一周 9 + S1 15 + S2 14 + S3 15 + S4 5 + S5 21 + S6 7 + S7 稳定性 5 + 仓储协同 3 = **99 passed**（以当前工作区 `python -m pytest -q` 为准）。
 
-## 后续规划（S7，未实现）
+## S7 当前进度
 
-- 服务稳定性：统一异常处理、启动依赖检查、结构化日志、优雅停机与 worker 生命周期。
-- 安全边界：API 鉴权、tenant 隔离、Agent 配额与上传内容安全校验。
+### 已完成：服务稳定性第一批
+
+- FastAPI lifespan 已接入后台 dispatcher / executor 的启动与优雅停止。
+- queued、到期 retry_wait 和 lease 过期任务可由 dispatcher 扫描恢复。
+- 采集、文档导入和文档索引统一使用后台任务提交入口。
+- 新增 `/ready` 依赖就绪检查，并为请求补充 request ID 与通用内部错误兜底。
+- 新增任务 lease 恢复、worker 生命周期和 readiness 回归测试。
+
+### 已完成：仓储协同 MVP 后端
+
+- 新增 SKU、仓库、预计入库、实收反馈、差异计算、库存流水和库存余额。
+- 支持自有仓与第三方仓的统一数据模型。
+- 运营确认后才写入库存，确认使用稳定幂等键，重复确认不会重复增加库存。
+- 首页已增加仓储协同演示区域。
+
+### 后续规划
+
+- 剩余稳定性增强：启动依赖检查、结构化日志、指标和更严格的停机观测。
+- 内部权限：员工登录、角色、店铺/仓库数据范围和审批流；当前 API Key 仅为可选服务调用凭证。
+- 仓储增强：收货幂等键完整契约、出库、发货、退货、库存预占和对账。
+- 外部信息感知：本地 JSON/CSV/模拟事件 → 一个真实平台的只读轮询与 webhook 补偿。
 - RAG 固定问答集评测：命中率、无答案率、引用覆盖率和响应耗时。
 - 生产适配器：真实 Embedding、LLM 和外部向量库。
-- 业务扩展：商品与订单关联、多模态商品信息；写入型 Agent 动作必须经过显式审批。
+- 业务扩展：订单、多模态商品信息；写入型 Agent 动作必须经过显式审批。
 
 ## 文档
 

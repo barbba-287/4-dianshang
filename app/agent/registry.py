@@ -111,10 +111,12 @@ class AgentToolRegistry:
     def unregister(self, name: str) -> None:
         with self._lock:
             self._tools.pop(name, None)
-            self._counters.pop((name, "default"), None)
+            for key in [key for key in self._counters if key[0] == name]:
+                self._counters.pop(key, None)
 
     def get(self, name: str) -> AgentTool | None:
-        return self._tools.get(name)
+        with self._lock:
+            return self._tools.get(name)
 
     def list_tools(self, *, include_readonly_only: bool = False) -> list[AgentTool]:
         with self._lock:
@@ -177,15 +179,18 @@ class AgentToolRegistry:
             )
 
     def _check_rate_limit(self, name: str, tenant_id: str, limit: int) -> None:
+        if limit <= 0:
+            raise ValueError("工具限流值必须为正数")
         key = (name, tenant_id)
         now = monotonic()
         window = [t for t in self._counters.get(key, []) if now - t < 60.0]
-        window.append(now)
-        self._counters[key] = window
-        if len(window) > limit:
+        if len(window) >= limit:
+            self._counters[key] = window
             raise ToolNotAllowed(
                 f"工具 {name} 在 60s 内调用次数超过 {limit}",
             )
+        window.append(now)
+        self._counters[key] = window
 
 
 default_registry = AgentToolRegistry()

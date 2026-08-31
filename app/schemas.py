@@ -1,8 +1,4 @@
-"""电商商品与客服工作台的输入输出数据模型。
-
-用途：使用 Pydantic 约束采集商品字段，并统一 FastAPI 商品、价格历史
-和采集任务接口的响应结构，隔离外部数据与数据库模型。
-"""
+"""电商商品与客服工作台的输入输出数据模型。"""
 
 from datetime import datetime
 from decimal import Decimal
@@ -72,8 +68,6 @@ class CrawlJobResponse(BaseModel):
 
 
 class CrawlJobDetailResponse(CrawlJobResponse):
-    """任务详情（S1）：相比 CrawlJobResponse 暴露并发控制相关字段。"""
-
     type: str
     max_retries: int
     attempt: int
@@ -82,9 +76,6 @@ class CrawlJobDetailResponse(CrawlJobResponse):
     next_run_at: datetime | None
     run_id: str | None
     cancel_requested: bool
-
-
-# ---------- S2 文档相关 ---------- =========
 
 
 class DocumentUploadResponse(BaseModel):
@@ -113,9 +104,6 @@ class DocumentVersionResponse(BaseModel):
     chunk_count: int | None = None
 
 
-# ---------- S3 RAG ----------
-
-
 class RagCitation(BaseModel):
     chunk_id: int
     document_id: int
@@ -141,9 +129,6 @@ class RagQueryResponse(BaseModel):
     retrieval_diagnostics: dict
 
 
-# ---------- S4 设置端点 ----------
-
-
 class SettingsResponse(BaseModel):
     app_name: str
     database_url: str
@@ -160,9 +145,6 @@ class SettingsResponse(BaseModel):
     document_count: int
     chunk_count: int
     vector_record_count: int
-
-
-# ---------- S5 Agent ----------
 
 
 class AgentActionRequest(BaseModel):
@@ -187,3 +169,107 @@ class AgentToolSpec(BaseModel):
     input_schema: dict
     output_schema: dict | None = None
     max_calls_per_minute: int
+
+
+class WarehouseCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=128)
+    warehouse_type: str = Field(default="own", pattern="^(own|third_party)$")
+    integration_mode: str = Field(default="manual", pattern="^(manual|csv|api)$")
+    external_ref: str | None = Field(default=None, max_length=128)
+
+
+class WarehouseResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    name: str
+    warehouse_type: str
+    integration_mode: str
+    external_ref: str | None
+    is_active: bool
+    created_at: datetime
+
+
+class ProductSkuCreate(BaseModel):
+    product_id: int = Field(gt=0)
+    sku_code: str = Field(min_length=1, max_length=128)
+    variant_label: str | None = Field(default=None, max_length=255)
+    barcode: str | None = Field(default=None, max_length=64)
+    unit: str = Field(default="件", min_length=1, max_length=32)
+
+
+class ProductSkuResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    product_id: int
+    sku_code: str
+    variant_label: str | None
+    barcode: str | None
+    unit: str
+    is_active: bool
+
+
+class InboundLineCreate(BaseModel):
+    sku_id: int = Field(gt=0)
+    expected_qty: int = Field(gt=0)
+
+
+class InboundCreate(BaseModel):
+    warehouse_id: int = Field(gt=0)
+    reference_no: str = Field(min_length=1, max_length=64)
+    lines: list[InboundLineCreate] = Field(min_length=1)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class InboundReceiveLine(BaseModel):
+    sku_id: int = Field(gt=0)
+    received_qty: int = Field(ge=0)
+    damaged_qty: int = Field(default=0, ge=0)
+
+
+class InboundReceive(BaseModel):
+    lines: list[InboundReceiveLine] = Field(min_length=1)
+    note: str | None = Field(default=None, max_length=1000)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class InboundLineResponse(BaseModel):
+    id: int
+    sku_id: int
+    expected_qty: int
+    received_qty: int | None
+    damaged_qty: int
+    accepted_qty: int | None = None
+    difference: int | None = None
+
+
+class InboundResponse(BaseModel):
+    id: int
+    warehouse_id: int
+    reference_no: str
+    status: str
+    note: str | None
+    lines: list[InboundLineResponse]
+    created_at: datetime
+    received_at: datetime | None
+    confirmed_at: datetime | None
+
+
+class InventoryItemResponse(BaseModel):
+    warehouse_id: int
+    warehouse_code: str
+    sku_id: int
+    sku_code: str
+    product_id: int
+    on_hand_qty: int
+    updated_at: datetime
+
+
+class InventoryPage(BaseModel):
+    items: list[InventoryItemResponse]
+    page: int
+    page_size: int
+    total: int

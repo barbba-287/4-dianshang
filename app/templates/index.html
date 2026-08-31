@@ -9,43 +9,201 @@
     header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
     button, input { padding: .6rem .8rem; border: 1px solid #cbd5e1; border-radius: .4rem; }
     button { background: #2563eb; color: white; cursor: pointer; border: 0; }
+    button:disabled { background: #94a3b8; cursor: wait; }
     #products { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-top: 1rem; }
     .card { padding: 1rem; border: 1px solid #e2e8f0; border-radius: .6rem; box-shadow: 0 1px 2px #0000000d; }
     .price { color: #dc2626; font-size: 1.2rem; font-weight: 700; }
-    .muted { color: #64748b; }
+    #warehouse { margin-top: 2rem; padding-top: 1rem; border-top: 2px solid #e2e8f0; }
+    .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin: .6rem 0; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; margin-top: .8rem; }
+    th, td { padding: .55rem; border-bottom: 1px solid #e2e8f0; text-align: left; }
+    .ok { color: #15803d; } .warn { color: #b45309; }
   </style>
 </head>
 <body>
-  <header><h1>电商商品工作台</h1><button id="crawl">采集样例商品</button></header>
+  <header><h1>电商商品工作台</h1><button id="crawl" type="button">采集样例商品</button></header>
   <p id="message" class="muted">点击按钮从本地 fixture 采集商品。</p>
-  <form id="search"><input id="keyword" placeholder="搜索商品名称"><button>搜索</button></form>
-  <section id="products"></section>
+  <form id="search"><input id="keyword" placeholder="搜索商品名称"><button type="submit">搜索</button></form>
+  <section id="warehouse">
+    <h2>仓储协同</h2>
+    <p id="warehouse-message" class="muted">创建仓库和 SKU 后，可模拟实收并确认入账。</p>
+    <div class="row">
+      <input id="warehouse-code" placeholder="仓库编码，例如 OWN-01">
+      <input id="warehouse-name" placeholder="仓库名称">
+      <select id="warehouse-type"><option value="own">自有仓</option><option value="third_party">第三方仓</option></select>
+      <button id="create-warehouse" type="button">创建仓库</button>
+      <select id="warehouse-select"></select>
+    </div>
+    <div class="row">
+      <select id="sku-select"></select>
+      <input id="expected-qty" type="number" min="1" value="10" placeholder="预计数量">
+      <input id="inbound-ref" placeholder="入库单号">
+      <button id="create-inbound" type="button">创建预计入库</button>
+    </div>
+    <div class="row">
+      <input id="received-qty" type="number" min="0" value="10" placeholder="实收数量">
+      <input id="damaged-qty" type="number" min="0" value="0" placeholder="破损数量">
+      <button id="receive-inbound" type="button" disabled>模拟仓库实收</button>
+      <button id="confirm-inbound" type="button" disabled>运营确认入账</button>
+    </div>
+    <div id="inbound-result"></div>
+    <div class="table-wrap"><table><thead><tr><th>仓库</th><th>SKU</th><th>商品</th><th>库存</th></tr></thead><tbody id="inventory-items"></tbody></table></div>
+  </section>
   <script>
     const products = document.querySelector('#products');
     const message = document.querySelector('#message');
+    const crawlButton = document.querySelector('#crawl');
+
     function escapeHtml(value) {
       return String(value ?? '').replace(/[&<>'"]/g, char => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
       }[char]));
     }
+
+    function errorMessage(response, body) {
+      const detail = body && body.detail;
+      if (detail && typeof detail === 'object') {
+        const code = detail.code ? ` [${detail.code}]` : '';
+        return `${detail.message || '请求失败'}${code}`;
+      }
+      if (typeof detail === 'string' && detail) return detail;
+      if (typeof body === 'string' && body) return body;
+      return `请求失败（HTTP ${response.status}）`;
+    }
+
+    async function readResponse(response) {
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) return response.json();
+      return response.text();
+    }
+
     function render(data) {
+      if (!data || !Array.isArray(data.items)) throw new Error('商品列表响应格式错误');
       products.innerHTML = data.items.map(p => `<article class="card"><h2>${escapeHtml(p.title)}</h2><p class="muted">${escapeHtml(p.category || '未分类')} · ${escapeHtml(p.rating ?? '-')} 分</p><p>${escapeHtml(p.description || '')}</p><p class="price">￥${Number(p.current_price).toFixed(2)}</p><a href="${escapeHtml(p.url)}" target="_blank" rel="noopener noreferrer">商品链接</a></article>`).join('');
       message.textContent = `共 ${data.total} 件商品`;
     }
+
     async function load() {
-      const keyword = document.querySelector('#keyword').value.trim();
-      const response = await fetch(`/api/products?page_size=100${keyword ? `&keyword=${encodeURIComponent(keyword)}` : ''}`);
-      if (!response.ok) { message.textContent = '加载失败'; return; }
-      render(await response.json());
+      try {
+        const keyword = document.querySelector('#keyword').value.trim();
+        const response = await fetch(`/api/products?page_size=100${keyword ? `&keyword=${encodeURIComponent(keyword)}` : ''}`);
+        const body = await readResponse(response);
+        if (!response.ok) throw new Error(errorMessage(response, body));
+        render(body);
+        return true;
+      } catch (error) {
+        message.textContent = `加载失败：${error.message || '网络错误'}`;
+        return false;
+      }
     }
-    document.querySelector('#crawl').onclick = async () => {
+
+    async function crawl() {
+      crawlButton.disabled = true;
       message.textContent = '正在采集...';
-      const response = await fetch('/api/crawl/fixture', { method: 'POST' });
-      message.textContent = response.ok ? '采集完成' : '采集失败';
-      await load();
+      try {
+        const response = await fetch('/api/crawl', { method: 'POST' });
+        const body = await readResponse(response);
+        if (!response.ok) throw new Error(errorMessage(response, body));
+        if (!body || typeof body.id !== 'number') throw new Error('采集任务响应格式错误');
+
+        const jobId = body.id;
+        message.textContent = `采集任务已提交（任务 #${jobId}）...`;
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          await new Promise(resolve => setTimeout(resolve, 250));
+          const statusResponse = await fetch(`/api/crawl/${jobId}`);
+          const statusBody = await readResponse(statusResponse);
+          if (!statusResponse.ok) throw new Error(errorMessage(statusResponse, statusBody));
+          if (statusBody.status === 'succeeded') {
+            message.textContent = '采集完成';
+            await load();
+            return;
+          }
+          if (['failed', 'cancelled'].includes(statusBody.status)) {
+            const code = statusBody.error_code ? ` [${statusBody.error_code}]` : '';
+            throw new Error(`${statusBody.error_message || `任务${statusBody.status}`} ${code}`);
+          }
+          message.textContent = `正在采集（任务 #${jobId}，${statusBody.status}）...`;
+        }
+        throw new Error('采集等待超时，请稍后查看任务状态');
+      } catch (error) {
+        message.textContent = `采集失败：${error.message || '网络错误'}`;
+      } finally {
+        crawlButton.disabled = false;
+      }
+    }
+
+    const warehouseMessage = document.querySelector('#warehouse-message');
+    const warehouseSelect = document.querySelector('#warehouse-select');
+    const skuSelect = document.querySelector('#sku-select');
+    const receiveButton = document.querySelector('#receive-inbound');
+    const confirmButton = document.querySelector('#confirm-inbound');
+    let currentInbound = null;
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, options);
+      const body = await readResponse(response);
+      if (!response.ok) throw new Error(errorMessage(response, body));
+      return body;
+    }
+
+    function renderInventory(data) {
+      document.querySelector('#inventory-items').innerHTML = data.items.map(item =>
+        `<tr><td>${escapeHtml(item.warehouse_code)}</td><td>${escapeHtml(item.sku_code)}</td><td>${escapeHtml(item.product_id)}</td><td class="ok">${escapeHtml(item.on_hand_qty)}</td></tr>`
+      ).join('');
+    }
+
+    async function loadWarehouseData() {
+      try {
+        const [warehouses, skus, inventory] = await Promise.all([
+          api('/api/warehouses'), api('/api/skus'), api('/api/inventory?page_size=100')
+        ]);
+        warehouseSelect.innerHTML = warehouses.map(w => `<option value="${w.id}">${escapeHtml(w.code)} · ${escapeHtml(w.name)}</option>`).join('');
+        skuSelect.innerHTML = skus.map(s => `<option value="${s.id}">${escapeHtml(s.sku_code)} · ${escapeHtml(s.variant_label || '')}</option>`).join('');
+        renderInventory(inventory);
+      } catch (error) { warehouseMessage.textContent = `仓储数据加载失败：${error.message || '网络错误'}`; }
+    }
+
+    document.querySelector('#create-warehouse').onclick = async () => {
+      try {
+        await api('/api/warehouses', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+          code: document.querySelector('#warehouse-code').value.trim(), name: document.querySelector('#warehouse-name').value.trim(), warehouse_type: document.querySelector('#warehouse-type').value
+        })});
+        warehouseMessage.textContent = '仓库创建成功'; await loadWarehouseData();
+      } catch (error) { warehouseMessage.textContent = `创建仓库失败：${error.message || '网络错误'}`; }
+    };
+
+    document.querySelector('#create-inbound').onclick = async () => {
+      try {
+        const body = await api('/api/inbounds', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+          warehouse_id: Number(warehouseSelect.value), reference_no: document.querySelector('#inbound-ref').value.trim() || `WEB-${Date.now()}`,
+          lines: [{sku_id: Number(skuSelect.value), expected_qty: Number(document.querySelector('#expected-qty').value)}]
+        })});
+        currentInbound = body; receiveButton.disabled = false; confirmButton.disabled = true; warehouseMessage.textContent = `入库单 #${body.id} 已创建`;
+      } catch (error) { warehouseMessage.textContent = `创建入库失败：${error.message || '网络错误'}`; }
+    };
+
+    receiveButton.onclick = async () => {
+      if (!currentInbound) return;
+      try {
+        currentInbound = await api(`/api/inbounds/${currentInbound.id}/receive`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+          lines: [{sku_id: Number(skuSelect.value), received_qty: Number(document.querySelector('#received-qty').value), damaged_qty: Number(document.querySelector('#damaged-qty').value)}]
+        })});
+        document.querySelector('#inbound-result').innerHTML = currentInbound.lines.map(line => `<p class="warn">预计 ${line.expected_qty}，实收 ${line.received_qty}，差异 ${line.difference}</p>`).join('');
+        receiveButton.disabled = true; confirmButton.disabled = false;
+      } catch (error) { warehouseMessage.textContent = `收货反馈失败：${error.message || '网络错误'}`; }
+    };
+
+    confirmButton.onclick = async () => {
+      if (!currentInbound) return;
+      try {
+        currentInbound = await api(`/api/inbounds/${currentInbound.id}/confirm`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+        warehouseMessage.textContent = '运营确认完成，库存已更新'; confirmButton.disabled = true; await loadWarehouseData();
+      } catch (error) { warehouseMessage.textContent = `确认入账失败：${error.message || '网络错误'}`; }
     };
     document.querySelector('#search').onsubmit = event => { event.preventDefault(); load(); };
     load();
+    loadWarehouseData();
   </script>
 </body>
 </html>

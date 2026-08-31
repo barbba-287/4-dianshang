@@ -72,7 +72,7 @@ def test_alembic_current_shows_head(tmp_path):
 
     current = _run_alembic(["current"], database_url=db_url)
     assert current.returncode == 0
-    assert "0001_baseline" in current.stdout
+    assert "0003_inventory_mvp" in current.stdout
     assert "head" in current.stdout
 
 
@@ -85,7 +85,7 @@ def test_alembic_upgrade_is_idempotent(tmp_path):
 
 
 def test_alembic_stamp_head_marks_existing_db(tmp_path):
-    """已有表但 alembic_version 不存在的场景：stamp head 不重建表。"""
+    """直接 stamp 仍只记录版本，旧库应使用 init_db 自动修复。"""
     db_url = _new_temp_sqlite(tmp_path)
     # 手工建一张表模拟 week1 legacy
     from sqlalchemy import create_engine
@@ -128,7 +128,7 @@ def test_init_db_py_uses_alembic(tmp_path, monkeypatch):
 
 
 def test_init_db_py_on_legacy_db_uses_stamp(tmp_path, monkeypatch):
-    """legacy 库（业务表存在但无 alembic_version）→ init_db.py 走 stamp head。"""
+    """不完整 legacy 库先标记 0001，再应用修复迁移。"""
     db_path = tmp_path / "legacy.db"
     db_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", db_url)
@@ -152,11 +152,13 @@ def test_init_db_py_on_legacy_db_uses_stamp(tmp_path, monkeypatch):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "legacy" in result.stdout.lower() or "stamp" in result.stdout.lower()
 
-    # 表还在（没被删）+ alembic_version 被创建
+    # 业务表保留，且缺失字段已由 0002 补齐
     insp = inspect(eng)
     tables = set(insp.get_table_names())
     assert "products" in tables
     assert "alembic_version" in tables
+    columns = {column["name"] for column in insp.get_columns("crawl_jobs")}
+    assert {"type", "max_retries", "attempt", "cancel_requested"}.issubset(columns)
 
 
 def test_init_db_py_on_migrated_db_is_idempotent(tmp_path, monkeypatch):

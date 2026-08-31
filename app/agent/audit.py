@@ -43,11 +43,20 @@ class AgentAuditLogger:
                     fp.write(line + "\n")
 
     def list_records(self, limit: int = 100) -> list[dict]:
-        if self._path is None or not self._path.exists():
+        if limit <= 0 or self._path is None or not self._path.exists():
             return []
-        with self._path.open("r", encoding="utf-8") as fp:
-            lines = fp.readlines()[-limit:]
-        return [json.loads(line) for line in lines if line.strip()]
+        with self._lock:
+            with self._path.open("r", encoding="utf-8") as fp:
+                lines = fp.readlines()[-limit:]
+        records: list[dict] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                self._logger.warning("跳过损坏的 Agent 审计记录")
+        return records
 
 
 def now_iso() -> str:
@@ -55,8 +64,21 @@ def now_iso() -> str:
 
 
 def summarise(payload: Any, *, max_len: int = 200) -> str:
+    """序列化摘要并遮蔽常见敏感字段。"""
+    sensitive = {"password", "passwd", "token", "secret", "authorization", "cookie", "api_key", "key"}
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: "[REDACTED]" if key.lower() in sensitive else scrub(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [scrub(item) for item in value]
+        return value
+
     try:
-        text = json.dumps(payload, ensure_ascii=False)
+        text = json.dumps(scrub(payload), ensure_ascii=False)
     except TypeError:
         text = repr(payload)
     if len(text) > max_len:

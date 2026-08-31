@@ -155,6 +155,122 @@ class DocumentProductLink(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class ProductSku(Base):
+    __tablename__ = "product_skus"
+    __table_args__ = (
+        UniqueConstraint("sku_code", name="uq_product_sku_code"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    sku_code: Mapped[str] = mapped_column(String(128), index=True)
+    variant_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    barcode: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    unit: Mapped[str] = mapped_column(String(32), default="件")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class Warehouse(Base):
+    __tablename__ = "warehouses"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_warehouse_code"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    warehouse_type: Mapped[str] = mapped_column(String(16), default="own")
+    integration_mode: Mapped[str] = mapped_column(String(16), default="manual")
+    external_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class InboundOrder(Base):
+    __tablename__ = "inbound_orders"
+    __table_args__ = (
+        UniqueConstraint("reference_no", name="uq_inbound_reference_no"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), index=True)
+    reference_no: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="expected", index=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    receive_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    receive_payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    confirm_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    confirm_payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class InboundLine(Base):
+    __tablename__ = "inbound_lines"
+    __table_args__ = (
+        UniqueConstraint("inbound_order_id", "sku_id", name="uq_inbound_line_sku"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    inbound_order_id: Mapped[int] = mapped_column(
+        ForeignKey("inbound_orders.id"), index=True
+    )
+    sku_id: Mapped[int] = mapped_column(ForeignKey("product_skus.id"), index=True)
+    expected_qty: Mapped[int] = mapped_column(Integer)
+    received_qty: Mapped[int] = mapped_column(Integer, default=0)
+    damaged_qty: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class InventoryTransaction(Base):
+    __tablename__ = "inventory_transactions"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_inventory_transaction_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    inbound_order_id: Mapped[int | None] = mapped_column(
+        ForeignKey("inbound_orders.id"), nullable=True, index=True
+    )
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), index=True)
+    sku_id: Mapped[int] = mapped_column(ForeignKey("product_skus.id"), index=True)
+    quantity_delta: Mapped[int] = mapped_column(Integer)
+    movement_type: Mapped[str] = mapped_column(String(32), default="inbound")
+    idempotency_key: Mapped[str] = mapped_column(String(160), index=True)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class InventoryBalance(Base):
+    __tablename__ = "inventory_balances"
+    __table_args__ = (
+        UniqueConstraint(
+            "warehouse_id", "sku_id", name="uq_inventory_balance_warehouse_sku"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), index=True)
+    sku_id: Mapped[int] = mapped_column(ForeignKey("product_skus.id"), index=True)
+    on_hand_qty: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 def init_db() -> None:
     settings.resolve_path("data").mkdir(parents=True, exist_ok=True)
     settings.resolve_path(settings.artifacts_dir).mkdir(parents=True, exist_ok=True)

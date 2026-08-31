@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.crawler import CrawlError
 from app.db import CrawlJob, SessionLocal
 from app.jobs import JobCancelled, JobClaimLost, JobStatus
 from app.repository import (
@@ -29,6 +30,7 @@ from app.repository import (
     renew_lease,
     request_cancel,
     retry_job,
+    recover_expired_jobs,
     upsert_product_batch,
 )
 
@@ -38,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 _executor: ThreadPoolExecutor | None = None
 _executor_lock = threading.Lock()
+_dispatch_stop: threading.Event | None = None
+_dispatch_thread: threading.Thread | None = None
+_accepting_jobs = True
 
 
 def get_executor() -> ThreadPoolExecutor:
@@ -53,13 +58,135 @@ def get_executor() -> ThreadPoolExecutor:
     return _executor
 
 
+def _submit_future(job_id: int) -> Future:
+    """提交一个尚未执行的任务，并记录 Future 供取消和 shutdown 使用。"""
+    global _executor
+    # Admission check and executor.submit must be one critical section so a
+    # shutdown cannot accept a future after it has stopped the dispatcher.
+    with _executor_lock:
+        if not _accepting_jobs:
+            raise RuntimeError("后台任务服务正在停止，不再接受新任务")
+        if _executor is None:
+            settings = get_settings()
+            _executor = ThreadPoolExecutor(
+                max_workers=settings.worker_concurrency,
+                thread_name_prefix="ds-job",
+            )
+        future = _executor.submit(_run_one_job, job_id, new_worker_id())
+        _attach_cancel_future(job_id, future)
+    # A very short task can finish before it is attached to the registry.
+    # Remove it here so wait_for_jobs() does not retain a completed Future.
+    if future.done():
+        _pop_cancel_future(job_id)
+    return future
+
+
+def _dispatch_loop(stop_event: threading.Event) -> None:
+    """扫描新任务和到期重试任务，确保任务不会停在 retry_wait。"""
+    settings = get_settings()
+    first_scan = True
+    while first_scan or not stop_event.wait(settings.worker_poll_seconds):
+        first_scan = False
+        db = SessionLocal()
+        try:
+            recovered = recover_expired_jobs(db)
+            if recovered:
+                logger.warning("recovered expired jobs", extra={"count": recovered})
+            now = datetime.utcnow()
+            rows = db.scalars(
+                select(CrawlJob.id)
+                .where(
+                    (CrawlJob.status == JobStatus.QUEUED.value)
+                    | (
+                        (CrawlJob.status == JobStatus.RETRY_WAIT.value)
+                        & (
+                            CrawlJob.next_run_at.is_(None)
+                            | (CrawlJob.next_run_at <= now)
+                        )
+                    )
+                )
+                .order_by(CrawlJob.id)
+                .limit(settings.worker_concurrency * 2)
+            ).all()
+        except Exception:
+            logger.exception("后台任务调度扫描失败")
+            rows = []
+        finally:
+            db.close()
+
+        with _cancel_futures_lock:
+            active_ids = set(_cancel_futures)
+        for job_id in rows:
+            if job_id in active_ids:
+                continue
+            try:
+                _submit_future(job_id)
+            except RuntimeError:
+                return
+            except Exception:
+                logger.exception("任务 %s 重新提交失败", job_id)
+
+
+def is_accepting_jobs() -> bool:
+    """返回当前 worker 是否接受新任务。"""
+    with _executor_lock:
+        return _accepting_jobs and _executor is not None
+
+
+def start_background_workers() -> None:
+    """启动任务调度线程；重复调用安全。"""
+    global _dispatch_stop, _dispatch_thread, _accepting_jobs
+    # Do not call get_executor while holding _executor_lock: get_executor
+    # acquires the same non-reentrant lock during lazy initialization.
+    get_executor()
+    with _executor_lock:
+        _accepting_jobs = True
+        if _dispatch_thread is not None and _dispatch_thread.is_alive():
+            return
+        _dispatch_stop = threading.Event()
+        _dispatch_thread = threading.Thread(
+            target=_dispatch_loop,
+            args=(_dispatch_stop,),
+            daemon=True,
+            name="ds-dispatcher",
+        )
+        _dispatch_thread.start()
+
+
+def stop_background_workers(timeout: float = 5.0) -> None:
+    """停止接收任务，等待有限时间后释放 executor。"""
+    global _executor, _dispatch_stop, _dispatch_thread, _accepting_jobs
+    with _executor_lock:
+        _accepting_jobs = False
+        stop_event = _dispatch_stop
+        dispatch_thread = _dispatch_thread
+        executor = _executor
+        _dispatch_stop = None
+        _dispatch_thread = None
+    if stop_event is not None:
+        stop_event.set()
+    if dispatch_thread is not None:
+        dispatch_thread.join(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _cancel_futures_lock:
+            futures = list(_cancel_futures.values())
+        if not futures:
+            break
+        if all(future.done() for future in futures):
+            break
+        time.sleep(0.05)
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
+    with _cancel_futures_lock:
+        _cancel_futures.clear()
+    with _executor_lock:
+        _executor = None
+
+
 def reset_executor() -> None:
     """测试中关闭 executor 并释放线程；不要在生产代码里调用。"""
-    global _executor
-    with _executor_lock:
-        if _executor is not None:
-            _executor.shutdown(wait=False, cancel_futures=True)
-            _executor = None
+    stop_background_workers(timeout=2.0)
 
 
 # ---------- 公共入口：提交与取消 ----------
@@ -85,8 +212,7 @@ def submit_crawl_fixture(
         payload={"fixture_path": str(fixture_path), "page_size": page_size},
         max_retries=max_retries,
     )
-    future = get_executor().submit(_run_one_job, job.id, new_worker_id())
-    _attach_cancel_future(job.id, future)
+    _submit_future(job.id)
     return job
 
 
@@ -113,8 +239,7 @@ def submit_document_import(
         },
         max_retries=max_retries,
     )
-    future = get_executor().submit(_run_one_job, job.id, new_worker_id())
-    _attach_cancel_future(job.id, future)
+    _submit_future(job.id)
     return job
 
 
@@ -143,14 +268,7 @@ def _pop_cancel_future(job_id: int) -> Future | None:
 
 
 def _run_one_job(job_id: int, worker_id: str) -> None:
-    """线程入口：claim + heartbeat + 执行 + finish/retry。
-
-    设计原则：
-    - claim 失败立即返回；
-    - 每次 DB 写操作前检查 cancel_requested；
-    - 后台心跳线程定期续约 lease_until；
-    - 异常统一走 retry_job。
-    """
+    """线程入口：claim + heartbeat + 执行 + finish/retry。"""
     settings = get_settings()
     db = SessionLocal()
     try:
@@ -183,21 +301,19 @@ def _run_one_job(job_id: int, worker_id: str) -> None:
                 _execute_document_index(db, job)
             else:
                 raise RuntimeError(f"未知任务类型: {type_}")
-            finish_job(db, job_id=job_id, worker_id=worker_id, cursor=str(job.cursor or ""))
-            logger.info("job %s succeeded", job_id)
-        except JobCancelled:
-            logger.info("job %s cancelled during execution", job_id)
+            if is_cancel_requested(db, job_id=job_id):
+                _cancel_job(db, job_id=job_id, worker_id=worker_id)
+            else:
+                finish_job(db, job_id=job_id, worker_id=worker_id, cursor=str(job.cursor or ""))
+                logger.info("job %s succeeded", job_id)
+        except (JobCancelled, CrawlError) as exc:
+            if getattr(exc, "code", None) == "CANCELLED" or isinstance(exc, JobCancelled):
+                _cancel_job(db, job_id=job_id, worker_id=worker_id)
+                logger.info("job %s cancelled during execution", job_id)
+            else:
+                _retry_after_rollback(db, job, worker_id, exc)
         except Exception as exc:  # noqa: BLE001 - 顶层兜底
-            logger.warning("job %s failed: %s", job_id, exc)
-            backoff = compute_backoff_seconds(job.attempt)
-            retry_job(
-                db,
-                job_id=job_id,
-                worker_id=worker_id,
-                error_code=type(exc).__name__,
-                error_message=str(exc)[:500],
-                backoff_seconds=backoff,
-            )
+            _retry_after_rollback(db, job, worker_id, exc)
         finally:
             stop_event.set()
             heartbeat.join(timeout=2)
@@ -205,6 +321,35 @@ def _run_one_job(job_id: int, worker_id: str) -> None:
         db.close()
         _pop_cancel_future(job_id)
 
+
+def _cancel_job(db: Session, *, job_id: int, worker_id: str) -> None:
+    db.rollback()
+    job = db.get(CrawlJob, job_id)
+    if job is None or job.worker_id != worker_id:
+        return
+    job.status = JobStatus.CANCELLED.value
+    job.cancel_requested = True
+    job.lease_until = None
+    job.finished_at = datetime.utcnow()
+    db.commit()
+
+
+def _retry_after_rollback(db: Session, job: CrawlJob, worker_id: str, exc: Exception) -> None:
+    db.rollback()
+    code = getattr(exc, "code", type(exc).__name__)
+    message = getattr(exc, "message", str(exc))
+    try:
+        retry_job(
+            db,
+            job_id=job.id,
+            worker_id=worker_id,
+            error_code=code,
+            error_message=message[:500],
+            backoff_seconds=compute_backoff_seconds(job.attempt),
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("job %s could not be moved to retry/failed", job.id)
 
 def _heartbeat_loop(
     job_id: int,
@@ -268,15 +413,16 @@ def _execute_document_import(db: Session, job: CrawlJob) -> None:
     )
     from app.versioning import content_sha256, estimate_token_count
     from app.storage import storage_root
+    from app.upload_security import safe_storage_path
 
     payload = _decode_job_payload(job)
     storage_uri = payload["storage_uri"]
     document_id = int(payload["document_id"])
     version_id = int(payload["version_id"])
 
-    full_path = storage_root() / storage_uri
-    if not full_path.exists():
-        raise FileNotFoundError(f"存储文件不存在: {full_path}")
+    full_path = safe_storage_path(storage_root(), storage_uri)
+    if not full_path.is_file():
+        raise FileNotFoundError("存储文件不存在")
 
     content = full_path.read_bytes()
     actual_sha = content_sha256(content)
@@ -284,6 +430,11 @@ def _execute_document_import(db: Session, job: CrawlJob) -> None:
     document_version = db.get(DocumentVersion, version_id)
     if document_version is None:
         raise FileNotFoundError(f"document_version {version_id} 不存在")
+    if actual_sha != document_version.sha256:
+        mark_version_failed(
+            db, version_id=version_id, code="CONTENT_HASH_MISMATCH", message="存储文件完整性校验失败"
+        )
+        raise ParserError("CONTENT_HASH_MISMATCH", "存储文件完整性校验失败")
     parser = get_parser(job.source)
 
     try:
@@ -293,6 +444,11 @@ def _execute_document_import(db: Session, job: CrawlJob) -> None:
             db, version_id=version_id, code=exc.code, message=exc.message
         )
         raise
+    except Exception as exc:  # noqa: BLE001 - parser 库异常统一转为失败版本
+        mark_version_failed(
+            db, version_id=version_id, code="PARSER_ERROR", message="文档解析失败"
+        )
+        raise ParserError("PARSER_ERROR", "文档解析失败") from exc
 
     for chunk_no, draft in enumerate(chunks, start=1):
         text_hash = hashlib.sha256(draft.text.encode("utf-8")).hexdigest()
@@ -350,8 +506,7 @@ def submit_chunk_index(
         payload={"document_id": document_id, "version_id": version_id},
         max_retries=max_retries,
     )
-    future = get_executor().submit(_run_one_job, job.id, new_worker_id())
-    _attach_cancel_future(job.id, future)
+    _submit_future(job.id)
     return job
 
 

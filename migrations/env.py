@@ -26,6 +26,12 @@ from app.db import (  # noqa: F401  触发模型注册
     DocumentVersion,
     Product,
     ProductPriceHistory,
+    ProductSku,
+    Warehouse,
+    InboundOrder,
+    InboundLine,
+    InventoryTransaction,
+    InventoryBalance,
 )
 
 

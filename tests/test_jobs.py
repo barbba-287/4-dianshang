@@ -27,6 +27,7 @@ from app.repository import (
     new_worker_id,
     renew_lease,
     request_cancel,
+    recover_expired_jobs,
     retry_job,
 )
 
@@ -157,7 +158,52 @@ def test_request_cancel_on_terminal_returns_existing(db):
     assert after.status == JobStatus.SUCCEEDED.value
 
 
-def test_compute_backoff_is_bounded_and_jittered():
+def test_recover_expired_job_moves_to_retry_wait(db):
+    job = _make_job(db, max_retries=3)
+    worker = new_worker_id()
+    claim_job(db, job_id=job.id, worker_id=worker, lease_seconds=1)
+    expired_at = datetime.utcnow() + timedelta(seconds=2)
+    assert recover_expired_jobs(db, now=expired_at) == 1
+    db.refresh(job)
+    assert job.status == JobStatus.RETRY_WAIT.value
+    assert job.retry_count == 1
+    assert job.error_code == "LEASE_EXPIRED"
+    assert job.worker_id is None
+    assert job.lease_until is None
+    assert renew_lease(db, job_id=job.id, worker_id=worker, lease_seconds=30) is False
+
+
+def test_recover_expired_cancelled_job(db):
+    job = _make_job(db)
+    worker = new_worker_id()
+    claim_job(db, job_id=job.id, worker_id=worker, lease_seconds=1)
+    request_cancel(db, job_id=job.id)
+    assert recover_expired_jobs(db, now=datetime.utcnow() + timedelta(seconds=2)) == 1
+    db.refresh(job)
+    assert job.status == JobStatus.CANCELLED.value
+    assert job.finished_at is not None
+
+
+def test_recover_expired_job_fails_at_retry_limit(db):
+    job = _make_job(db, max_retries=1)
+    worker = new_worker_id()
+    claim_job(db, job_id=job.id, worker_id=worker, lease_seconds=1)
+    assert recover_expired_jobs(db, now=datetime.utcnow() + timedelta(seconds=2)) == 1
+    db.refresh(job)
+    assert job.status == JobStatus.FAILED.value
+    assert job.retry_count == 1
+    assert job.finished_at is not None
+
+
+def test_recover_expired_job_ignores_active_lease(db):
+    job = _make_job(db)
+    worker = new_worker_id()
+    claim_job(db, job_id=job.id, worker_id=worker, lease_seconds=30)
+    assert recover_expired_jobs(db, now=datetime.utcnow()) == 0
+    db.refresh(job)
+    assert job.status == JobStatus.RUNNING.value
+
+
     values = [compute_backoff_seconds(attempt, base=1.0, cap=8.0) for attempt in range(1, 6)]
     # 第 1 次约 base
     assert 0.5 <= values[0] <= 1.5

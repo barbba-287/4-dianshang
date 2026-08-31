@@ -39,6 +39,7 @@ from app.repository import (
     upsert_document,
     upsert_document_version,
 )
+from app.main import safe_database_url
 from app.storage import save_upload
 from app.versioning import content_sha256, estimate_token_count
 
@@ -247,7 +248,7 @@ def cmd_status(args: list[str]) -> int:
         retriever = get_retriever()
         vector_count = len(retriever.store.records)
         print(f"app_name           = {settings.app_name}")
-        print(f"database_url       = {settings.database_url}")
+        print(f"database_url       = {safe_database_url(settings.database_url)}")
         print(f"worker_concurrency = {settings.worker_concurrency}")
         print(f"upload_max_bytes   = {settings.upload_max_bytes}")
         print(f"embedder_dim       = {settings.embedder_dim}")

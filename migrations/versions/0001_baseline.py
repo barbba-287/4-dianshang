@@ -14,20 +14,17 @@ document_product_links。本迁移作为 baseline，后续 schema 改动通过
 alembic upgrade head   # 创建全部表
 ```
 
-**已有 MySQL 且包含 week1 的 products / product_price_history / crawl_jobs：**
+**已有 legacy 数据库：**
 
 ```bash
-# 不跑 upgrade，仅标记当前状态为已迁移
-alembic stamp head
-# 后续每次改 model
-alembic revision --autogenerate -m "..."
-alembic upgrade head
+# 不要直接 stamp head（它不会补齐旧表字段）；使用项目封装命令，
+# 它会标记 0001 后执行后续 repair migration。
+python -m app.cli init-db
 ```
 
 **新加 S2/S3/S4/S5 表的 MySQL：**
-
 ```bash
-alembic upgrade head   # 会跳过已存在的 week1 表，仅创建新表
+alembic upgrade head   # 新库直接升级；legacy 库请使用上面的 init-db
 ```
 """
 

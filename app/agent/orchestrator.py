@@ -45,11 +45,13 @@ class AgentOrchestrator:
         context = context or ToolContext()
         tool = self.registry.get(action.tool)
         if tool is None:
-            return ToolCallResult(
+            result = ToolCallResult(
                 ok=False,
                 error_code="TOOL_NOT_FOUND",
                 error_message=f"未知工具: {action.tool}",
             )
+            self._audit(action, context, result)
+            return result
         if not tool.is_readonly:
             result = ToolCallResult(
                 ok=False,

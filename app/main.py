@@ -9,15 +9,26 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from hashlib import sha256
 import json
+import logging
 import uuid
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import HTMLResponse
-from sqlalchemy import func, select
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse
+from sqlalchemy import func, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
-from app.background import request_cancel_job, submit_crawl_fixture, submit_document_import
+from app.background import (
+    is_accepting_jobs,
+    request_cancel_job,
+    start_background_workers,
+    stop_background_workers,
+    submit_crawl_fixture,
+    submit_document_import,
+)
 from app.config import get_settings
 from app.crawler import CrawlError, collect_fixture
 from app.db import (
@@ -26,6 +37,8 @@ from app.db import (
     DocumentVersion,
     Product,
     ProductPriceHistory,
+    ProductSku,
+    Warehouse,
     get_db,
     init_db,
 )
@@ -56,18 +69,100 @@ from app.schemas import (
     RagQueryRequest,
     RagQueryResponse,
     SettingsResponse,
+    WarehouseCreate,
+    WarehouseResponse,
+    ProductSkuCreate,
+    ProductSkuResponse,
+    InboundCreate,
+    InboundReceive,
+    InboundResponse,
+    InventoryPage,
 )
 from app.storage import StorageError, enforce_size_limit, save_upload
 from app.versioning import content_sha256
+from app.upload_security import validate_content
+from app.security import authenticate_api_key
+
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    from app.security import validate_auth_config
+
     init_db()
-    yield
+    validate_auth_config(get_settings())
+    start_background_workers()
+    try:
+        yield
+    finally:
+        stop_background_workers()
 
 
 app = FastAPI(title=get_settings().app_name, version="0.2.0-week2", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or f"req-{uuid.uuid4().hex[:12]}"
+    request.state.request_id = request_id
+    if request.url.path.startswith("/api/"):
+        principal = authenticate_api_key(request.headers.get("X-API-Key"), get_settings())
+        if principal is None:
+            response = JSONResponse(
+                status_code=401,
+                content={"detail": {"code": "UNAUTHORIZED", "message": "认证失败"}},
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+            response.headers["X-Request-ID"] = request_id
+            return response
+        request.state.principal = principal
+    else:
+        from app.security import demo_principal
+
+        request.state.principal = demo_principal(get_settings())
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("unhandled request error", extra={"request_id": request_id})
+        response = JSONResponse(
+            status_code=500,
+            content={"detail": {"code": "INTERNAL_ERROR", "message": "服务内部错误"}},
+        )
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(_request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+
+@app.get("/ready")
+def ready() -> dict[str, str]:
+    """依赖就绪检查，与只表示进程存活的 /health 分离。"""
+    if not is_accepting_jobs():
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "WORKER_NOT_READY", "message": "后台任务服务未就绪"},
+        )
+    try:
+        with get_db_session_for_health() as db:
+            db.execute(text("SELECT 1"))
+    except Exception:
+        logger.exception("readiness database check failed")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "DATABASE_NOT_READY", "message": "数据库未就绪"},
+        )
+    return {"status": "ready"}
+
+
+def get_db_session_for_health():
+    from app.db import SessionLocal
+
+    return SessionLocal()
 
 
 @app.get("/health")
@@ -150,14 +245,23 @@ async def upload_document(
     content = await file.read()
     try:
         enforce_size_limit(len(content))
-    except StorageError as exc:
+        source_type = validate_content(
+            content,
+            source_type=source_type,
+            filename=file.filename,
+            content_type=file.content_type,
+            max_zip_members=get_settings().upload_max_zip_members,
+            max_zip_uncompressed_bytes=get_settings().upload_max_zip_uncompressed_bytes,
+        )
+    except (StorageError, ParserError) as exc:
+        status_code = 413 if getattr(exc, "code", "") == "FILE_TOO_LARGE" else 415
         raise HTTPException(
-            status_code=413,
+            status_code=status_code,
             detail={"code": exc.code, "message": exc.message},
         ) from exc
 
     sha = content_sha256(content)
-    ext = (file.filename or "").rsplit(".", 1)[-1] if "." in (file.filename or "") else source_type
+    ext = source_type
 
     document, _doc_created = upsert_document(
         db,
@@ -317,6 +421,13 @@ def rag_query(payload: RagQueryRequest, db: Session = Depends(get_db)) -> RagQue
 # ---------- S4 运行设置端点 ----------
 
 
+def safe_database_url(value: str) -> str:
+    try:
+        return make_url(value).render_as_string(hide_password=True)
+    except Exception:
+        return "<redacted>"
+
+
 @app.get("/api/settings", response_model=SettingsResponse)
 def get_runtime_settings(db: Session = Depends(get_db)) -> SettingsResponse:
     """展示当前运行时配置与数据库 / 向量库规模，便于面试演示。"""
@@ -326,7 +437,7 @@ def get_runtime_settings(db: Session = Depends(get_db)) -> SettingsResponse:
     settings = get_settings()
     return SettingsResponse(
         app_name=settings.app_name,
-        database_url=settings.database_url,
+        database_url=safe_database_url(settings.database_url),
         worker_concurrency=settings.worker_concurrency,
         worker_max_attempts=settings.worker_max_attempts,
         worker_lease_seconds=settings.worker_lease_seconds,
@@ -366,12 +477,19 @@ def list_agent_tools() -> list[AgentToolSpec]:
 
 
 @app.post("/api/agent/invoke", response_model=AgentActionResponse)
-def invoke_agent_tool(payload: AgentActionRequest) -> AgentActionResponse:
+def invoke_agent_tool(
+    payload: AgentActionRequest, request: Request
+) -> AgentActionResponse:
     from app.agent.orchestrator import AgentAction, AgentOrchestrator
     from app.agent.registry import ToolContext
 
     orchestrator = AgentOrchestrator()
-    context = ToolContext(request_id=f"agent-{uuid.uuid4().hex[:8]}")
+    principal = request.state.principal
+    context = ToolContext(
+        tenant_id=principal.tenant_id,
+        user_id=principal.subject,
+        request_id=request.state.request_id,
+    )
     result = orchestrator.invoke(
         AgentAction(tool=payload.tool, input=payload.input, call_id=payload.call_id),
         context=context,
@@ -386,7 +504,118 @@ def invoke_agent_tool(payload: AgentActionRequest) -> AgentActionResponse:
     )
 
 
-# ---------- 第一周兼容接口（同步 fixture，仅作演示） ----------
+# ---------- 仓储协同与库存 ----------
+
+
+def _warehouse_error(exc: ValueError) -> HTTPException:
+    code = str(exc)
+    status = 404 if code.endswith("NOT_FOUND") else 409 if code.endswith(("EXISTS", "RECEIVED", "STATE")) else 422
+    messages = {
+        "PRODUCT_NOT_FOUND": "商品不存在",
+        "SKU_NOT_FOUND": "SKU 不存在或已停用",
+        "WAREHOUSE_NOT_FOUND": "仓库不存在",
+        "WAREHOUSE_INACTIVE": "仓库已停用",
+        "SKU_CODE_EXISTS": "SKU 编码已存在",
+        "WAREHOUSE_CODE_EXISTS": "仓库编码已存在",
+        "INBOUND_REFERENCE_EXISTS": "入库单号已存在",
+        "DUPLICATE_SKU": "入库明细中 SKU 重复",
+        "INBOUND_LINES_MISMATCH": "实收明细与入库单不匹配",
+        "DAMAGED_QTY_INVALID": "破损数量不能大于实收数量",
+        "INBOUND_ALREADY_RECEIVED": "入库单已提交收货",
+        "INVALID_INBOUND_STATE": "当前入库单状态不允许此操作",
+    }
+    return HTTPException(status_code=status, detail={"code": code, "message": messages.get(code, "仓储操作失败")})
+
+
+@app.post("/api/skus", response_model=ProductSkuResponse, status_code=201)
+def create_sku(payload: ProductSkuCreate, db: Session = Depends(get_db)):
+    from app.repository import create_sku as create_sku_record
+    try:
+        return create_sku_record(db, product_id=payload.product_id, sku_code=payload.sku_code, variant_label=payload.variant_label, barcode=payload.barcode, unit=payload.unit)
+    except ValueError as exc:
+        raise _warehouse_error(exc) from exc
+
+
+@app.get("/api/skus", response_model=list[ProductSkuResponse])
+def list_skus(db: Session = Depends(get_db)):
+    from app.db import ProductSku
+    return db.scalars(select(ProductSku).where(ProductSku.is_active.is_(True)).order_by(ProductSku.id)).all()
+
+
+@app.post("/api/warehouses", response_model=WarehouseResponse, status_code=201)
+def create_warehouse(payload: WarehouseCreate, db: Session = Depends(get_db)):
+    from app.repository import create_warehouse as create_warehouse_record
+    try:
+        return create_warehouse_record(db, code=payload.code, name=payload.name, warehouse_type=payload.warehouse_type, integration_mode=payload.integration_mode, external_ref=payload.external_ref)
+    except ValueError as exc:
+        raise _warehouse_error(exc) from exc
+
+
+@app.get("/api/warehouses", response_model=list[WarehouseResponse])
+def list_warehouses(db: Session = Depends(get_db)):
+    from app.db import Warehouse
+    return db.scalars(select(Warehouse).where(Warehouse.is_active.is_(True)).order_by(Warehouse.id)).all()
+
+
+@app.post("/api/inbounds", response_model=InboundResponse, status_code=201)
+def create_inbound(payload: InboundCreate, db: Session = Depends(get_db)):
+    from app.repository import _inbound_response_data, create_inbound as create_inbound_record, get_inbound
+    try:
+        order = create_inbound_record(db, warehouse_id=payload.warehouse_id, reference_no=payload.reference_no, lines=[item.model_dump() for item in payload.lines], note=payload.note)
+        result = get_inbound(db, inbound_id=order.id)
+        assert result is not None
+        return _inbound_response_data(*result)
+    except ValueError as exc:
+        raise _warehouse_error(exc) from exc
+
+
+@app.get("/api/inbounds/{inbound_id}", response_model=InboundResponse)
+def get_inbound_detail(inbound_id: int, db: Session = Depends(get_db)):
+    from app.repository import _inbound_response_data, get_inbound
+    result = get_inbound(db, inbound_id=inbound_id)
+    if result is None:
+        raise _warehouse_error(ValueError("INBOUND_NOT_FOUND"))
+    return _inbound_response_data(*result)
+
+
+@app.post("/api/inbounds/{inbound_id}/receive", response_model=InboundResponse)
+def receive_inbound(inbound_id: int, payload: InboundReceive, request: Request, db: Session = Depends(get_db)):
+    from app.repository import _inbound_response_data, receive_inbound as receive_inbound_record
+    try:
+        result = receive_inbound_record(
+            db,
+            inbound_id=inbound_id,
+            lines=[item.model_dump() for item in payload.lines],
+            idempotency_key=request.headers.get("Idempotency-Key"),
+            payload_hash=sha256(payload.model_dump_json().encode()).hexdigest(),
+        )
+        return _inbound_response_data(*result)
+    except ValueError as exc:
+        raise _warehouse_error(exc) from exc
+
+
+@app.post("/api/inbounds/{inbound_id}/confirm", response_model=InboundResponse)
+def confirm_inbound(inbound_id: int, request: Request, db: Session = Depends(get_db)):
+    from app.repository import _inbound_response_data, confirm_inbound as confirm_inbound_record
+    try:
+        result = confirm_inbound_record(
+            db,
+            inbound_id=inbound_id,
+            confirmed_by=getattr(request.state.principal, "subject", None),
+            idempotency_key=request.headers.get("Idempotency-Key"),
+        )
+        return _inbound_response_data(*result)
+    except ValueError as exc:
+        raise _warehouse_error(exc) from exc
+
+
+@app.get("/api/inventory", response_model=InventoryPage)
+def inventory_page(page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), warehouse_id: int | None = Query(default=None, gt=0), sku_id: int | None = Query(default=None, gt=0), db: Session = Depends(get_db)):
+    from app.repository import list_inventory
+    items, total = list_inventory(db, warehouse_id=warehouse_id, sku_id=sku_id, page=page, page_size=page_size)
+    return InventoryPage(items=items, page=page, page_size=page_size, total=total)
+
+
 
 
 @app.post("/api/crawl/fixture", response_model=CrawlJobResponse, status_code=201)

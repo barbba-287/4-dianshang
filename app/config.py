@@ -26,6 +26,10 @@ class Settings(BaseSettings):
 
     # S2 文档导入
     upload_max_bytes: int = 20 * 1024 * 1024
+    upload_chunk_bytes: int = 64 * 1024
+    upload_max_zip_members: int = 2000
+    upload_max_zip_uncompressed_bytes: int = 100 * 1024 * 1024
+    upload_max_pdf_pages: int = 500
     imports_dir: str = "uploads"
 
     # S3 RAG 检索
@@ -33,6 +37,12 @@ class Settings(BaseSettings):
     vector_store_path: str = "data/vectors.json"
     rag_top_k: int = 5
     rag_min_score: float = 0.2
+
+    # S7 API 安全（默认关闭以保留本地演示兼容）
+    api_auth_enabled: bool = False
+    api_key: str = ""
+    api_tenant_id: str = "default"
+    api_user_id: str = "api-user"
 
     model_config = SettingsConfigDict(
         env_file=".env",
