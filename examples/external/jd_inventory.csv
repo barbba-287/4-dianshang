@@ -1,0 +1,3 @@
+platform,account_ref,store_ref,warehouse_ref,as_of,external_sku,internal_sku_code,available_qty,reserved_qty,inbound_qty
+jd,demo-jd-01,demo-jd-store,OWN-01,2026-09-01T08:00:00Z,TEA-250-GREEN,TEA-250-GREEN,96,1,8
+jd,demo-jd-01,demo-jd-store,OWN-01,2026-09-01T08:00:00Z,JD-UNMAPPED-01,,4,0,0

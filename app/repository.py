@@ -465,10 +465,13 @@ def create_sku(db: Session, *, product_id: int, sku_code: str, variant_label: st
     return sku
 
 
-def create_warehouse(db: Session, *, code: str, name: str, warehouse_type: str, integration_mode: str = "manual", external_ref: str | None = None) -> Warehouse:
-    if db.scalar(select(Warehouse).where(Warehouse.code == code)) is not None:
+def create_warehouse(db: Session, *, code: str, name: str, warehouse_type: str, integration_mode: str = "manual", external_ref: str | None = None, workspace_id: int | None = None) -> Warehouse:
+    query = select(Warehouse).where(Warehouse.code == code)
+    if workspace_id is not None:
+        query = query.where(Warehouse.workspace_id == workspace_id)
+    if db.scalar(query) is not None:
         raise ValueError("WAREHOUSE_CODE_EXISTS")
-    warehouse = Warehouse(code=code, name=name, warehouse_type=warehouse_type, integration_mode=integration_mode, external_ref=external_ref)
+    warehouse = Warehouse(code=code, name=name, warehouse_type=warehouse_type, integration_mode=integration_mode, external_ref=external_ref, workspace_id=workspace_id)
     db.add(warehouse)
     db.commit()
     db.refresh(warehouse)
@@ -540,20 +543,30 @@ def receive_inbound(db: Session, *, inbound_id: int, lines: list[dict], idempote
         if order.receive_idempotency_key == idempotency_key and order.receive_payload_hash == payload_hash:
             return order, inbound_lines
         raise ValueError("INBOUND_ALREADY_RECEIVED")
+
+    request_skus = [int(item["sku_id"]) for item in lines]
+    if len(request_skus) != len(set(request_skus)):
+        raise ValueError("DUPLICATE_SKU")
     by_sku = {line.sku_id: line for line in inbound_lines}
-    if set(by_sku) != {int(item["sku_id"]) for item in lines}:
+    if set(by_sku) != set(request_skus):
         raise ValueError("INBOUND_LINES_MISMATCH")
     for item in lines:
         if item["damaged_qty"] > item["received_qty"]:
             raise ValueError("DAMAGED_QTY_INVALID")
-        line = by_sku[int(item["sku_id"])]
-        line.received_qty = item["received_qty"]
-        line.damaged_qty = item["damaged_qty"]
-    order.status = "received"
-    order.received_at = _now()
-    order.receive_idempotency_key = idempotency_key
-    order.receive_payload_hash = payload_hash
-    db.commit()
+
+    try:
+        for item in lines:
+            line = by_sku[int(item["sku_id"])]
+            line.received_qty = item["received_qty"]
+            line.damaged_qty = item["damaged_qty"]
+        order.status = "received"
+        order.received_at = _now()
+        order.receive_idempotency_key = idempotency_key
+        order.receive_payload_hash = payload_hash
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return get_inbound(db, inbound_id=inbound_id)  # type: ignore[return-value]
 
 
@@ -566,35 +579,75 @@ def confirm_inbound(db: Session, *, inbound_id: int, confirmed_by: str | None = 
         return order, lines
     if order.status != "received":
         raise ValueError("INVALID_INBOUND_STATE")
-    order.confirm_idempotency_key = idempotency_key
-    order.confirm_payload_hash = hashlib.sha256((idempotency_key or "confirm").encode()).hexdigest()
-    for line in lines:
-        accepted = line.received_qty - line.damaged_qty
-        key = f"inbound:{order.id}:line:{line.id}:confirm"
-        transaction = db.scalar(select(InventoryTransaction).where(InventoryTransaction.idempotency_key == key))
-        if transaction is None:
-            db.add(InventoryTransaction(inbound_order_id=order.id, warehouse_id=order.warehouse_id, sku_id=line.sku_id, quantity_delta=accepted, movement_type="inbound_confirm", idempotency_key=key, created_by=confirmed_by))
-            balance = db.scalar(select(InventoryBalance).where(InventoryBalance.warehouse_id == order.warehouse_id, InventoryBalance.sku_id == line.sku_id))
-            if balance is None:
-                balance = InventoryBalance(warehouse_id=order.warehouse_id, sku_id=line.sku_id, on_hand_qty=0)
-                db.add(balance)
-            balance.on_hand_qty += accepted
-    order.status = "confirmed"
-    order.confirmed_at = _now()
-    db.commit()
+
+    try:
+        order.confirm_idempotency_key = idempotency_key
+        order.confirm_payload_hash = hashlib.sha256((idempotency_key or "confirm").encode()).hexdigest()
+        for line in lines:
+            accepted = line.received_qty - line.damaged_qty
+            key = f"inbound:{order.id}:line:{line.id}:confirm"
+            transaction = db.scalar(select(InventoryTransaction).where(InventoryTransaction.idempotency_key == key))
+            if transaction is None:
+                db.add(InventoryTransaction(inbound_order_id=order.id, warehouse_id=order.warehouse_id, sku_id=line.sku_id, quantity_delta=accepted, movement_type="inbound_confirm", idempotency_key=key, created_by=confirmed_by))
+                balance = db.scalar(select(InventoryBalance).where(InventoryBalance.warehouse_id == order.warehouse_id, InventoryBalance.sku_id == line.sku_id))
+                if balance is None:
+                    balance = InventoryBalance(warehouse_id=order.warehouse_id, sku_id=line.sku_id, on_hand_qty=0)
+                    db.add(balance)
+                balance.on_hand_qty += accepted
+        order.status = "confirmed"
+        order.confirmed_at = _now()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return get_inbound(db, inbound_id=inbound_id)  # type: ignore[return-value]
 
 
-def list_inventory(db: Session, *, warehouse_id: int | None = None, sku_id: int | None = None, page: int = 1, page_size: int = 20) -> tuple[list[dict], int]:
+def list_inventory(
+    db: Session,
+    *,
+    warehouse_id: int | None = None,
+    sku_id: int | None = None,
+    warehouse_ids: list[int] | tuple[int, ...] | None = None,
+    workspace_id: int | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[dict], int]:
     filters = []
     if warehouse_id is not None:
         filters.append(InventoryBalance.warehouse_id == warehouse_id)
+    if warehouse_ids is not None:
+        if not warehouse_ids:
+            return [], 0
+        filters.append(InventoryBalance.warehouse_id.in_(warehouse_ids))
     if sku_id is not None:
         filters.append(InventoryBalance.sku_id == sku_id)
-    total = db.scalar(select(func.count(InventoryBalance.id)).where(*filters)) or 0
-    rows = db.execute(select(InventoryBalance, Warehouse, ProductSku).join(Warehouse, Warehouse.id == InventoryBalance.warehouse_id).join(ProductSku, ProductSku.id == InventoryBalance.sku_id).where(*filters).order_by(InventoryBalance.id).offset((page - 1) * page_size).limit(page_size)).all()
+    if workspace_id is not None:
+        filters.append(Warehouse.workspace_id == workspace_id)
+    total = db.scalar(
+        select(func.count(InventoryBalance.id))
+        .join(Warehouse, Warehouse.id == InventoryBalance.warehouse_id)
+        .where(*filters)
+    ) or 0
+    rows = db.execute(
+        select(InventoryBalance, Warehouse, ProductSku)
+        .join(Warehouse, Warehouse.id == InventoryBalance.warehouse_id)
+        .join(ProductSku, ProductSku.id == InventoryBalance.sku_id)
+        .where(*filters)
+        .order_by(InventoryBalance.id)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
     return [
-        {"warehouse_id": balance.warehouse_id, "warehouse_code": warehouse.code, "sku_id": balance.sku_id, "sku_code": sku.sku_code, "product_id": sku.product_id, "on_hand_qty": balance.on_hand_qty, "updated_at": balance.updated_at}
+        {
+            "warehouse_id": balance.warehouse_id,
+            "warehouse_code": warehouse.code,
+            "sku_id": balance.sku_id,
+            "sku_code": sku.sku_code,
+            "product_id": sku.product_id,
+            "on_hand_qty": balance.on_hand_qty,
+            "updated_at": balance.updated_at,
+        }
         for balance, warehouse, sku in rows
     ], int(total)
 

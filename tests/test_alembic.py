@@ -62,6 +62,25 @@ def test_alembic_upgrade_head_creates_all_tables(tmp_path):
         "alembic_version",
     }
     assert expected.issubset(tables), f"missing: {expected - tables}"
+    expected_inventory_tables = {
+        "product_skus",
+        "warehouses",
+        "inbound_orders",
+        "inbound_lines",
+        "inventory_balances",
+        "inventory_transactions",
+    }
+    assert expected_inventory_tables.issubset(tables), f"missing: {expected_inventory_tables - tables}"
+    expected_rbac_tables = {
+        "workspaces",
+        "user_accounts",
+        "workspace_memberships",
+        "warehouse_access",
+        "auth_sessions",
+        "inventory_policies",
+    }
+    assert expected_rbac_tables.issubset(tables), f"missing: {expected_rbac_tables - tables}"
+    assert "workspace_id" in {column["name"] for column in inspector.get_columns("warehouses")}
 
 
 def test_alembic_current_shows_head(tmp_path):
@@ -72,7 +91,7 @@ def test_alembic_current_shows_head(tmp_path):
 
     current = _run_alembic(["current"], database_url=db_url)
     assert current.returncode == 0
-    assert "0003_inventory_mvp" in current.stdout
+    assert "0006_workspace_rbac" in current.stdout
     assert "head" in current.stdout
 
 

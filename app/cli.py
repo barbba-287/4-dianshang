@@ -27,6 +27,7 @@ python -m app.cli status
 import io
 import sys
 from pathlib import Path
+import argparse
 
 from app.background import reset_executor, submit_crawl_fixture, wait_for_jobs
 from app.config import get_settings
@@ -227,18 +228,101 @@ def cmd_query(args: list[str]) -> int:
     return 0
 
 
+def cmd_external_list_connectors(args: list[str]) -> int:
+    from app.connectors import connector_capabilities
+
+    print(__import__("json").dumps(connector_capabilities(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_external_preview(args: list[str]) -> int:
+    from app.connectors import load_records
+
+    content = Path(args[args.index("--file") + 1]).read_bytes()
+    records = load_records(content, platform=args[args.index("--platform") + 1], source_mode=args[args.index("--mode") + 1] if "--mode" in args else "json")
+    print(__import__("json").dumps([record.as_dict() for record in records], ensure_ascii=False, sort_keys=True, indent=2))
+    return 0
+
+
+def cmd_external_import(args: list[str]) -> int:
+    from app.connectors import load_records
+    from app.external_sync import ingest_inventory
+
+    platform = args[args.index("--platform") + 1]
+    path = Path(args[args.index("--file") + 1])
+    mode = args[args.index("--mode") + 1] if "--mode" in args else "json"
+    records = load_records(path.read_bytes(), platform=platform, source_mode=mode)
+    db = SessionLocal()
+    try:
+        result = ingest_inventory(db, records)
+        print(__import__("json").dumps({"platform": platform, "inserted": result.inserted, "no_op": result.no_op, "conflict": result.conflict, "total": result.total, "snapshot_ids": result.snapshot_ids or [], "simulated": True, "live_enabled": False}, ensure_ascii=False, sort_keys=True))
+    finally:
+        db.close()
+    return 0
+
+
+def cmd_init_admin(args: list[str]) -> int:
+    """创建首个管理员账户；仅显式调用，不自动创建生产账户。"""
+    import getpass
+    from sqlalchemy import select
+    from app.db import UserAccount, Workspace, WorkspaceMembership
+    from app.employee_auth import hash_password
+
+    def option(name: str, default: str = "") -> str:
+        if name in args:
+            index = args.index(name)
+            if index + 1 >= len(args):
+                raise ValueError(f"缺少参数: {name}")
+            return args[index + 1]
+        return default
+
+    try:
+        login = (option("--login") or input("管理员登录名: ").strip()).strip()
+        display_name = option("--display-name", login) or input("显示名称: ").strip()
+        password = option("--password") or getpass.getpass("管理员密码: ")
+        tenant_key = option("--tenant-key", get_settings().auth_bootstrap_tenant_key).strip()
+        workspace_name = option("--workspace-name", get_settings().auth_bootstrap_workspace_name).strip()
+    except (EOFError, ValueError) as exc:
+        print(f"初始化失败: {exc}")
+        return 2
+    if len(login) < 1 or len(password) < 8 or not tenant_key:
+        print("初始化失败: 登录名、工作空间不能为空，密码至少 8 位")
+        return 2
+    _ensure_schema()
+    db = SessionLocal()
+    try:
+        if db.scalar(select(UserAccount).where(UserAccount.login == login)) is not None:
+            print("初始化失败: 账户已存在")
+            return 1
+        workspace = db.scalar(select(Workspace).where(Workspace.tenant_key == tenant_key))
+        if workspace is None:
+            workspace = Workspace(tenant_key=tenant_key, name=workspace_name or tenant_key)
+            db.add(workspace)
+            db.flush()
+        user = UserAccount(login=login, display_name=display_name or login, password_hash=hash_password(password))
+        db.add(user)
+        db.flush()
+        db.add(WorkspaceMembership(workspace_id=workspace.id, user_id=user.id, role="admin"))
+        db.commit()
+        print(f"管理员创建成功: {login}，工作空间: {workspace.name}")
+        return 0
+    except Exception as exc:
+        db.rollback()
+        print(f"初始化失败: {exc}")
+        return 1
+    finally:
+        db.close()
+
+
 def cmd_status(args: list[str]) -> int:
     """打印运行时配置与数据库 / 向量库规模。"""
     from sqlalchemy import func, inspect, select
-
     from app.db import Document, DocumentChunk, Product, engine as db_engine
 
-    # 表不存在时直接提示用户先 init-db；不在 CLI 内部自动跑 alembic
     insp = inspect(db_engine)
     if not {"products", "documents"}.issubset(set(insp.get_table_names())):
         print("schema 未初始化，请先执行 python -m app.cli init-db")
         return 1
-
     settings = get_settings()
     db = SessionLocal()
     try:
@@ -267,19 +351,27 @@ def cmd_status(args: list[str]) -> int:
 
 COMMANDS = {
     "init-db": cmd_init_db,
+    "init-admin": cmd_init_admin,
     "seed-docs": cmd_seed_docs,
     "enqueue-crawl": cmd_enqueue_crawl,
     "query": cmd_query,
     "status": cmd_status,
+    "external-list-connectors": cmd_external_list_connectors,
+    "external-preview": cmd_external_preview,
+    "external-import": cmd_external_import,
 }
 
 
 COMMAND_HELP = {
     "init-db": "初始化数据库表（幂等，重复执行安全）",
+    "init-admin": "创建首个管理员账户（显式执行）",
     "seed-docs": "向 uploads/ 写入示例 PDF + DOCX 并同步解析、索引",
     "enqueue-crawl": "把 fixtures/products.html 入队到 ThreadPoolExecutor，等待完成",
     "query": "用法: python -m app.cli query <text...>   从向量库检索并返回 answer + 引用",
     "status": "打印当前配置与数据库 / 向量库规模",
+    "external-list-connectors": "列出离线平台连接器能力",
+    "external-preview": "预览并标准化外部库存文件（不落库）",
+    "external-import": "导入外部库存快照（不修改内部库存）",
 }
 
 

@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     api_tenant_id: str = "default"
     api_user_id: str = "api-user"
 
+    # 员工登录与角色工作台（启用后使用数据库 session，不把 API key 放进浏览器）
+    employee_auth_enabled: bool = True
+    demo_mode_enabled: bool = False
+    session_cookie_name: str = "dianshang_session"
+    session_ttl_seconds: int = 8 * 60 * 60
+    session_cookie_secure: bool = False
+    auth_bootstrap_login: str = ""
+    auth_bootstrap_password: str = ""
+    auth_bootstrap_display_name: str = "管理员"
+    auth_bootstrap_tenant_key: str = "default"
+    auth_bootstrap_workspace_name: str = "默认商家"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

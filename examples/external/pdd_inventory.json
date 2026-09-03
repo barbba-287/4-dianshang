@@ -1,0 +1,12 @@
+{
+  "schema_version": "1",
+  "platform": "pdd",
+  "account_ref": "demo-pdd-01",
+  "store_ref": "demo-pdd-store",
+  "warehouse_ref": "OWN-01",
+  "as_of": "2026-09-01T08:00:00Z",
+  "records": [
+    {"external_sku": "TEA-250-GREEN", "internal_sku_code": "TEA-250-GREEN", "available_qty": 95, "reserved_qty": 2, "inbound_qty": 7},
+    {"external_sku": "PDD-UNMAPPED-01", "available_qty": 8, "reserved_qty": 0, "inbound_qty": 0}
+  ]
+}

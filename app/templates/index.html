@@ -3,57 +3,124 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>电商商品工作台</title>
+  <title>电商运营工作台</title>
   <style>
-    body { max-width: 1000px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, sans-serif; color: #243044; }
+    :root { color-scheme: light; --ink: #243044; --muted: #64748b; --line: #e2e8f0; --primary: #2563eb; --danger: #dc2626; --success: #15803d; --warning: #b45309; }
+    * { box-sizing: border-box; }
+    body { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, sans-serif; color: var(--ink); background: #f8fafc; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-    button, input { padding: .6rem .8rem; border: 1px solid #cbd5e1; border-radius: .4rem; }
-    button { background: #2563eb; color: white; cursor: pointer; border: 0; }
-    button:disabled { background: #94a3b8; cursor: wait; }
+    h1, h2, h3 { margin-top: 0; }
+    section { margin-top: 1.5rem; padding: 1.2rem; background: white; border: 1px solid var(--line); border-radius: .7rem; }
+    button, input, select { min-height: 2.5rem; padding: .55rem .75rem; border: 1px solid #cbd5e1; border-radius: .4rem; font: inherit; }
+    button { background: var(--primary); color: white; cursor: pointer; border: 0; }
+    button.secondary { background: #475569; }
+    button:disabled { background: #94a3b8; cursor: not-allowed; }
+    input:invalid { border-color: #fca5a5; }
+    .muted { color: var(--muted); }
+    .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: end; margin: .8rem 0; }
+    .field { display: flex; flex-direction: column; gap: .25rem; flex: 1 1 150px; }
+    .field label { font-size: .85rem; color: #475569; }
     #products { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-top: 1rem; }
-    .card { padding: 1rem; border: 1px solid #e2e8f0; border-radius: .6rem; box-shadow: 0 1px 2px #0000000d; }
-    .price { color: #dc2626; font-size: 1.2rem; font-weight: 700; }
-    #warehouse { margin-top: 2rem; padding-top: 1rem; border-top: 2px solid #e2e8f0; }
-    .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin: .6rem 0; }
+    .card { padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; box-shadow: 0 1px 2px #0000000d; }
+    .price { color: var(--danger); font-size: 1.2rem; font-weight: 700; }
+    .status { min-height: 1.5rem; margin: .5rem 0; }
+    .status.error { color: var(--danger); }
+    .status.success { color: var(--success); }
+    .status.warning { color: var(--warning); }
+    .step { margin-top: 1rem; padding: .9rem; border: 1px solid var(--line); border-radius: .5rem; }
+    .step h3 { margin-bottom: .5rem; font-size: 1rem; }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; margin-top: .8rem; }
-    th, td { padding: .55rem; border-bottom: 1px solid #e2e8f0; text-align: left; }
-    .ok { color: #15803d; } .warn { color: #b45309; }
+    th, td { padding: .55rem; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+    .ok { color: var(--success); font-weight: 600; } .warn { color: var(--warning); }
+    .empty { padding: 1rem; color: var(--muted); border: 1px dashed #cbd5e1; border-radius: .4rem; }
+    @media (max-width: 640px) { body { margin: 1rem auto; } header { align-items: flex-start; flex-direction: column; } section { padding: .9rem; } .row > button { width: 100%; } }
   </style>
 </head>
 <body>
-  <header><h1>电商商品工作台</h1><button id="crawl" type="button">采集样例商品</button></header>
-  <p id="message" class="muted">点击按钮从本地 fixture 采集商品。</p>
-  <form id="search"><input id="keyword" placeholder="搜索商品名称"><button type="submit">搜索</button></form>
-  <section id="warehouse">
-    <h2>仓储协同</h2>
-    <p id="warehouse-message" class="muted">创建仓库和 SKU 后，可模拟实收并确认入账。</p>
-    <div class="row">
-      <input id="warehouse-code" placeholder="仓库编码，例如 OWN-01">
-      <input id="warehouse-name" placeholder="仓库名称">
-      <select id="warehouse-type"><option value="own">自有仓</option><option value="third_party">第三方仓</option></select>
-      <button id="create-warehouse" type="button">创建仓库</button>
-      <select id="warehouse-select"></select>
-    </div>
-    <div class="row">
-      <select id="sku-select"></select>
-      <input id="expected-qty" type="number" min="1" value="10" placeholder="预计数量">
-      <input id="inbound-ref" placeholder="入库单号">
-      <button id="create-inbound" type="button">创建预计入库</button>
-    </div>
-    <div class="row">
-      <input id="received-qty" type="number" min="0" value="10" placeholder="实收数量">
-      <input id="damaged-qty" type="number" min="0" value="0" placeholder="破损数量">
-      <button id="receive-inbound" type="button" disabled>模拟仓库实收</button>
-      <button id="confirm-inbound" type="button" disabled>运营确认入账</button>
-    </div>
-    <div id="inbound-result"></div>
-    <div class="table-wrap"><table><thead><tr><th>仓库</th><th>SKU</th><th>商品</th><th>库存</th></tr></thead><tbody id="inventory-items"></tbody></table></div>
+  <header>
+    <div><h1>电商运营工作台</h1><p class="muted">商品资料与仓储入库协同</p><p><a href="/admin/users">账户与仓库授权</a> · <a href="/dashboard">运营看板</a> · <button id="logout" class="secondary" type="button">退出登录</button></p></div>
+    <button id="crawl" type="button">采集样例商品</button>
+  </header>
+  <p id="message" class="status" role="status">点击按钮从本地 fixture 采集商品。</p>
+
+  <section aria-labelledby="products-heading">
+    <h2 id="products-heading">商品资料</h2>
+    <form id="search" class="row">
+      <div class="field"><label for="keyword">商品名称</label><input id="keyword" placeholder="搜索商品名称"></div>
+      <button type="submit">搜索</button>
+    </form>
+    <div id="products" aria-live="polite"></div>
   </section>
+
+  <section id="warehouse" aria-labelledby="warehouse-heading">
+    <h2 id="warehouse-heading">仓储协同</h2>
+    <p id="warehouse-message" class="status" role="status">创建仓库、SKU 和预计入库；仓库反馈后，在这里复核并确认入账。</p>
+
+    <div class="step">
+      <h3>1. 基础资料</h3>
+      <div class="row">
+        <div class="field"><label for="warehouse-code">仓库编码</label><input id="warehouse-code" placeholder="例如 OWN-01"></div>
+        <div class="field"><label for="warehouse-name">仓库名称</label><input id="warehouse-name" placeholder="例如 自有小仓"></div>
+        <div class="field"><label for="warehouse-type">仓库类型</label><select id="warehouse-type"><option value="own">自有仓</option><option value="third_party">第三方仓</option></select></div>
+        <button id="create-warehouse" type="button">创建仓库</button>
+      </div>
+      <div class="row">
+        <div class="field"><label for="sku-product">关联商品</label><select id="sku-product"><option value="">请先采集商品</option></select></div>
+        <div class="field"><label for="sku-code">SKU 编码</label><input id="sku-code" placeholder="例如 TEA-250-GREEN"></div>
+        <div class="field"><label for="sku-variant">型号/规格</label><input id="sku-variant" placeholder="例如 绿茶 250g"></div>
+        <button id="create-sku" type="button">创建 SKU</button>
+      </div>
+      <p id="base-data-hint" class="muted">没有仓库或 SKU 时，请先在此处创建；商品采集完成后才能关联 SKU。</p>
+    </div>
+
+    <div class="step">
+      <h3>2. 创建预计入库</h3>
+      <div class="row">
+        <div class="field"><label for="warehouse-select">仓库</label><select id="warehouse-select"><option value="">暂无仓库</option></select></div>
+        <div class="field"><label for="sku-select">SKU</label><select id="sku-select"><option value="">暂无 SKU</option></select></div>
+        <div class="field"><label for="expected-qty">预计数量</label><input id="expected-qty" type="number" min="1" value="10"></div>
+        <div class="field"><label for="inbound-ref">入库单号</label><input id="inbound-ref" placeholder="留空自动生成"></div>
+        <button id="create-inbound" type="button">创建预计入库</button>
+      </div>
+    </div>
+
+    <div class="step">
+      <h3>3. 运营确认入账</h3>
+      <div class="row">
+        <div class="field"><label for="received-inbound-select">待运营确认的入库单</label><select id="received-inbound-select"><option value="">暂无待确认入库单</option></select></div>
+        <button id="refresh-received-inbounds" class="secondary" type="button">刷新待确认列表</button>
+        <button id="load-received-inbound" class="secondary" type="button" disabled>加载待确认单</button>
+      </div>
+      <p id="inbound-state" class="muted">尚未选择入库单。</p>
+      <div class="row"><button id="confirm-inbound" class="secondary" type="button" disabled>运营确认入账</button></div>
+      <div id="inbound-result" aria-live="polite"></div>
+    </div>
+
+    <div class="step">
+      <h3>4. 当前库存</h3>
+      <div class="row"><button id="refresh-inventory" class="secondary" type="button">刷新库存</button></div>
+      <div class="table-wrap"><table><thead><tr><th>仓库</th><th>SKU</th><th>商品 ID</th><th>库存</th><th>更新时间</th></tr></thead><tbody id="inventory-items"></tbody></table></div>
+    </div>
+  </section>
+
   <script>
     const products = document.querySelector('#products');
     const message = document.querySelector('#message');
     const crawlButton = document.querySelector('#crawl');
+    const warehouseMessage = document.querySelector('#warehouse-message');
+    const warehouseSelect = document.querySelector('#warehouse-select');
+    const skuSelect = document.querySelector('#sku-select');
+    const skuProductSelect = document.querySelector('#sku-product');
+    const createSkuButton = document.querySelector('#create-sku');
+    const createInboundButton = document.querySelector('#create-inbound');
+    const refreshInventoryButton = document.querySelector('#refresh-inventory');
+    const receivedInboundSelect = document.querySelector('#received-inbound-select');
+    const loadReceivedInboundButton = document.querySelector('#load-received-inbound');
+    const refreshReceivedInboundsButton = document.querySelector('#refresh-received-inbounds');
+    const confirmButton = document.querySelector('#confirm-inbound');
+    let currentInbound = null;
+    let confirmIdempotencyKey = null;
 
     function escapeHtml(value) {
       return String(value ?? '').replace(/[&<>'"]/g, char => ({
@@ -64,7 +131,7 @@
     function errorMessage(response, body) {
       const detail = body && body.detail;
       if (detail && typeof detail === 'object') {
-        const code = detail.code ? ` [${detail.code}]` : '';
+        const code = detail.code ? ` [${escapeHtml(detail.code)}]` : '';
         return `${detail.message || '请求失败'}${code}`;
       }
       if (typeof detail === 'string' && detail) return detail;
@@ -78,132 +145,205 @@
       return response.text();
     }
 
-    function render(data) {
-      if (!data || !Array.isArray(data.items)) throw new Error('商品列表响应格式错误');
-      products.innerHTML = data.items.map(p => `<article class="card"><h2>${escapeHtml(p.title)}</h2><p class="muted">${escapeHtml(p.category || '未分类')} · ${escapeHtml(p.rating ?? '-')} 分</p><p>${escapeHtml(p.description || '')}</p><p class="price">￥${Number(p.current_price).toFixed(2)}</p><a href="${escapeHtml(p.url)}" target="_blank" rel="noopener noreferrer">商品链接</a></article>`).join('');
-      message.textContent = `共 ${data.total} 件商品`;
+    function csrfToken() {
+      const item = document.cookie.split('; ').find(value => value.startsWith('dianshang_csrf='));
+      return item ? decodeURIComponent(item.slice('dianshang_csrf='.length)) : '';
     }
-
-    async function load() {
-      try {
-        const keyword = document.querySelector('#keyword').value.trim();
-        const response = await fetch(`/api/products?page_size=100${keyword ? `&keyword=${encodeURIComponent(keyword)}` : ''}`);
-        const body = await readResponse(response);
-        if (!response.ok) throw new Error(errorMessage(response, body));
-        render(body);
-        return true;
-      } catch (error) {
-        message.textContent = `加载失败：${error.message || '网络错误'}`;
-        return false;
-      }
-    }
-
-    async function crawl() {
-      crawlButton.disabled = true;
-      message.textContent = '正在采集...';
-      try {
-        const response = await fetch('/api/crawl', { method: 'POST' });
-        const body = await readResponse(response);
-        if (!response.ok) throw new Error(errorMessage(response, body));
-        if (!body || typeof body.id !== 'number') throw new Error('采集任务响应格式错误');
-
-        const jobId = body.id;
-        message.textContent = `采集任务已提交（任务 #${jobId}）...`;
-        for (let attempt = 0; attempt < 60; attempt += 1) {
-          await new Promise(resolve => setTimeout(resolve, 250));
-          const statusResponse = await fetch(`/api/crawl/${jobId}`);
-          const statusBody = await readResponse(statusResponse);
-          if (!statusResponse.ok) throw new Error(errorMessage(statusResponse, statusBody));
-          if (statusBody.status === 'succeeded') {
-            message.textContent = '采集完成';
-            await load();
-            return;
-          }
-          if (['failed', 'cancelled'].includes(statusBody.status)) {
-            const code = statusBody.error_code ? ` [${statusBody.error_code}]` : '';
-            throw new Error(`${statusBody.error_message || `任务${statusBody.status}`} ${code}`);
-          }
-          message.textContent = `正在采集（任务 #${jobId}，${statusBody.status}）...`;
-        }
-        throw new Error('采集等待超时，请稍后查看任务状态');
-      } catch (error) {
-        message.textContent = `采集失败：${error.message || '网络错误'}`;
-      } finally {
-        crawlButton.disabled = false;
-      }
-    }
-
-    const warehouseMessage = document.querySelector('#warehouse-message');
-    const warehouseSelect = document.querySelector('#warehouse-select');
-    const skuSelect = document.querySelector('#sku-select');
-    const receiveButton = document.querySelector('#receive-inbound');
-    const confirmButton = document.querySelector('#confirm-inbound');
-    let currentInbound = null;
 
     async function api(path, options = {}) {
-      const response = await fetch(path, options);
+      const headers = {'X-CSRF-Token': csrfToken(), ...(options.headers || {})};
+      const response = await fetch(path, {...options, credentials: 'same-origin', headers});
       const body = await readResponse(response);
       if (!response.ok) throw new Error(errorMessage(response, body));
       return body;
     }
 
+    function jsonOptions(body, extraHeaders = {}) {
+      return { method: 'POST', headers: {'Content-Type': 'application/json', ...extraHeaders}, body: JSON.stringify(body) };
+    }
+
+    function newIdempotencyKey(prefix) {
+      if (window.crypto && crypto.randomUUID) return `${prefix}-${crypto.randomUUID()}`;
+      return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function setMessage(element, text, kind = '') {
+      element.textContent = text;
+      element.className = `status${kind ? ` ${kind}` : ''}`;
+    }
+
+    function setBusy(button, busy) {
+      button.disabled = busy;
+      if (busy) button.dataset.originalText = button.textContent;
+      if (!busy && button.dataset.originalText) button.textContent = button.dataset.originalText;
+      if (busy) button.textContent = '处理中…';
+    }
+
+    function render(data) {
+      if (!data || !Array.isArray(data.items)) throw new Error('商品列表响应格式错误');
+      if (!data.items.length) {
+        products.innerHTML = '<p class="empty">暂无商品，请先点击“采集样例商品”。</p>';
+      } else {
+        products.innerHTML = data.items.map(p => `<article class="card"><h3>${escapeHtml(p.title)}</h3><p class="muted">${escapeHtml(p.category || '未分类')} · ${escapeHtml(p.rating ?? '-')} 分</p><p>${escapeHtml(p.description || '')}</p><p class="price">￥${Number(p.current_price).toFixed(2)}</p><a href="${escapeHtml(p.url)}" target="_blank" rel="noopener noreferrer">商品链接</a></article>`).join('');
+      }
+      skuProductSelect.innerHTML = data.items.length
+        ? data.items.map(p => `<option value="${p.id}">${escapeHtml(p.title)}</option>`).join('')
+        : '<option value="">请先采集商品</option>';
+      document.querySelector('#base-data-hint').textContent = data.items.length ? '可选择商品创建一个或多个库存 SKU。' : '没有商品，请先点击“采集样例商品”。';
+      message.textContent = `共 ${data.total} 件商品`;
+    }
+
+    async function loadProducts() {
+      try {
+        const keyword = document.querySelector('#keyword').value.trim();
+        const body = await api(`/api/products?page_size=100${keyword ? `&keyword=${encodeURIComponent(keyword)}` : ''}`);
+        render(body);
+        return true;
+      } catch (error) {
+        setMessage(message, `商品加载失败：${error.message || '网络错误'}`, 'error');
+        return false;
+      }
+    }
+
+    async function crawl() {
+      setBusy(crawlButton, true);
+      setMessage(message, '正在采集…');
+      try {
+        const body = await api('/api/crawl', {method: 'POST'});
+        if (!body || typeof body.id !== 'number') throw new Error('采集任务响应格式错误');
+        const jobId = body.id;
+        setMessage(message, `采集任务已提交（任务 #${jobId}）…`);
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          await new Promise(resolve => setTimeout(resolve, 250));
+          const statusBody = await api(`/api/crawl/${jobId}`);
+          if (statusBody.status === 'succeeded') { setMessage(message, '采集完成', 'success'); await loadProducts(); return; }
+          if (['failed', 'cancelled'].includes(statusBody.status)) throw new Error(`${statusBody.error_message || `任务${statusBody.status}`} ${statusBody.error_code ? `[${statusBody.error_code}]` : ''}`);
+          setMessage(message, `正在采集（任务 #${jobId}，${statusBody.status}）…`);
+        }
+        throw new Error('采集等待超时，请稍后查看任务状态');
+      } catch (error) {
+        setMessage(message, `采集失败：${error.message || '网络错误'}`, 'error');
+      } finally { setBusy(crawlButton, false); }
+    }
+
+    function updateControls() {
+      const hasWarehouse = Boolean(warehouseSelect.value);
+      const hasSku = Boolean(skuSelect.value);
+      createInboundButton.disabled = !hasWarehouse || !hasSku || Boolean(currentInbound && currentInbound.status !== 'confirmed');
+      confirmButton.disabled = !currentInbound || currentInbound.status !== 'received';
+      createSkuButton.disabled = !skuProductSelect.value;
+    }
+
     function renderInventory(data) {
-      document.querySelector('#inventory-items').innerHTML = data.items.map(item =>
-        `<tr><td>${escapeHtml(item.warehouse_code)}</td><td>${escapeHtml(item.sku_code)}</td><td>${escapeHtml(item.product_id)}</td><td class="ok">${escapeHtml(item.on_hand_qty)}</td></tr>`
-      ).join('');
+      const target = document.querySelector('#inventory-items');
+      if (!data.items.length) { target.innerHTML = '<tr><td colspan="5" class="muted">暂无已确认库存</td></tr>'; return; }
+      target.innerHTML = data.items.map(item => `<tr><td>${escapeHtml(item.warehouse_code)}</td><td>${escapeHtml(item.sku_code)}</td><td>${escapeHtml(item.product_id)}</td><td class="ok">${escapeHtml(item.on_hand_qty)}</td><td>${escapeHtml(item.updated_at)}</td></tr>`).join('');
+    }
+
+    async function loadPendingConfirmations() {
+      try {
+        const body = await api('/api/inbounds?status=received&page_size=100');
+        const items = body.items || [];
+        receivedInboundSelect.innerHTML = items.length
+          ? items.map(item => `<option value="${item.id}">${escapeHtml(item.reference_no)} · 仓库 #${escapeHtml(item.warehouse_id)}</option>`).join('')
+          : '<option value="">暂无待确认入库单</option>';
+        loadReceivedInboundButton.disabled = !receivedInboundSelect.value;
+      } catch (error) {
+        setMessage(warehouseMessage, `待确认入库加载失败：${error.message || '网络错误'}`, 'error');
+      }
+    }
+
+    async function loadReceivedInbound() {
+      if (!receivedInboundSelect.value) return;
+      try {
+        currentInbound = await api(`/api/inbounds/${receivedInboundSelect.value}`);
+        confirmIdempotencyKey = newIdempotencyKey(`confirm-${currentInbound.id}`);
+        document.querySelector('#inbound-state').textContent = `入库单 #${currentInbound.id}：已反馈，等待运营确认`;
+        document.querySelector('#inbound-result').innerHTML = currentInbound.lines.map(line => {
+          const accepted = Number(line.received_qty || 0) - Number(line.damaged_qty || 0);
+          return `<p class="warn">SKU #${escapeHtml(line.sku_id)}：预计 ${escapeHtml(line.expected_qty)}，实收 ${escapeHtml(line.received_qty)}，破损 ${escapeHtml(line.damaged_qty)}，合格入库 ${escapeHtml(accepted)}，数量差异 ${escapeHtml(line.difference)}</p>`;
+        }).join('');
+        updateControls();
+      } catch (error) {
+        setMessage(warehouseMessage, `待确认单加载失败：${error.message || '网络错误'}`, 'error');
+      }
+    }
+
+    async function loadInventory() {
+      setBusy(refreshInventoryButton, true);
+      try { renderInventory(await api('/api/inventory?page_size=100')); }
+      catch (error) { setMessage(warehouseMessage, `库存加载失败：${error.message || '网络错误'}`, 'error'); }
+      finally { setBusy(refreshInventoryButton, false); }
     }
 
     async function loadWarehouseData() {
       try {
-        const [warehouses, skus, inventory] = await Promise.all([
-          api('/api/warehouses'), api('/api/skus'), api('/api/inventory?page_size=100')
-        ]);
-        warehouseSelect.innerHTML = warehouses.map(w => `<option value="${w.id}">${escapeHtml(w.code)} · ${escapeHtml(w.name)}</option>`).join('');
-        skuSelect.innerHTML = skus.map(s => `<option value="${s.id}">${escapeHtml(s.sku_code)} · ${escapeHtml(s.variant_label || '')}</option>`).join('');
-        renderInventory(inventory);
-      } catch (error) { warehouseMessage.textContent = `仓储数据加载失败：${error.message || '网络错误'}`; }
+        const [warehouses, skus] = await Promise.all([api('/api/warehouses'), api('/api/skus')]);
+        warehouseSelect.innerHTML = warehouses.length ? warehouses.map(w => `<option value="${w.id}">${escapeHtml(w.code)} · ${escapeHtml(w.name)}</option>`).join('') : '<option value="">暂无仓库</option>';
+        skuSelect.innerHTML = skus.length ? skus.map(s => `<option value="${s.id}">${escapeHtml(s.sku_code)} · ${escapeHtml(s.variant_label || '')}</option>`).join('') : '<option value="">暂无 SKU</option>';
+        updateControls();
+        await loadInventory();
+      } catch (error) { setMessage(warehouseMessage, `仓储数据加载失败：${error.message || '网络错误'}`, 'error'); }
     }
 
-    document.querySelector('#create-warehouse').onclick = async () => {
+    document.querySelector('#create-warehouse').onclick = async event => {
+      const button = event.currentTarget; setBusy(button, true);
       try {
-        await api('/api/warehouses', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
-          code: document.querySelector('#warehouse-code').value.trim(), name: document.querySelector('#warehouse-name').value.trim(), warehouse_type: document.querySelector('#warehouse-type').value
-        })});
-        warehouseMessage.textContent = '仓库创建成功'; await loadWarehouseData();
-      } catch (error) { warehouseMessage.textContent = `创建仓库失败：${error.message || '网络错误'}`; }
+        await api('/api/warehouses', jsonOptions({code: document.querySelector('#warehouse-code').value.trim(), name: document.querySelector('#warehouse-name').value.trim(), warehouse_type: document.querySelector('#warehouse-type').value}));
+        setMessage(warehouseMessage, '仓库创建成功', 'success'); await loadWarehouseData();
+      } catch (error) { setMessage(warehouseMessage, `创建仓库失败：${error.message || '网络错误'}`, 'error'); }
+      finally { setBusy(button, false); }
     };
 
-    document.querySelector('#create-inbound').onclick = async () => {
+    createSkuButton.onclick = async event => {
+      const button = event.currentTarget; setBusy(button, true);
       try {
-        const body = await api('/api/inbounds', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
-          warehouse_id: Number(warehouseSelect.value), reference_no: document.querySelector('#inbound-ref').value.trim() || `WEB-${Date.now()}`,
-          lines: [{sku_id: Number(skuSelect.value), expected_qty: Number(document.querySelector('#expected-qty').value)}]
-        })});
-        currentInbound = body; receiveButton.disabled = false; confirmButton.disabled = true; warehouseMessage.textContent = `入库单 #${body.id} 已创建`;
-      } catch (error) { warehouseMessage.textContent = `创建入库失败：${error.message || '网络错误'}`; }
+        await api('/api/skus', jsonOptions({product_id: Number(skuProductSelect.value), sku_code: document.querySelector('#sku-code').value.trim(), variant_label: document.querySelector('#sku-variant').value.trim() || null}));
+        setMessage(warehouseMessage, 'SKU 创建成功', 'success'); await loadWarehouseData();
+      } catch (error) { setMessage(warehouseMessage, `创建 SKU 失败：${error.message || '网络错误'}`, 'error'); }
+      finally { setBusy(button, false); updateControls(); }
     };
 
-    receiveButton.onclick = async () => {
+    createInboundButton.onclick = async event => {
+      const button = event.currentTarget; setBusy(button, true);
+      try {
+        const body = await api('/api/inbounds', jsonOptions({warehouse_id: Number(warehouseSelect.value), reference_no: document.querySelector('#inbound-ref').value.trim() || `WEB-${Date.now()}`, lines: [{sku_id: Number(skuSelect.value), expected_qty: Number(document.querySelector('#expected-qty').value)}]}));
+        currentInbound = body; confirmIdempotencyKey = newIdempotencyKey(`confirm-${body.id}`);
+        document.querySelector('#inbound-state').textContent = `入库单 #${body.id}：待仓库反馈（预计 ${body.lines[0].expected_qty} 件）`;
+        setMessage(warehouseMessage, `入库单 #${body.id} 已创建`, 'success'); updateControls();
+      } catch (error) { setMessage(warehouseMessage, `创建入库失败：${error.message || '网络错误'}`, 'error'); }
+      finally { setBusy(button, false); updateControls(); }
+    };
+
+    confirmButton.onclick = async event => {
       if (!currentInbound) return;
+      const button = event.currentTarget; setBusy(button, true);
       try {
-        currentInbound = await api(`/api/inbounds/${currentInbound.id}/receive`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
-          lines: [{sku_id: Number(skuSelect.value), received_qty: Number(document.querySelector('#received-qty').value), damaged_qty: Number(document.querySelector('#damaged-qty').value)}]
-        })});
-        document.querySelector('#inbound-result').innerHTML = currentInbound.lines.map(line => `<p class="warn">预计 ${line.expected_qty}，实收 ${line.received_qty}，差异 ${line.difference}</p>`).join('');
-        receiveButton.disabled = true; confirmButton.disabled = false;
-      } catch (error) { warehouseMessage.textContent = `收货反馈失败：${error.message || '网络错误'}`; }
+        currentInbound = await api(`/api/inbounds/${currentInbound.id}/confirm`, jsonOptions({}, {'Idempotency-Key': confirmIdempotencyKey}));
+        document.querySelector('#inbound-state').textContent = `入库单 #${currentInbound.id}：已确认入账`;
+        setMessage(warehouseMessage, '运营确认完成，库存已更新', 'success'); updateControls(); await loadInventory();
+        await loadPendingConfirmations();
+      } catch (error) { setMessage(warehouseMessage, `确认入账失败：${error.message || '网络错误'}`, 'error'); }
+      finally { setBusy(button, false); updateControls(); }
     };
 
-    confirmButton.onclick = async () => {
-      if (!currentInbound) return;
-      try {
-        currentInbound = await api(`/api/inbounds/${currentInbound.id}/confirm`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
-        warehouseMessage.textContent = '运营确认完成，库存已更新'; confirmButton.disabled = true; await loadWarehouseData();
-      } catch (error) { warehouseMessage.textContent = `确认入账失败：${error.message || '网络错误'}`; }
+    refreshReceivedInboundsButton.onclick = loadPendingConfirmations;
+    loadReceivedInboundButton.onclick = loadReceivedInbound;
+    receivedInboundSelect.onchange = () => { loadReceivedInboundButton.disabled = !receivedInboundSelect.value; };
+    warehouseSelect.onchange = updateControls;
+    skuSelect.onchange = updateControls;
+    skuProductSelect.onchange = updateControls;
+    refreshInventoryButton.onclick = loadInventory;
+    document.querySelector('#search').onsubmit = event => { event.preventDefault(); loadProducts(); };
+    crawlButton.onclick = crawl;
+    document.querySelector('#logout').onclick = async () => {
+      try { await api('/logout', {method: 'POST', body: '{}'}); location.href = '/login'; }
+      catch (error) { setMessage(message, `退出失败：${error.message || '网络错误'}`, 'error'); }
     };
-    document.querySelector('#search').onsubmit = event => { event.preventDefault(); load(); };
-    load();
+
+    loadProducts();
     loadWarehouseData();
+    loadPendingConfirmations();
   </script>
 </body>
 </html>

@@ -1,0 +1,11 @@
+{
+  "schema_version": "1",
+  "platform": "amazon",
+  "account_ref": "demo-amazon-seller",
+  "marketplace": "ATVPDKIKX0DER",
+  "warehouse_ref": "FBA-US",
+  "as_of": "2026-09-01T08:00:00Z",
+  "records": [
+    {"external_sku": "TEA-250-GREEN", "internal_sku_code": "TEA-250-GREEN", "asin": "B0DEMO250TEA", "available_qty": 96, "reserved_qty": 3, "inbound_qty": 15, "seller_sku": "TEA-250-GREEN"}
+  ]
+}

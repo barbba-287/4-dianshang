@@ -32,6 +32,15 @@ from app.db import (  # noqa: F401  触发模型注册
     InboundLine,
     InventoryTransaction,
     InventoryBalance,
+    Workspace,
+    UserAccount,
+    WorkspaceMembership,
+    WarehouseAccess,
+    AuthSession,
+    ExternalInventorySnapshot,
+    ExternalEventInbox,
+    ReconciliationResult,
+    InventoryPolicy,
 )
 
 

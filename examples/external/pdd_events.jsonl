@@ -1,0 +1,3 @@
+[
+  {"external_event_id":"pdd-demo-event-001","account_ref":"demo-pdd-01","event_type":"shipment.created","occurred_at":"2026-09-01T08:00:00Z","payload":{"external_sku":"TEA-250-GREEN","quantity":2}}
+]

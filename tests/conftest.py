@@ -12,6 +12,8 @@ import os
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 os.environ["ARTIFACTS_DIR"] = "artifacts"
 os.environ["WORKER_LEASE_SECONDS"] = "30"
+os.environ["EMPLOYEE_AUTH_ENABLED"] = "false"
+os.environ["DEMO_MODE_ENABLED"] = "true"
 
 import pytest
 

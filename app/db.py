@@ -26,6 +26,85 @@ class Base(DeclarativeBase):
     pass
 
 
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    __table_args__ = (UniqueConstraint("tenant_key", name="uq_workspace_tenant_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tenant_key: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class UserAccount(Base):
+    __tablename__ = "user_accounts"
+    __table_args__ = (UniqueConstraint("login", name="uq_user_account_login"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    login: Mapped[str] = mapped_column(String(128), index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    display_name: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class WorkspaceMembership(Base):
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", name="uq_workspace_membership"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user_accounts.id"), index=True)
+    role: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class WarehouseAccess(Base):
+    __tablename__ = "warehouse_access"
+    __table_args__ = (
+        UniqueConstraint("user_id", "warehouse_id", name="uq_warehouse_access"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user_accounts.id"), index=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), index=True)
+    role_override: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_auth_session_token_hash"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), index=True)
+    csrf_token_hash: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[int] = mapped_column(ForeignKey("user_accounts.id"), index=True)
+    membership_id: Mapped[int] = mapped_column(ForeignKey("workspace_memberships.id"), index=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
 class Product(Base):
     __tablename__ = "products"
     __table_args__ = (
@@ -186,6 +265,9 @@ class Warehouse(Base):
     warehouse_type: Mapped[str] = mapped_column(String(16), default="own")
     integration_mode: Mapped[str] = mapped_column(String(16), default="manual")
     external_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -252,6 +334,94 @@ class InventoryTransaction(Base):
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ExternalInventorySnapshot(Base):
+    __tablename__ = "external_inventory_snapshots"
+    __table_args__ = (
+        UniqueConstraint("platform", "account_ref", "external_sku", "as_of", "payload_hash", name="uq_external_snapshot_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    account_ref: Mapped[str] = mapped_column(String(128), index=True)
+    store_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    marketplace: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    warehouse_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    external_sku: Mapped[str] = mapped_column(String(255), index=True)
+    internal_sku_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    asin: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    available_qty: Mapped[int] = mapped_column(Integer)
+    reserved_qty: Mapped[int] = mapped_column(Integer, default=0)
+    inbound_qty: Mapped[int] = mapped_column(Integer, default=0)
+    as_of: Mapped[datetime] = mapped_column(DateTime, index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    payload_hash: Mapped[str] = mapped_column(String(72), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), index=True)
+    raw_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_mode: Mapped[str] = mapped_column(String(16), default="mock")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(24), default="observed", index=True)
+
+
+class ExternalEventInbox(Base):
+    __tablename__ = "external_event_inbox"
+    __table_args__ = (
+        UniqueConstraint("platform", "account_ref", "idempotency_key", name="uq_external_event_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    account_ref: Mapped[str] = mapped_column(String(128), index=True)
+    external_event_id: Mapped[str] = mapped_column(String(255), index=True)
+    event_type: Mapped[str] = mapped_column(String(64))
+    event_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    external_object_no: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    payload_hash: Mapped[str] = mapped_column(String(72), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    raw_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_mode: Mapped[str] = mapped_column(String(16), default="mock")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(24), default="received", index=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ReconciliationResult(Base):
+    __tablename__ = "reconciliation_results"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "external_sku", "warehouse_id", name="uq_reconciliation_result_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    snapshot_id: Mapped[int] = mapped_column(ForeignKey("external_inventory_snapshots.id"), index=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    external_sku: Mapped[str] = mapped_column(String(255), index=True)
+    internal_sku_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    sku_id: Mapped[int | None] = mapped_column(ForeignKey("product_skus.id"), nullable=True, index=True)
+    warehouse_id: Mapped[int | None] = mapped_column(ForeignKey("warehouses.id"), nullable=True, index=True)
+    external_available_qty: Mapped[int] = mapped_column(Integer)
+    internal_on_hand_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    delta: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    classification: Mapped[str] = mapped_column(String(32), index=True)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class InventoryPolicy(Base):
+    __tablename__ = "inventory_policies"
+    __table_args__ = (UniqueConstraint("warehouse_id", "sku_id", name="uq_inventory_policy_warehouse_sku"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), index=True)
+    sku_id: Mapped[int] = mapped_column(ForeignKey("product_skus.id"), index=True)
+    safety_stock_qty: Mapped[int] = mapped_column(Integer, default=0)
+    reorder_point_qty: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class InventoryBalance(Base):

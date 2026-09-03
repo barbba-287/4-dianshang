@@ -1,0 +1,12 @@
+{
+  "schema_version": "1",
+  "platform": "douyin",
+  "account_ref": "demo-douyin-01",
+  "store_ref": "demo-douyin-store",
+  "warehouse_ref": "OWN-01",
+  "as_of": "2026-09-01T08:00:00Z",
+  "records": [
+    {"external_sku": "TEA-250-GREEN", "internal_sku_code": "TEA-250-GREEN", "available_qty": 90, "reserved_qty": 4, "inbound_qty": 12},
+    {"external_sku": "DOUYIN-UNMAPPED-01", "available_qty": 3, "reserved_qty": 0, "inbound_qty": 0}
+  ]
+}

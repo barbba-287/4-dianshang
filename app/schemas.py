@@ -3,7 +3,79 @@
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+class DashboardSummaryResponse(BaseModel):
+    range: dict
+    kpis: dict
+    recent_inbounds: list[dict]
+    unsupported_metrics: list[str]
+    limitations: list[str]
+
+
+class InventoryPolicyCreate(BaseModel):
+    warehouse_id: int = Field(gt=0)
+    sku_id: int = Field(gt=0)
+    safety_stock_qty: int = Field(default=0, ge=0)
+    reorder_point_qty: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self):
+        if self.safety_stock_qty > self.reorder_point_qty:
+            raise ValueError("safety_stock_qty 不能大于 reorder_point_qty")
+        return self
+
+
+class InventoryPolicyResponse(InventoryPolicyCreate):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class AlertResponse(BaseModel):
+    id: int
+    kind: str
+    severity: str
+    status: str
+    dedupe_key: str
+    title: str
+    message: str
+    warehouse_id: int | None
+    sku_id: int | None
+    platform: str | None
+    created_at: datetime
+    last_seen_at: datetime
+    acknowledged_at: datetime | None
+
+
+class AdminUserCreate(BaseModel):
+    login: str = Field(min_length=1, max_length=128)
+    display_name: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+    role: str = Field(pattern="^(operations|warehouse|customer_service|readonly)$")
+    warehouse_ids: list[int] = Field(default_factory=list)
+
+
+class AdminUserResponse(BaseModel):
+    id: int
+    login: str
+    display_name: str
+    status: str
+    role: str
+    warehouse_ids: list[int]
+
+
+class AdminUserPatch(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    role: str | None = Field(default=None, pattern="^(operations|warehouse|customer_service|readonly)$")
+
+
+class AdminUserPasswordReset(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
+class WarehouseAccessRequest(BaseModel):
+    warehouse_id: int = Field(gt=0)
 
 
 class ProductRecord(BaseModel):
@@ -188,6 +260,7 @@ class WarehouseResponse(BaseModel):
     warehouse_type: str
     integration_mode: str
     external_ref: str | None
+    workspace_id: int | None
     is_active: bool
     created_at: datetime
 
@@ -273,3 +346,73 @@ class InventoryPage(BaseModel):
     page: int
     page_size: int
     total: int
+
+
+class InboundListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    warehouse_id: int
+    reference_no: str
+    status: str
+    created_at: datetime
+    received_at: datetime | None
+    confirmed_at: datetime | None
+
+
+class InboundListPage(BaseModel):
+    items: list[InboundListItem]
+    page: int
+    page_size: int
+    total: int
+
+class ExternalInventoryPreviewRequest(BaseModel):
+    platform: str = Field(pattern="^(taobao|jd|pdd|douyin|amazon)$")
+    source_mode: str = Field(default="json", pattern="^(json|csv|mock)$")
+    content: str = Field(min_length=1, max_length=2_000_000)
+
+
+class ExternalInventoryPreviewResponse(BaseModel):
+    platform: str
+    source_mode: str
+    simulated: bool
+    live_enabled: bool
+    normalized_rows: list[dict]
+    total: int
+    errors: list[str]
+    writes: list[str]
+
+
+class ExternalInventoryIngestRequest(ExternalInventoryPreviewRequest):
+    pass
+
+
+class ExternalInventoryIngestResponse(BaseModel):
+    platform: str
+    source_mode: str
+    simulated: bool
+    live_enabled: bool
+    inserted: int
+    no_op: int
+    conflict: int
+    total: int
+    snapshot_ids: list[int]
+
+
+class ExternalEventIngestRequest(BaseModel):
+    platform: str = Field(pattern="^(taobao|jd|pdd|douyin|amazon)$")
+    source_mode: str = Field(default="json", pattern="^(json|mock)$")
+    content: str = Field(min_length=1, max_length=2_000_000)
+
+
+class ExternalEventIngestResponse(BaseModel):
+    platform: str
+    inserted: int
+    no_op: int
+    conflict: int
+    total: int
+
+
+class ReconciliationResponse(BaseModel):
+    snapshot_id: int
+    items: list[dict]

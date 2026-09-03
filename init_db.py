@@ -52,6 +52,15 @@ _REQUIRED_TABLES = {
     "inbound_lines",
     "inventory_balances",
     "inventory_transactions",
+    "external_inventory_snapshots",
+    "external_event_inbox",
+    "reconciliation_results",
+    "inventory_policies",
+    "workspaces",
+    "user_accounts",
+    "workspace_memberships",
+    "warehouse_access",
+    "auth_sessions",
 }
 _REQUIRED_CRAWL_COLUMNS = {
     "type",

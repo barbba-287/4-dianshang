@@ -12,6 +12,7 @@ class Principal:
     tenant_id: str
     key_id: str | None = None
     scopes: tuple[str, ...] = ()
+    auth_type: str = "api_key"
 
 
 def demo_principal(settings: Settings) -> Principal:
@@ -37,4 +38,6 @@ def authenticate_api_key(value: str | None, settings: Settings) -> Principal | N
         subject=settings.api_user_id or "api-user",
         tenant_id=settings.api_tenant_id,
         key_id="static-api-key",
+        scopes=("*",),
+        auth_type="api_key",
     )
