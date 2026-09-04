@@ -41,6 +41,8 @@ from app.db import (  # noqa: F401  触发模型注册
     ExternalEventInbox,
     ReconciliationResult,
     InventoryPolicy,
+    InventoryAlert,
+    ExternalSyncRun,
 )
 
 

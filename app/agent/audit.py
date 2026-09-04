@@ -16,6 +16,7 @@ class AgentAuditRecord:
     ok: bool
     duration_ms: int
     tenant_id: str = "default"
+    workspace_id: int | None = None
     user_id: str | None = None
     request_id: str | None = None
     input_summary: str = ""

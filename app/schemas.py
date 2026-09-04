@@ -10,6 +10,8 @@ class DashboardSummaryResponse(BaseModel):
     recent_inbounds: list[dict]
     unsupported_metrics: list[str]
     limitations: list[str]
+    alert_summary: dict = Field(default_factory=dict)
+    snapshot_freshness: list[dict] = Field(default_factory=list)
 
 
 class InventoryPolicyCreate(BaseModel):
@@ -397,6 +399,8 @@ class ExternalInventoryIngestResponse(BaseModel):
     conflict: int
     total: int
     snapshot_ids: list[int]
+    sync_run_id: str | None = None
+    sync_status: str | None = None
 
 
 class ExternalEventIngestRequest(BaseModel):
@@ -411,6 +415,8 @@ class ExternalEventIngestResponse(BaseModel):
     no_op: int
     conflict: int
     total: int
+    sync_run_id: str | None = None
+    sync_status: str | None = None
 
 
 class ReconciliationResponse(BaseModel):

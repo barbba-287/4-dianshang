@@ -38,16 +38,26 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
-def upsert_product(db: Session, record: ProductRecord, *, source_run_id: str | None = None) -> Product:
-    product = db.scalar(
-        select(Product).where(
-            Product.source == record.source,
-            Product.external_product_id == record.external_product_id,
-        )
-    )
+def upsert_product(
+    db: Session,
+    record: ProductRecord,
+    *,
+    workspace_id: int | None = None,
+    source_run_id: str | None = None,
+) -> Product:
+    filters = [
+        Product.source == record.source,
+        Product.external_product_id == record.external_product_id,
+    ]
+    if workspace_id is not None:
+        filters.append(Product.workspace_id == workspace_id)
+    product = db.scalar(select(Product).where(*filters))
+    if product is not None and workspace_id is not None and product.workspace_id != workspace_id:
+        raise ValueError("PRODUCT_NOT_FOUND")
     observed_at = record.observed_at
     if product is None:
         product = Product(
+            workspace_id=workspace_id,
             source=record.source,
             external_product_id=record.external_product_id,
             title=record.title,
@@ -65,6 +75,7 @@ def upsert_product(db: Session, record: ProductRecord, *, source_run_id: str | N
         db.flush()
         db.add(
             ProductPriceHistory(
+                workspace_id=workspace_id,
                 product_id=product.id,
                 price=record.current_price,
                 currency=record.currency,
@@ -85,6 +96,7 @@ def upsert_product(db: Session, record: ProductRecord, *, source_run_id: str | N
             product.current_price = record.current_price
             db.add(
                 ProductPriceHistory(
+                    workspace_id=workspace_id,
                     product_id=product.id,
                     price=record.current_price,
                     currency=record.currency,
@@ -100,14 +112,16 @@ def upsert_product_batch(
     records: list[ProductRecord],
     *,
     source_run_id: str | None = None,
+    workspace_id: int | None = None,
 ) -> int:
-    """批量写入商品，返回本次实际新增或更新的商品数。
-
-    设计上与 upsert_product 保持一致；后续可在此函数内加入每 N 条
-    一次 commit、cancel 检查等节奏控制。S1 阶段保持简单。
-    """
+    """批量写入商品，返回本次实际新增或更新的商品数。"""
     for record in records:
-        upsert_product(db, record, source_run_id=source_run_id)
+        upsert_product(
+            db,
+            record,
+            workspace_id=workspace_id,
+            source_run_id=source_run_id,
+        )
     return len(records)
 
 
@@ -117,12 +131,14 @@ def import_records(
     *,
     keyword: str | None = None,
     job: CrawlJob | None = None,
+    workspace_id: int | None = None,
 ) -> CrawlJob:
     run_id = uuid4().hex
     if job is None:
         job = CrawlJob(
             source=records[0].source if records else "fixture",
             keyword=keyword,
+            workspace_id=workspace_id,
             status="running",
             started_at=_now(),
         )
@@ -130,7 +146,7 @@ def import_records(
         db.flush()
     try:
         for record in records:
-            upsert_product(db, record, source_run_id=run_id)
+            upsert_product(db, record, workspace_id=workspace_id, source_run_id=run_id)
         job.status = "succeeded"
         job.finished_at = _now()
         job.cursor = str(len(records))
@@ -148,10 +164,14 @@ def import_records(
     return job
 
 
-def start_job(db: Session, *, source: str, keyword: str | None = None) -> CrawlJob:
+def start_job(
+    db: Session, *, source: str, keyword: str | None = None,
+    workspace_id: int | None = None,
+) -> CrawlJob:
     job = CrawlJob(
         source=source,
         keyword=keyword,
+        workspace_id=workspace_id,
         status="running",
         started_at=_now(),
     )
@@ -180,6 +200,7 @@ def enqueue_job(
     payload: dict | None = None,
     max_retries: int | None = None,
     worker_id: str | None = None,
+    workspace_id: int | None = None,
 ) -> CrawlJob:
     """插入一条 queued 任务并返回。
 
@@ -191,6 +212,7 @@ def enqueue_job(
     job = CrawlJob(
         source=source,
         keyword=keyword,
+        workspace_id=workspace_id,
         type=type_,
         status=JobStatus.QUEUED.value,
         max_retries=max_retries if max_retries is not None else 2,
@@ -198,6 +220,7 @@ def enqueue_job(
     )
     if payload:
         job.cursor = _json.dumps(payload, ensure_ascii=False)
+        job.payload_json = job.cursor
     db.add(job)
     db.flush()
     db.commit()
@@ -414,9 +437,12 @@ def retry_job(
     return job
 
 
-def request_cancel(db: Session, *, job_id: int) -> CrawlJob | None:
+def request_cancel(db: Session, *, job_id: int, workspace_id: int | None = None) -> CrawlJob | None:
     """请求取消任务：写 cancel_requested=1。已终态任务返回 None。"""
-    job = db.get(CrawlJob, job_id)
+    filters = [CrawlJob.id == job_id]
+    if workspace_id is not None:
+        filters.append(CrawlJob.workspace_id == workspace_id)
+    job = db.scalar(select(CrawlJob).where(*filters))
     if job is None:
         return None
     if job.status in (JobStatus.SUCCEEDED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value):
@@ -453,12 +479,24 @@ def compute_backoff_seconds(attempt: int, base: float = 1.0, cap: float = 60.0) 
 # ---------- 仓储协同与库存 ----------
 
 
-def create_sku(db: Session, *, product_id: int, sku_code: str, variant_label: str | None = None, barcode: str | None = None, unit: str = "件") -> ProductSku:
-    if db.get(Product, product_id) is None:
+def create_sku(
+    db: Session, *, product_id: int, sku_code: str,
+    variant_label: str | None = None, barcode: str | None = None,
+    unit: str = "件", workspace_id: int,
+) -> ProductSku:
+    product = db.scalar(
+        select(Product).where(Product.id == product_id, Product.workspace_id == workspace_id)
+    )
+    if product is None:
         raise ValueError("PRODUCT_NOT_FOUND")
-    if db.scalar(select(ProductSku).where(ProductSku.sku_code == sku_code)) is not None:
+    if db.scalar(
+        select(ProductSku).where(
+            ProductSku.sku_code == sku_code,
+            ProductSku.workspace_id == workspace_id,
+        )
+    ) is not None:
         raise ValueError("SKU_CODE_EXISTS")
-    sku = ProductSku(product_id=product_id, sku_code=sku_code, variant_label=variant_label, barcode=barcode, unit=unit)
+    sku = ProductSku(workspace_id=workspace_id, product_id=product_id, sku_code=sku_code, variant_label=variant_label, barcode=barcode, unit=unit)
     db.add(sku)
     db.commit()
     db.refresh(sku)
@@ -503,39 +541,98 @@ def _inbound_response_data(order: InboundOrder, lines: list[InboundLine]) -> dic
     }
 
 
-def create_inbound(db: Session, *, warehouse_id: int, reference_no: str, lines: list[dict], note: str | None = None, created_by: str | None = None) -> InboundOrder:
-    warehouse = db.get(Warehouse, warehouse_id)
+def create_inbound(
+    db: Session,
+    *,
+    warehouse_id: int,
+    reference_no: str,
+    lines: list[dict],
+    note: str | None = None,
+    created_by: str | None = None,
+    workspace_id: int | None = None,
+) -> InboundOrder:
+    warehouse_query = select(Warehouse).where(Warehouse.id == warehouse_id)
+    if workspace_id is not None:
+        warehouse_query = warehouse_query.where(Warehouse.workspace_id == workspace_id)
+    warehouse = db.scalar(warehouse_query)
     if warehouse is None:
         raise ValueError("WAREHOUSE_NOT_FOUND")
     if not warehouse.is_active:
         raise ValueError("WAREHOUSE_INACTIVE")
-    if db.scalar(select(InboundOrder).where(InboundOrder.reference_no == reference_no)) is not None:
+    reference_query = select(InboundOrder).where(InboundOrder.reference_no == reference_no)
+    if workspace_id is not None:
+        reference_query = reference_query.where(InboundOrder.workspace_id == workspace_id)
+    if db.scalar(reference_query) is not None:
         raise ValueError("INBOUND_REFERENCE_EXISTS")
     sku_ids = [int(item["sku_id"]) for item in lines]
     if len(sku_ids) != len(set(sku_ids)):
         raise ValueError("DUPLICATE_SKU")
-    if any(db.get(ProductSku, sku_id) is None or not db.get(ProductSku, sku_id).is_active for sku_id in sku_ids):
+    sku_query = select(ProductSku).where(
+        ProductSku.id.in_(sku_ids), ProductSku.is_active.is_(True)
+    )
+    if workspace_id is not None:
+        sku_query = sku_query.where(ProductSku.workspace_id == workspace_id)
+    sku_rows = db.scalars(sku_query).all()
+    if len(sku_rows) != len(sku_ids):
         raise ValueError("SKU_NOT_FOUND")
-    order = InboundOrder(warehouse_id=warehouse_id, reference_no=reference_no, note=note, created_by=created_by)
+    if any(item.product_id != db.scalar(select(Product.id).where(Product.id == item.product_id, Product.workspace_id == workspace_id)) for item in sku_rows):
+        raise ValueError("SKU_NOT_FOUND")
+    order = InboundOrder(
+        workspace_id=workspace_id,
+        warehouse_id=warehouse_id,
+        reference_no=reference_no,
+        note=note,
+        created_by=created_by,
+    )
     db.add(order)
     db.flush()
     for item in lines:
-        db.add(InboundLine(inbound_order_id=order.id, sku_id=item["sku_id"], expected_qty=item["expected_qty"]))
+        db.add(InboundLine(
+            workspace_id=workspace_id,
+            inbound_order_id=order.id,
+            sku_id=item["sku_id"],
+            expected_qty=item["expected_qty"],
+        ))
     db.commit()
     db.refresh(order)
     return order
 
 
-def get_inbound(db: Session, *, inbound_id: int) -> tuple[InboundOrder, list[InboundLine]] | None:
-    order = db.get(InboundOrder, inbound_id)
+def get_inbound(
+    db: Session,
+    *,
+    inbound_id: int,
+    workspace_id: int | None = None,
+) -> tuple[InboundOrder, list[InboundLine]] | None:
+    query = select(InboundOrder).where(InboundOrder.id == inbound_id)
+    if workspace_id is not None:
+        query = query.where(InboundOrder.workspace_id == workspace_id)
+    order = db.scalar(query)
     if order is None:
         return None
-    lines = db.scalars(select(InboundLine).where(InboundLine.inbound_order_id == inbound_id).order_by(InboundLine.id)).all()
+    lines = db.scalars(
+        select(InboundLine)
+        .where(InboundLine.inbound_order_id == inbound_id)
+        .where(
+            InboundLine.workspace_id == workspace_id
+            if workspace_id is not None
+            else True
+        )
+        .order_by(InboundLine.id)
+    ).all()
     return order, lines
 
 
-def receive_inbound(db: Session, *, inbound_id: int, lines: list[dict], idempotency_key: str | None = None, payload_hash: str | None = None) -> tuple[InboundOrder, list[InboundLine]]:
-    result = get_inbound(db, inbound_id=inbound_id)
+def receive_inbound(
+    db: Session,
+    *,
+    inbound_id: int,
+    lines: list[dict],
+    idempotency_key: str | None = None,
+    payload_hash: str | None = None,
+    workspace_id: int | None = None,
+) -> tuple[InboundOrder, list[InboundLine]]:
+    result = get_inbound(db, inbound_id=inbound_id, workspace_id=workspace_id)
     if result is None:
         raise ValueError("INBOUND_NOT_FOUND")
     order, inbound_lines = result
@@ -567,11 +664,18 @@ def receive_inbound(db: Session, *, inbound_id: int, lines: list[dict], idempote
     except Exception:
         db.rollback()
         raise
-    return get_inbound(db, inbound_id=inbound_id)  # type: ignore[return-value]
+    return get_inbound(db, inbound_id=inbound_id, workspace_id=workspace_id)  # type: ignore[return-value]
 
 
-def confirm_inbound(db: Session, *, inbound_id: int, confirmed_by: str | None = None, idempotency_key: str | None = None) -> tuple[InboundOrder, list[InboundLine]]:
-    result = get_inbound(db, inbound_id=inbound_id)
+def confirm_inbound(
+    db: Session,
+    *,
+    inbound_id: int,
+    confirmed_by: str | None = None,
+    idempotency_key: str | None = None,
+    workspace_id: int | None = None,
+) -> tuple[InboundOrder, list[InboundLine]]:
+    result = get_inbound(db, inbound_id=inbound_id, workspace_id=workspace_id)
     if result is None:
         raise ValueError("INBOUND_NOT_FOUND")
     order, lines = result
@@ -586,12 +690,21 @@ def confirm_inbound(db: Session, *, inbound_id: int, confirmed_by: str | None = 
         for line in lines:
             accepted = line.received_qty - line.damaged_qty
             key = f"inbound:{order.id}:line:{line.id}:confirm"
-            transaction = db.scalar(select(InventoryTransaction).where(InventoryTransaction.idempotency_key == key))
+            transaction_filters = [InventoryTransaction.idempotency_key == key]
+            if workspace_id is not None:
+                transaction_filters.append(InventoryTransaction.workspace_id == workspace_id)
+            transaction = db.scalar(select(InventoryTransaction).where(*transaction_filters))
             if transaction is None:
-                db.add(InventoryTransaction(inbound_order_id=order.id, warehouse_id=order.warehouse_id, sku_id=line.sku_id, quantity_delta=accepted, movement_type="inbound_confirm", idempotency_key=key, created_by=confirmed_by))
-                balance = db.scalar(select(InventoryBalance).where(InventoryBalance.warehouse_id == order.warehouse_id, InventoryBalance.sku_id == line.sku_id))
+                db.add(InventoryTransaction(workspace_id=workspace_id, inbound_order_id=order.id, warehouse_id=order.warehouse_id, sku_id=line.sku_id, quantity_delta=accepted, movement_type="inbound_confirm", idempotency_key=key, created_by=confirmed_by))
+                balance_filters = [
+                    InventoryBalance.warehouse_id == order.warehouse_id,
+                    InventoryBalance.sku_id == line.sku_id,
+                ]
+                if workspace_id is not None:
+                    balance_filters.append(InventoryBalance.workspace_id == workspace_id)
+                balance = db.scalar(select(InventoryBalance).where(*balance_filters))
                 if balance is None:
-                    balance = InventoryBalance(warehouse_id=order.warehouse_id, sku_id=line.sku_id, on_hand_qty=0)
+                    balance = InventoryBalance(workspace_id=workspace_id, warehouse_id=order.warehouse_id, sku_id=line.sku_id, on_hand_qty=0)
                     db.add(balance)
                 balance.on_hand_qty += accepted
         order.status = "confirmed"
@@ -600,7 +713,7 @@ def confirm_inbound(db: Session, *, inbound_id: int, confirmed_by: str | None = 
     except Exception:
         db.rollback()
         raise
-    return get_inbound(db, inbound_id=inbound_id)  # type: ignore[return-value]
+    return get_inbound(db, inbound_id=inbound_id, workspace_id=workspace_id)  # type: ignore[return-value]
 
 
 def list_inventory(
@@ -613,7 +726,11 @@ def list_inventory(
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[dict], int]:
-    filters = []
+    filters = [
+        InventoryBalance.workspace_id == workspace_id,
+        Warehouse.workspace_id == workspace_id,
+        ProductSku.workspace_id == workspace_id,
+    ] if workspace_id is not None else []
     if warehouse_id is not None:
         filters.append(InventoryBalance.warehouse_id == warehouse_id)
     if warehouse_ids is not None:
@@ -627,6 +744,7 @@ def list_inventory(
     total = db.scalar(
         select(func.count(InventoryBalance.id))
         .join(Warehouse, Warehouse.id == InventoryBalance.warehouse_id)
+        .join(ProductSku, ProductSku.id == InventoryBalance.sku_id)
         .where(*filters)
     ) or 0
     rows = db.execute(
@@ -661,9 +779,13 @@ def upsert_document(
     title: str,
     filename: str,
     sha256_hex: str,
+    workspace_id: int | None = None,
 ) -> tuple[Document, bool]:
     """按 sha256 复用 document；返回 (document, created)。"""
-    existing = db.scalar(select(Document).where(Document.sha256 == sha256_hex))
+    filters = [Document.sha256 == sha256_hex]
+    if workspace_id is not None:
+        filters.append(Document.workspace_id == workspace_id)
+    existing = db.scalar(select(Document).where(*filters))
     if existing is not None:
         return existing, False
     doc = Document(
@@ -671,6 +793,7 @@ def upsert_document(
         title=title,
         filename=filename,
         sha256=sha256_hex,
+        workspace_id=workspace_id,
     )
     db.add(doc)
     db.flush()
@@ -684,6 +807,7 @@ def upsert_document_version(
     sha256_hex: str,
     size_bytes: int,
     storage_uri: str,
+    workspace_id: int | None = None,
 ) -> tuple[DocumentVersion, bool]:
     """同一 document 下若 sha256 已存在则复用；否则 version_no 自增。
 
@@ -693,17 +817,20 @@ def upsert_document_version(
         select(DocumentVersion).where(
             DocumentVersion.document_id == document.id,
             DocumentVersion.sha256 == sha256_hex,
+            DocumentVersion.workspace_id == workspace_id,
         )
     )
     if existing is not None:
         return existing, False
     current_max = db.scalar(
         select(func.max(DocumentVersion.version_no)).where(
-            DocumentVersion.document_id == document.id
+            DocumentVersion.document_id == document.id,
+            DocumentVersion.workspace_id == workspace_id,
         )
     )
     version_no = (current_max or 0) + 1
     version = DocumentVersion(
+        workspace_id=workspace_id,
         document_id=document.id,
         version_no=version_no,
         sha256=sha256_hex,
@@ -726,8 +853,10 @@ def append_document_chunk(
     token_count: int,
     page_no: int | None = None,
     paragraph_no: int | None = None,
+    workspace_id: int | None = None,
 ) -> DocumentChunk:
     chunk = DocumentChunk(
+        workspace_id=workspace_id,
         document_version_id=version_id,
         chunk_no=chunk_no,
         text=text,
@@ -741,28 +870,42 @@ def append_document_chunk(
     return chunk
 
 
-def mark_version_ready(db: Session, *, version_id: int) -> None:
-    db.execute(
-        update(DocumentVersion)
-        .where(DocumentVersion.id == version_id)
-        .values(status="ready")
-    )
+def mark_version_ready(
+    db: Session, *, version_id: int, workspace_id: int | None = None
+) -> None:
+    filters = [DocumentVersion.id == version_id]
+    if workspace_id is not None:
+        filters.append(DocumentVersion.workspace_id == workspace_id)
+    db.execute(update(DocumentVersion).where(*filters).values(status="ready"))
     db.commit()
 
 
 def mark_version_failed(
-    db: Session, *, version_id: int, code: str, message: str
+    db: Session,
+    *,
+    version_id: int,
+    code: str,
+    message: str,
+    workspace_id: int | None = None,
 ) -> None:
+    filters = [DocumentVersion.id == version_id]
+    if workspace_id is not None:
+        filters.append(DocumentVersion.workspace_id == workspace_id)
     db.execute(
         update(DocumentVersion)
-        .where(DocumentVersion.id == version_id)
+        .where(*filters)
         .values(status="failed", error_code=code, error_message=message[:500])
     )
     db.commit()
 
 
-def publish_version(db: Session, *, version_id: int) -> DocumentVersion:
-    version = db.get(DocumentVersion, version_id)
+def publish_version(
+    db: Session, *, version_id: int, workspace_id: int | None = None
+) -> DocumentVersion:
+    filters = [DocumentVersion.id == version_id]
+    if workspace_id is not None:
+        filters.append(DocumentVersion.workspace_id == workspace_id)
+    version = db.scalar(select(DocumentVersion).where(*filters))
     if version is None:
         raise ValueError(f"version {version_id} 不存在")
     if version.status != "ready":
@@ -779,6 +922,7 @@ def link_document_product(
     document_version_id: int,
     product_id: int,
     relation: str,
+    workspace_id: int | None = None,
 ) -> DocumentProductLink | None:
     """幂等写入：同三元组重复返回 None。"""
     existing = db.scalar(
@@ -786,11 +930,13 @@ def link_document_product(
             DocumentProductLink.document_version_id == document_version_id,
             DocumentProductLink.product_id == product_id,
             DocumentProductLink.relation == relation,
+            DocumentProductLink.workspace_id == workspace_id,
         )
     )
     if existing is not None:
         return None
     link = DocumentProductLink(
+        workspace_id=workspace_id,
         document_version_id=document_version_id,
         product_id=product_id,
         relation=relation,
@@ -801,31 +947,37 @@ def link_document_product(
 
 
 def list_products_by_external_ids(
-    db: Session, *, external_ids: list[str]
+    db: Session, *, external_ids: list[str], workspace_id: int | None = None
 ) -> list[Product]:
     if not external_ids:
         return []
-    return db.scalars(
-        select(Product).where(Product.external_product_id.in_(external_ids))
-    ).all()
+    filters = [Product.external_product_id.in_(external_ids)]
+    if workspace_id is not None:
+        filters.append(Product.workspace_id == workspace_id)
+    return db.scalars(select(Product).where(*filters)).all()
 
 
-def list_all_products(db: Session, *, limit: int = 1000) -> list[Product]:
+def list_all_products(db: Session, *, limit: int = 1000, workspace_id: int | None = None) -> list[Product]:
     """用于文档启发式关联的兜底扫描。"""
-    return db.scalars(select(Product).limit(limit)).all()
+    filters = [Product.workspace_id == workspace_id] if workspace_id is not None else []
+    return db.scalars(select(Product).where(*filters).limit(limit)).all()
 
 
-def count_chunks(db: Session, *, version_id: int) -> int:
-    return db.scalar(
-        select(func.count(DocumentChunk.id)).where(
-            DocumentChunk.document_version_id == version_id
-        )
-    ) or 0
+def count_chunks(
+    db: Session, *, version_id: int, workspace_id: int | None = None
+) -> int:
+    filters = [DocumentChunk.document_version_id == version_id]
+    if workspace_id is not None:
+        filters.append(DocumentChunk.workspace_id == workspace_id)
+    return db.scalar(select(func.count(DocumentChunk.id)).where(*filters)) or 0
 
 
-def list_versions_for_document(db: Session, *, document_id: int) -> list[DocumentVersion]:
+def list_versions_for_document(
+    db: Session, *, document_id: int, workspace_id: int | None = None
+) -> list[DocumentVersion]:
+    filters = [DocumentVersion.document_id == document_id]
+    if workspace_id is not None:
+        filters.append(DocumentVersion.workspace_id == workspace_id)
     return db.scalars(
-        select(DocumentVersion)
-        .where(DocumentVersion.document_id == document_id)
-        .order_by(DocumentVersion.version_no.desc())
+        select(DocumentVersion).where(*filters).order_by(DocumentVersion.version_no.desc())
     ).all()

@@ -44,7 +44,7 @@ def search_products_handler(payload: dict, context: ToolContext) -> dict:
 
     db: Session = SessionLocal()
     try:
-        filters = []
+        filters = [Product.workspace_id == context.workspace_id]
         if keyword:
             filters.append(Product.title.contains(keyword))
         if category:
@@ -71,7 +71,7 @@ def get_product_detail_handler(payload: dict, context: ToolContext) -> dict:
     product_id = int(payload["product_id"])
     db: Session = SessionLocal()
     try:
-        product = db.get(Product, product_id)
+        product = db.scalar(select(Product).where(Product.id == product_id, Product.workspace_id == context.workspace_id))
         if product is None:
             return {"error": "PRODUCT_NOT_FOUND", "product_id": product_id}
         return _serialize_product(product)
@@ -83,11 +83,15 @@ def get_price_history_handler(payload: dict, context: ToolContext) -> dict:
     product_id = int(payload["product_id"])
     db: Session = SessionLocal()
     try:
-        if db.get(Product, product_id) is None:
+        product = db.scalar(select(Product).where(Product.id == product_id, Product.workspace_id == context.workspace_id))
+        if product is None:
             return {"error": "PRODUCT_NOT_FOUND", "product_id": product_id}
         rows = db.scalars(
             select(ProductPriceHistory)
-            .where(ProductPriceHistory.product_id == product_id)
+            .where(
+                ProductPriceHistory.product_id == product_id,
+                ProductPriceHistory.workspace_id == context.workspace_id,
+            )
             .order_by(
                 ProductPriceHistory.observed_at.asc(),
                 ProductPriceHistory.id.asc(),

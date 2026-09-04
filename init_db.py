@@ -61,6 +61,8 @@ _REQUIRED_TABLES = {
     "workspace_memberships",
     "warehouse_access",
     "auth_sessions",
+    "inventory_alerts",
+    "external_sync_runs",
 }
 _REQUIRED_CRAWL_COLUMNS = {
     "type",

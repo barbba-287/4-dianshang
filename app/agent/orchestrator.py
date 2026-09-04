@@ -89,6 +89,7 @@ class AgentOrchestrator:
             ok=result.ok,
             duration_ms=result.duration_ms,
             tenant_id=context.tenant_id,
+            workspace_id=context.workspace_id,
             user_id=context.user_id,
             request_id=context.request_id,
             input_summary=summarise(action.input),

@@ -9,7 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, create_engine
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.config import get_settings
@@ -108,10 +108,18 @@ class AuthSession(Base):
 class Product(Base):
     __tablename__ = "products"
     __table_args__ = (
-        UniqueConstraint("source", "external_product_id", name="uq_product_source_external_id"),
+        UniqueConstraint(
+            "workspace_id",
+            "source",
+            "external_product_id",
+            name="uq_product_workspace_source_external_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     source: Mapped[str] = mapped_column(String(64), default="fixture", index=True)
     external_product_id: Mapped[str] = mapped_column(String(128), index=True)
     title: Mapped[str] = mapped_column(String(255), index=True)
@@ -132,6 +140,9 @@ class ProductPriceHistory(Base):
     __tablename__ = "product_price_history"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     currency: Mapped[str] = mapped_column(String(8), default="CNY")
@@ -143,11 +154,15 @@ class CrawlJob(Base):
     __tablename__ = "crawl_jobs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     source: Mapped[str] = mapped_column(String(64), default="fixture")
     keyword: Mapped[str | None] = mapped_column(String(255), nullable=True)
     type: Mapped[str] = mapped_column(String(32), default="crawl_fixture", index=True)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_count: Mapped[int] = mapped_column(default=0)
     max_retries: Mapped[int] = mapped_column(default=2)
     attempt: Mapped[int] = mapped_column(default=0)
@@ -172,8 +187,14 @@ LINK_RELATIONS = ("mention", "spec")
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "sha256", name="uq_document_workspace_sha256"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     source_type: Mapped[str] = mapped_column(String(16), index=True)
     title: Mapped[str] = mapped_column(String(255))
     filename: Mapped[str] = mapped_column(String(512))
@@ -189,6 +210,9 @@ class DocumentVersion(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
     version_no: Mapped[int] = mapped_column(Integer)
     sha256: Mapped[str] = mapped_column(String(64))
@@ -210,6 +234,9 @@ class DocumentChunk(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     document_version_id: Mapped[int] = mapped_column(ForeignKey("document_versions.id"), index=True)
     chunk_no: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)
@@ -228,6 +255,9 @@ class DocumentProductLink(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     document_version_id: Mapped[int] = mapped_column(ForeignKey("document_versions.id"), index=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     relation: Mapped[str] = mapped_column(String(16))
@@ -237,10 +267,13 @@ class DocumentProductLink(Base):
 class ProductSku(Base):
     __tablename__ = "product_skus"
     __table_args__ = (
-        UniqueConstraint("sku_code", name="uq_product_sku_code"),
+        UniqueConstraint("workspace_id", "sku_code", name="uq_product_workspace_sku_code"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
     sku_code: Mapped[str] = mapped_column(String(128), index=True)
     variant_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -256,7 +289,7 @@ class ProductSku(Base):
 class Warehouse(Base):
     __tablename__ = "warehouses"
     __table_args__ = (
-        UniqueConstraint("code", name="uq_warehouse_code"),
+        UniqueConstraint("workspace_id", "code", name="uq_warehouse_workspace_code"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -278,10 +311,13 @@ class Warehouse(Base):
 class InboundOrder(Base):
     __tablename__ = "inbound_orders"
     __table_args__ = (
-        UniqueConstraint("reference_no", name="uq_inbound_reference_no"),
+        UniqueConstraint("workspace_id", "reference_no", name="uq_inbound_workspace_reference_no"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), index=True)
     reference_no: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(24), default="expected", index=True)
@@ -306,6 +342,9 @@ class InboundLine(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     inbound_order_id: Mapped[int] = mapped_column(
         ForeignKey("inbound_orders.id"), index=True
     )
@@ -319,10 +358,13 @@ class InboundLine(Base):
 class InventoryTransaction(Base):
     __tablename__ = "inventory_transactions"
     __table_args__ = (
-        UniqueConstraint("idempotency_key", name="uq_inventory_transaction_key"),
+        UniqueConstraint("workspace_id", "idempotency_key", name="uq_inventory_transaction_workspace_key"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     inbound_order_id: Mapped[int | None] = mapped_column(
         ForeignKey("inbound_orders.id"), nullable=True, index=True
     )
@@ -336,13 +378,44 @@ class InventoryTransaction(Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class ExternalInventorySnapshot(Base):
-    __tablename__ = "external_inventory_snapshots"
+class ExternalSyncRun(Base):
+    __tablename__ = "external_sync_runs"
     __table_args__ = (
-        UniqueConstraint("platform", "account_ref", "external_sku", "as_of", "payload_hash", name="uq_external_snapshot_identity"),
+        UniqueConstraint("workspace_id", "run_id", name="uq_external_sync_run_workspace_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
+    run_id: Mapped[str] = mapped_column(String(64), index=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    account_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    store_ref: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    sync_type: Mapped[str] = mapped_column(String(16), index=True)
+    source_mode: Mapped[str] = mapped_column(String(16), default="mock")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(16), default="running", index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    inserted: Mapped[int] = mapped_column(Integer, default=0)
+    no_op: Mapped[int] = mapped_column(Integer, default=0)
+    conflict: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ExternalInventorySnapshot(Base):
+    __tablename__ = "external_inventory_snapshots"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "platform", "account_ref", "external_sku", "as_of", "payload_hash", name="uq_external_snapshot_workspace_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     platform: Mapped[str] = mapped_column(String(32), index=True)
     account_ref: Mapped[str] = mapped_column(String(128), index=True)
     store_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -357,6 +430,7 @@ class ExternalInventorySnapshot(Base):
     as_of: Mapped[datetime] = mapped_column(DateTime, index=True)
     received_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     payload_hash: Mapped[str] = mapped_column(String(72), index=True)
+    sync_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(255), index=True)
     raw_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
     source_mode: Mapped[str] = mapped_column(String(16), default="mock")
@@ -367,10 +441,13 @@ class ExternalInventorySnapshot(Base):
 class ExternalEventInbox(Base):
     __tablename__ = "external_event_inbox"
     __table_args__ = (
-        UniqueConstraint("platform", "account_ref", "idempotency_key", name="uq_external_event_key"),
+        UniqueConstraint("workspace_id", "platform", "account_ref", "idempotency_key", name="uq_external_event_workspace_key"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     platform: Mapped[str] = mapped_column(String(32), index=True)
     account_ref: Mapped[str] = mapped_column(String(128), index=True)
     external_event_id: Mapped[str] = mapped_column(String(255), index=True)
@@ -380,6 +457,7 @@ class ExternalEventInbox(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     received_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     payload_hash: Mapped[str] = mapped_column(String(72), index=True)
+    sync_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(255), index=True)
     payload_json: Mapped[str] = mapped_column(Text)
     raw_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -393,10 +471,13 @@ class ExternalEventInbox(Base):
 class ReconciliationResult(Base):
     __tablename__ = "reconciliation_results"
     __table_args__ = (
-        UniqueConstraint("snapshot_id", "external_sku", "warehouse_id", name="uq_reconciliation_result_identity"),
+        UniqueConstraint("workspace_id", "snapshot_id", "external_sku", "warehouse_id", name="uq_reconciliation_workspace_identity"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     snapshot_id: Mapped[int] = mapped_column(ForeignKey("external_inventory_snapshots.id"), index=True)
     platform: Mapped[str] = mapped_column(String(32), index=True)
     external_sku: Mapped[str] = mapped_column(String(255), index=True)
@@ -413,9 +494,14 @@ class ReconciliationResult(Base):
 
 class InventoryPolicy(Base):
     __tablename__ = "inventory_policies"
-    __table_args__ = (UniqueConstraint("warehouse_id", "sku_id", name="uq_inventory_policy_warehouse_sku"),)
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "warehouse_id", "sku_id", name="uq_inventory_policy_workspace_warehouse_sku"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), index=True)
     sku_id: Mapped[int] = mapped_column(ForeignKey("product_skus.id"), index=True)
     safety_stock_qty: Mapped[int] = mapped_column(Integer, default=0)
@@ -424,15 +510,42 @@ class InventoryPolicy(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class InventoryAlert(Base):
+    __tablename__ = "inventory_alerts"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "dedupe_key", name="uq_inventory_alert_workspace_dedupe"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    severity: Mapped[str] = mapped_column(String(16), default="warning", index=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(255), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    message: Mapped[str] = mapped_column(Text)
+    warehouse_id: Mapped[int | None] = mapped_column(ForeignKey("warehouses.id"), nullable=True, index=True)
+    sku_id: Mapped[int | None] = mapped_column(ForeignKey("product_skus.id"), nullable=True, index=True)
+    platform: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class InventoryBalance(Base):
     __tablename__ = "inventory_balances"
     __table_args__ = (
         UniqueConstraint(
-            "warehouse_id", "sku_id", name="uq_inventory_balance_warehouse_sku"
+            "workspace_id", "warehouse_id", "sku_id", name="uq_inventory_balance_workspace_warehouse_sku"
         ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
     warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), index=True)
     sku_id: Mapped[int] = mapped_column(ForeignKey("product_skus.id"), index=True)
     on_hand_qty: Mapped[int] = mapped_column(Integer, default=0)
@@ -441,10 +554,88 @@ class InventoryBalance(Base):
     )
 
 
+def backfill_legacy_workspace(db, workspace_id: int) -> int:
+    """将单工作空间兼容库中的未归属旧数据绑定到该空间。
+
+    旧版本没有 workspace_id；只有在调用方已经确认目标空间是唯一活动空间时
+    才允许执行，避免把无法判定归属的数据静默分配给错误商家。
+    """
+    models = (
+        Product,
+        ProductPriceHistory,
+        CrawlJob,
+        Document,
+        DocumentVersion,
+        DocumentChunk,
+        DocumentProductLink,
+        ProductSku,
+        Warehouse,
+        InboundOrder,
+        InboundLine,
+        InventoryTransaction,
+        InventoryBalance,
+        ExternalInventorySnapshot,
+        ExternalEventInbox,
+    ExternalSyncRun,
+        ReconciliationResult,
+        InventoryPolicy,
+        InventoryAlert,
+    )
+    changed = 0
+    for model in models:
+        changed += int(
+            db.query(model)
+            .filter(model.workspace_id.is_(None))
+            .update({model.workspace_id: workspace_id}, synchronize_session=False)
+        )
+    if changed:
+        db.commit()
+    return changed
+
+
 def init_db() -> None:
+    """启动时确保数据库完成 Alembic 升级。
+
+    测试和一次性脚本可能先用 ``Base.metadata.create_all`` 建立当前模型；
+    这种没有 alembic_version 但已是完整新 schema 的库只需 stamp。真正的
+    legacy 库交给 state-aware 初始化器处理，避免静默跳过 repair migration。
+    """
     settings.resolve_path("data").mkdir(parents=True, exist_ok=True)
     settings.resolve_path(settings.artifacts_dir).mkdir(parents=True, exist_ok=True)
-    Base.metadata.create_all(engine)
+
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "alembic_version" not in tables:
+        if not tables.intersection({"products", "crawl_jobs"}):
+            from alembic import command
+            from alembic.config import Config
+
+            cfg = Config(str(settings.project_root / "alembic.ini"))
+            cfg.set_main_option("sqlalchemy.url", settings.database_url)
+            command.upgrade(cfg, "head")
+            return
+        product_columns = {column["name"] for column in inspector.get_columns("products")}
+        required_current = {"workspace_id", "source", "external_product_id"}
+        required_tables = {"products", "crawl_jobs", "workspaces", "documents"}
+        if required_current.issubset(product_columns) and required_tables.issubset(tables):
+            from alembic import command
+            from alembic.config import Config
+
+            cfg = Config(str(settings.project_root / "alembic.ini"))
+            cfg.set_main_option("sqlalchemy.url", settings.database_url)
+            command.stamp(cfg, "head")
+            return
+        from init_db import main as initialize_legacy
+
+        initialize_legacy()
+        return
+
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(settings.project_root / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", settings.database_url)
+    command.upgrade(cfg, "head")
 
 
 def get_db() -> Generator:

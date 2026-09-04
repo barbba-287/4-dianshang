@@ -199,6 +199,7 @@ def submit_crawl_fixture(
     keyword: str | None = "fixture",
     page_size: int = 1000,
     max_retries: int | None = None,
+    workspace_id: int | None = None,
 ) -> CrawlJob:
     """把 fixture 采集任务入队；立刻返回 queued 任务对象。
 
@@ -211,6 +212,7 @@ def submit_crawl_fixture(
         keyword=keyword,
         payload={"fixture_path": str(fixture_path), "page_size": page_size},
         max_retries=max_retries,
+        workspace_id=workspace_id,
     )
     _submit_future(job.id)
     return job
@@ -225,6 +227,7 @@ def submit_document_import(
     filename: str,
     source_type: str,
     max_retries: int | None = None,
+    workspace_id: int | None = None,
 ) -> CrawlJob:
     """把文档导入任务入队。"""
     job = enqueue_job(
@@ -238,13 +241,14 @@ def submit_document_import(
             "storage_uri": storage_uri,
         },
         max_retries=max_retries,
+        workspace_id=workspace_id,
     )
     _submit_future(job.id)
     return job
 
 
-def request_cancel_job(db: Session, *, job_id: int) -> CrawlJob | None:
-    return request_cancel(db, job_id=job_id)
+def request_cancel_job(db: Session, *, job_id: int, workspace_id: int | None = None) -> CrawlJob | None:
+    return request_cancel(db, job_id=job_id, workspace_id=workspace_id)
 
 
 # ---------- 内部：cancel futures 与心跳续约 ----------
@@ -382,7 +386,7 @@ def _execute_crawl_fixture(db: Session, job: CrawlJob) -> None:
 
     settings = get_settings()
     records = collect_fixture(fixture_path)
-    n = upsert_product_batch(db, records, source_run_id=job.run_id)
+    n = upsert_product_batch(db, records, workspace_id=job.workspace_id, source_run_id=job.run_id)
     db.commit()
     job.cursor = str(n)
 
@@ -427,12 +431,18 @@ def _execute_document_import(db: Session, job: CrawlJob) -> None:
     content = full_path.read_bytes()
     actual_sha = content_sha256(content)
 
-    document_version = db.get(DocumentVersion, version_id)
+    document_version = db.scalar(
+        select(DocumentVersion).where(
+            DocumentVersion.id == version_id,
+            DocumentVersion.workspace_id == job.workspace_id,
+            DocumentVersion.document_id == document_id,
+        )
+    )
     if document_version is None:
         raise FileNotFoundError(f"document_version {version_id} 不存在")
     if actual_sha != document_version.sha256:
         mark_version_failed(
-            db, version_id=version_id, code="CONTENT_HASH_MISMATCH", message="存储文件完整性校验失败"
+            db, version_id=version_id, code="CONTENT_HASH_MISMATCH", message="存储文件完整性校验失败", workspace_id=job.workspace_id
         )
         raise ParserError("CONTENT_HASH_MISMATCH", "存储文件完整性校验失败")
     parser = get_parser(job.source)
@@ -441,12 +451,12 @@ def _execute_document_import(db: Session, job: CrawlJob) -> None:
         chunks: list[ChunkDraft] = list(parser.parse(content, filename=full_path.name))
     except ParserError as exc:
         mark_version_failed(
-            db, version_id=version_id, code=exc.code, message=exc.message
+            db, version_id=version_id, code=exc.code, message=exc.message, workspace_id=job.workspace_id
         )
         raise
     except Exception as exc:  # noqa: BLE001 - parser 库异常统一转为失败版本
         mark_version_failed(
-            db, version_id=version_id, code="PARSER_ERROR", message="文档解析失败"
+            db, version_id=version_id, code="PARSER_ERROR", message="文档解析失败", workspace_id=job.workspace_id
         )
         raise ParserError("PARSER_ERROR", "文档解析失败") from exc
 
@@ -461,10 +471,11 @@ def _execute_document_import(db: Session, job: CrawlJob) -> None:
             token_count=estimate_token_count(draft.text),
             page_no=draft.page_no,
             paragraph_no=draft.paragraph_no,
+            workspace_id=job.workspace_id,
         )
 
     # 启发式商品关联
-    products = db.scalars(select(Product)).all()
+    products = db.scalars(select(Product).where(Product.workspace_id == job.workspace_id)).all()
     haystack = "\n".join(draft.text for draft in chunks)
     for product in products:
         candidates = [product.external_product_id, product.url, product.title]
@@ -475,11 +486,12 @@ def _execute_document_import(db: Session, job: CrawlJob) -> None:
                     document_version_id=version_id,
                     product_id=product.id,
                     relation="mention",
+                    workspace_id=job.workspace_id,
                 )
                 break
 
     db.commit()
-    mark_version_ready(db, version_id=version_id)
+    mark_version_ready(db, version_id=version_id, workspace_id=job.workspace_id)
     job.cursor = str(len(chunks))
 
     # 入队 S3 索引任务
@@ -487,6 +499,7 @@ def _execute_document_import(db: Session, job: CrawlJob) -> None:
         db,
         document_id=document_id,
         version_id=version_id,
+        workspace_id=job.workspace_id,
     )
 
 
@@ -496,6 +509,7 @@ def submit_chunk_index(
     document_id: int,
     version_id: int,
     max_retries: int | None = None,
+    workspace_id: int | None = None,
 ) -> CrawlJob:
     """S3 索引任务入队：把 version 下所有 chunks embed 到向量库。"""
     job = enqueue_job(
@@ -503,6 +517,7 @@ def submit_chunk_index(
         type_="document_index",
         source="index",
         keyword=f"v{version_id}",
+        workspace_id=workspace_id,
         payload={"document_id": document_id, "version_id": version_id},
         max_retries=max_retries,
     )
@@ -520,13 +535,21 @@ def _execute_document_index(db: Session, job: CrawlJob) -> None:
     version_id = int(payload["version_id"])
     document_id = int(payload["document_id"])
 
-    version = db.get(DocumentVersion, version_id)
+    version = db.scalar(
+        select(DocumentVersion).where(
+            DocumentVersion.id == version_id,
+            DocumentVersion.workspace_id == job.workspace_id,
+        )
+    )
     if version is None:
         raise FileNotFoundError(f"document_version {version_id} 不存在")
 
     chunks = db.scalars(
         select(DocumentChunk)
-        .where(DocumentChunk.document_version_id == version_id)
+        .where(
+            DocumentChunk.document_version_id == version_id,
+            DocumentChunk.workspace_id == job.workspace_id,
+        )
         .order_by(DocumentChunk.chunk_no)
     ).all()
     if not chunks:
@@ -555,6 +578,7 @@ def _execute_document_index(db: Session, job: CrawlJob) -> None:
                     "chunk_id": chunk.id,
                     "document_id": document_id,
                     "document_version_id": version_id,
+                    "workspace_id": job.workspace_id,
                     "snippet": snippet,
                     "locator": locator,
                     "version_no": version.version_no,
@@ -566,13 +590,13 @@ def _execute_document_index(db: Session, job: CrawlJob) -> None:
 
 
 def _decode_job_payload(job: CrawlJob) -> dict:
-    """从 keyword 与 cursor 字段还原提交时的 payload。"""
+    """读取 immutable payload；兼容 0007 前写入 cursor 的旧任务。"""
     import json
 
-    cursor = job.cursor
-    if cursor:
+    raw = job.payload_json or job.cursor
+    if raw:
         try:
-            return json.loads(cursor)
+            return json.loads(raw) if isinstance(raw, str) else dict(raw)
         except (ValueError, TypeError):
             return {}
     return {}

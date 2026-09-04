@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     vector_store_path: str = "data/vectors.json"
     rag_top_k: int = 5
     rag_min_score: float = 0.2
+    external_snapshot_stale_after_seconds: int = 24 * 60 * 60
 
     # S7 API 安全（默认关闭以保留本地演示兼容）
     api_auth_enabled: bool = False

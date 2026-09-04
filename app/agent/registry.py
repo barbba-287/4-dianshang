@@ -91,6 +91,7 @@ def _matches_type(value: Any, expected: str) -> bool:
 @dataclass
 class ToolContext:
     tenant_id: str = "default"
+    workspace_id: int | None = None
     user_id: str | None = None
     request_id: str | None = None
     extras: dict = field(default_factory=dict)
@@ -163,7 +164,6 @@ class AgentToolRegistry:
                 error_code=exc.code,
                 error_message=exc.message,
             )
-
         start = monotonic()
         try:
             output = tool.handler(payload, context)

@@ -102,7 +102,20 @@ class InMemoryVectorStore:
         scored: list[tuple[VectorRecord, float]] = []
         for record in self._records.values():
             if filter_payload:
-                if any(record.payload.get(k) != v for k, v in filter_payload.items()):
+                matches = True
+                for key, expected in filter_payload.items():
+                    actual = record.payload.get(key)
+                    # A document may be linked to more than one product.  Treat
+                    # list-valued payload fields as a membership filter while
+                    # retaining exact matching for scalar metadata.
+                    if isinstance(actual, (list, tuple, set)):
+                        if expected not in actual:
+                            matches = False
+                            break
+                    elif actual != expected:
+                        matches = False
+                        break
+                if not matches:
                     continue
             score = cosine_similarity(vector, record.vector)
             if score < score_threshold:

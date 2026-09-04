@@ -15,7 +15,7 @@ import json
 import logging
 import uuid
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Body, Depends, File, Form, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import func, select, text
@@ -100,7 +100,9 @@ from app.schemas import (
     AdminUserPatch,
     AdminUserPasswordReset,
     WarehouseAccessRequest,
+    AlertResponse,
 )
+
 from app.storage import StorageError, enforce_size_limit, save_upload
 from app.versioning import content_sha256
 from app.upload_security import validate_content
@@ -155,9 +157,10 @@ async def request_context_middleware(request: Request, call_next):
             )
 
     if request.url.path.startswith("/api/"):
-        principal = session_principal or authenticate_api_key(
-            request.headers.get("X-API-Key"), settings
-        )
+        with get_db_session_for_health() as auth_db:
+            principal = session_principal or authenticate_api_key(
+                request.headers.get("X-API-Key"), settings, db=auth_db
+            )
         if settings.employee_auth_enabled and (
             principal is None or getattr(principal, "auth_type", None) in ("demo", "api_key")
         ):
@@ -273,6 +276,8 @@ def login(request: Request, login: str = Form(...), password: str = Form(...), n
     membership = db.scalar(select(WorkspaceMembership).where(WorkspaceMembership.user_id == user.id, WorkspaceMembership.status == "active")) if user else None
     if user is None or user.status != "active" or membership is None or not verify_password(password, user.password_hash):
         raise HTTPException(status_code=401, detail={"code": "INVALID_CREDENTIALS", "message": "账户或密码错误"})
+    from app.db import backfill_legacy_workspace
+    backfill_legacy_workspace(db, membership.workspace_id)
     token, csrf, _session = create_session(db, user=user, membership=membership, settings=get_settings(), ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
     from datetime import datetime
     user.last_login_at = datetime.utcnow()
@@ -475,10 +480,11 @@ def enqueue_crawl(
     request: Request,
     db: Session = Depends(get_db),
 ) -> CrawlJob:
-    require_principal(request, permission="catalog.write")
-    """入队一个 fixture 采集任务，立刻返回任务详情。"""
+    principal = require_principal(request, permission="catalog.write")
+    if principal.workspace_id is None:
+        raise HTTPException(status_code=503, detail={"code": "WORKSPACE_CONTEXT_REQUIRED", "message": "工作空间上下文缺失"})
     fixture = Path(__file__).resolve().parent.parent / "fixtures" / "products.html"
-    job = submit_crawl_fixture(db, fixture_path=fixture, keyword="fixture")
+    job = submit_crawl_fixture(db, fixture_path=fixture, keyword="fixture", workspace_id=principal.workspace_id)
     return job
 
 
@@ -489,14 +495,14 @@ def list_jobs(
     request: Request,
     limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)
 ) -> list[CrawlJob]:
-    require_principal(request, permission="catalog.read")
-    return db.scalars(select(CrawlJob).order_by(CrawlJob.id.desc()).limit(limit)).all()
+    principal = require_principal(request, permission="catalog.read")
+    return db.scalars(select(CrawlJob).where(CrawlJob.workspace_id == principal.workspace_id).order_by(CrawlJob.id.desc()).limit(limit)).all()
 
 
 @app.get("/api/crawl/{job_id}", response_model=CrawlJobDetailResponse)
 def get_crawl_job(job_id: int, request: Request, db: Session = Depends(get_db)) -> CrawlJob:
-    require_principal(request, permission="catalog.read")
-    job = db.get(CrawlJob, job_id)
+    principal = require_principal(request, permission="catalog.read")
+    job = db.scalar(select(CrawlJob).where(CrawlJob.id == job_id, CrawlJob.workspace_id == principal.workspace_id))
     if job is None:
         raise HTTPException(status_code=404, detail={"code": "JOB_NOT_FOUND", "message": "任务不存在"})
     return job
@@ -504,8 +510,8 @@ def get_crawl_job(job_id: int, request: Request, db: Session = Depends(get_db)) 
 
 @app.post("/api/crawl/{job_id}/cancel", response_model=CrawlJobDetailResponse)
 def cancel_crawl_job(job_id: int, request: Request, db: Session = Depends(get_db)) -> CrawlJob:
-    require_principal(request, permission="catalog.write")
-    job = request_cancel_job(db, job_id=job_id)
+    principal = require_principal(request, permission="catalog.write")
+    job = request_cancel_job(db, job_id=job_id, workspace_id=principal.workspace_id)
     if job is None:
         raise HTTPException(status_code=404, detail={"code": "JOB_NOT_FOUND", "message": "任务不存在"})
     return job
@@ -525,7 +531,7 @@ async def upload_document(
     title: str | None = Form(default=None),
     db: Session = Depends(get_db)
 ) -> DocumentUploadResponse:
-    require_principal(request, permission="knowledge.write")
+    principal = require_principal(request, permission="knowledge.write")
     """上传 PDF / DOCX；按 sha256 自动复用 / 新建 document + version。
 
     立即返回任务 ID，实际解析在后台 executor 中执行。
@@ -564,6 +570,7 @@ async def upload_document(
 
     document, _doc_created = upsert_document(
         db,
+        workspace_id=principal.workspace_id,
         source_type=source_type,
         title=title or file.filename or sha,
         filename=file.filename or sha,
@@ -581,6 +588,7 @@ async def upload_document(
         sha256_hex=sha,
         size_bytes=len(content),
         storage_uri=storage_uri,
+        workspace_id=principal.workspace_id,
     )
     db.commit()
 
@@ -592,12 +600,14 @@ async def upload_document(
             storage_uri=storage_uri,
             filename=document.filename,
             source_type=source_type,
+            workspace_id=principal.workspace_id,
         )
     else:
         # 重复上传相同内容：复用现有 version，不重复入队
         from app.db import CrawlJob
 
         job = CrawlJob(
+            workspace_id=principal.workspace_id,
             source=source_type,
             keyword=document.filename[:255],
             type="document_import",
@@ -628,13 +638,13 @@ async def upload_document(
 def list_document_versions(
     document_id: int, request: Request, db: Session = Depends(get_db)
 ) -> list[DocumentVersionResponse]:
-    require_principal(request, permission="knowledge.read")
-    document = db.get(Document, document_id)
+    principal = require_principal(request, permission="knowledge.read")
+    document = db.scalar(select(Document).where(Document.id == document_id, Document.workspace_id == principal.workspace_id))
     if document is None:
         raise HTTPException(
             status_code=404, detail={"code": "DOCUMENT_NOT_FOUND", "message": "文档不存在"}
         )
-    versions = list_versions_for_document(db, document_id=document_id)
+    versions = list_versions_for_document(db, document_id=document_id, workspace_id=principal.workspace_id)
     items: list[DocumentVersionResponse] = []
     for version in versions:
         items.append(
@@ -651,7 +661,7 @@ def list_document_versions(
                 error_message=version.error_message,
                 created_at=version.created_at,
                 published_at=version.published_at,
-                chunk_count=count_chunks(db, version_id=version.id),
+                chunk_count=count_chunks(db, version_id=version.id, workspace_id=principal.workspace_id),
             )
         )
     return items
@@ -662,7 +672,9 @@ def list_document_versions(
 
 @app.post("/api/rag/query", response_model=RagQueryResponse)
 def rag_query(payload: RagQueryRequest, request: Request, db: Session = Depends(get_db)) -> RagQueryResponse:
-    require_principal(request, permission="knowledge.read")
+    principal = require_principal(request, permission="knowledge.read")
+    workspace_id = principal.workspace_id
+    filter_payload: dict[str, object] = {"workspace_id": workspace_id}
     """基于已上传文档与本地向量库回答客服问题。
 
     返回结构：
@@ -671,13 +683,9 @@ def rag_query(payload: RagQueryRequest, request: Request, db: Session = Depends(
     - no_answer: true 表示命中为空或最高分低于阈值
     - retrieval_diagnostics: 实际使用的 top_k / min_score / 命中数等
     """
-    from app.db import Document, DocumentVersion
     from app.rag_runtime import get_answerer, get_embedder, get_vector_store
 
-    filter_payload: dict[str, object] = {}
     if payload.product_id is not None:
-        # 通过 product_id 过滤需要商品 → document 关联（document_product_links）
-        # 这里以 product_id 为 payload 字段，让向量库过滤时按此字段匹配
         filter_payload["product_id"] = payload.product_id
     if payload.source_type is not None:
         filter_payload["source_type"] = payload.source_type
@@ -702,7 +710,7 @@ def rag_query(payload: RagQueryRequest, request: Request, db: Session = Depends(
         for hit in result.hits
     ]
     diagnostics = {
-        "vector_records": len(get_vector_store().records),
+        "vector_records": sum(1 for record in get_vector_store().records if record.payload.get("workspace_id") == workspace_id),
         "hits_count": len(result.hits),
         "top_k": payload.top_k or answerer.retriever.top_k,
         "min_score": payload.min_score
@@ -731,11 +739,9 @@ def safe_database_url(value: str) -> str:
 
 @app.get("/api/settings", response_model=SettingsResponse)
 def get_runtime_settings(request: Request, db: Session = Depends(get_db)) -> SettingsResponse:
-    require_principal(request, permission="knowledge.read")
-    """展示当前运行时配置与数据库 / 向量库规模，便于面试演示。"""
+    principal = require_principal(request, permission="knowledge.read")
     from app.db import Document, DocumentChunk
     from app.rag_runtime import get_vector_store
-
     settings = get_settings()
     return SettingsResponse(
         app_name=settings.app_name,
@@ -750,9 +756,9 @@ def get_runtime_settings(request: Request, db: Session = Depends(get_db)) -> Set
         vector_store_path=settings.vector_store_path,
         rag_top_k=settings.rag_top_k,
         rag_min_score=settings.rag_min_score,
-        document_count=db.scalar(select(func.count(Document.id))) or 0,
-        chunk_count=db.scalar(select(func.count(DocumentChunk.id))) or 0,
-        vector_record_count=len(get_vector_store().records),
+        document_count=db.scalar(select(func.count(Document.id)).where(Document.workspace_id == principal.workspace_id)) or 0,
+        chunk_count=db.scalar(select(func.count(DocumentChunk.id)).where(DocumentChunk.workspace_id == principal.workspace_id)) or 0,
+        vector_record_count=sum(1 for record in get_vector_store().records if record.payload.get("workspace_id") == principal.workspace_id),
     )
 
 
@@ -791,6 +797,7 @@ def invoke_agent_tool(
     principal = request.state.principal
     context = ToolContext(
         tenant_id=principal.tenant_id,
+        workspace_id=principal.workspace_id,
         user_id=principal.subject,
         request_id=request.state.request_id,
     )
@@ -833,19 +840,19 @@ def _warehouse_error(exc: ValueError) -> HTTPException:
 
 @app.post("/api/skus", response_model=ProductSkuResponse, status_code=201)
 def create_sku(payload: ProductSkuCreate, request: Request, db: Session = Depends(get_db)):
-    require_principal(request, permission="catalog.write")
+    principal = require_principal(request, permission="catalog.write")
     from app.repository import create_sku as create_sku_record
     try:
-        return create_sku_record(db, product_id=payload.product_id, sku_code=payload.sku_code, variant_label=payload.variant_label, barcode=payload.barcode, unit=payload.unit)
+        return create_sku_record(db, product_id=payload.product_id, sku_code=payload.sku_code, variant_label=payload.variant_label, barcode=payload.barcode, unit=payload.unit, workspace_id=principal.workspace_id)
     except ValueError as exc:
         raise _warehouse_error(exc) from exc
 
 
 @app.get("/api/skus", response_model=list[ProductSkuResponse])
 def list_skus(request: Request, db: Session = Depends(get_db)):
-    require_principal(request, permission="catalog.read")
+    principal = require_principal(request, permission="catalog.read")
     from app.db import ProductSku
-    return db.scalars(select(ProductSku).where(ProductSku.is_active.is_(True)).order_by(ProductSku.id)).all()
+    return db.scalars(select(ProductSku).where(ProductSku.is_active.is_(True), ProductSku.workspace_id == principal.workspace_id).order_by(ProductSku.id)).all()
 
 
 @app.post("/api/warehouses", response_model=WarehouseResponse, status_code=201)
@@ -879,8 +886,8 @@ def create_inbound(payload: InboundCreate, request: Request, db: Session = Depen
     from app.repository import _inbound_response_data, create_inbound as create_inbound_record, get_inbound
     try:
         require_warehouse_access(principal, payload.warehouse_id, db=db)
-        order = create_inbound_record(db, warehouse_id=payload.warehouse_id, reference_no=payload.reference_no, lines=[item.model_dump() for item in payload.lines], note=payload.note, created_by=principal.subject)
-        result = get_inbound(db, inbound_id=order.id)
+        order = create_inbound_record(db, warehouse_id=payload.warehouse_id, reference_no=payload.reference_no, lines=[item.model_dump() for item in payload.lines], note=payload.note, created_by=principal.subject, workspace_id=principal.workspace_id)
+        result = get_inbound(db, inbound_id=order.id, workspace_id=principal.workspace_id)
         assert result is not None
         return _inbound_response_data(*result)
     except ValueError as exc:
@@ -891,7 +898,7 @@ def create_inbound(payload: InboundCreate, request: Request, db: Session = Depen
 def get_inbound_detail(inbound_id: int, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, permission="inbound.read")
     from app.repository import _inbound_response_data, get_inbound
-    result = get_inbound(db, inbound_id=inbound_id)
+    result = get_inbound(db, inbound_id=inbound_id, workspace_id=principal.workspace_id)
     if result is None:
         raise _warehouse_error(ValueError("INBOUND_NOT_FOUND"))
     require_warehouse_access(principal, result[0].warehouse_id, db=db)
@@ -948,7 +955,7 @@ def receive_inbound(inbound_id: int, payload: InboundReceive, request: Request, 
     principal = require_principal(request, permission="inbound.receive")
     from app.repository import _inbound_response_data, receive_inbound as receive_inbound_record
     try:
-        existing = db.get(InboundOrder, inbound_id)
+        existing = db.scalar(select(InboundOrder).where(InboundOrder.id == inbound_id, InboundOrder.workspace_id == principal.workspace_id))
         if existing is None:
             raise ValueError("INBOUND_NOT_FOUND")
         require_warehouse_access(principal, existing.warehouse_id, db=db)
@@ -958,6 +965,7 @@ def receive_inbound(inbound_id: int, payload: InboundReceive, request: Request, 
             lines=[item.model_dump() for item in payload.lines],
             idempotency_key=request.headers.get("Idempotency-Key"),
             payload_hash=sha256(payload.model_dump_json().encode()).hexdigest(),
+            workspace_id=principal.workspace_id,
         )
         return _inbound_response_data(*result)
     except ValueError as exc:
@@ -969,7 +977,7 @@ def confirm_inbound(inbound_id: int, request: Request, db: Session = Depends(get
     principal = require_principal(request, permission="inbound.confirm")
     from app.repository import _inbound_response_data, confirm_inbound as confirm_inbound_record
     try:
-        existing = db.get(InboundOrder, inbound_id)
+        existing = db.scalar(select(InboundOrder).where(InboundOrder.id == inbound_id, InboundOrder.workspace_id == principal.workspace_id))
         if existing is None:
             raise ValueError("INBOUND_NOT_FOUND")
         require_warehouse_access(principal, existing.warehouse_id, db=db)
@@ -978,6 +986,7 @@ def confirm_inbound(inbound_id: int, request: Request, db: Session = Depends(get
             inbound_id=inbound_id,
             confirmed_by=getattr(request.state.principal, "subject", None),
             idempotency_key=request.headers.get("Idempotency-Key"),
+            workspace_id=principal.workspace_id,
         )
         return _inbound_response_data(*result)
     except ValueError as exc:
@@ -1003,15 +1012,69 @@ def inventory_page(page: int = Query(default=1, ge=1), page_size: int = Query(de
 
 
 
+@app.get("/api/inventory/policies", response_model=list[InventoryPolicyResponse])
+def list_inventory_policies(request: Request, warehouse_id: int | None = Query(default=None, gt=0), db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.read")
+    from app.db import InventoryPolicy
+    filters = [InventoryPolicy.workspace_id == principal.workspace_id]
+    if warehouse_id is not None:
+        require_warehouse_access(principal, warehouse_id, db=db)
+        filters.append(InventoryPolicy.warehouse_id == warehouse_id)
+    return db.scalars(select(InventoryPolicy).where(*filters).order_by(InventoryPolicy.id)).all()
+
+
+@app.put("/api/inventory/policies", response_model=InventoryPolicyResponse)
+def save_inventory_policy(payload: InventoryPolicyCreate, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.write")
+    require_warehouse_access(principal, payload.warehouse_id, db=db)
+    from app.alerts import upsert_inventory_policy
+    try:
+        return upsert_inventory_policy(db, workspace_id=principal.workspace_id, warehouse_id=payload.warehouse_id, sku_id=payload.sku_id, safety_stock_qty=payload.safety_stock_qty, reorder_point_qty=payload.reorder_point_qty)
+    except ValueError as exc:
+        code = str(exc)
+        status = 404 if code.endswith("NOT_FOUND") else 422
+        raise HTTPException(status_code=status, detail={"code": code, "message": "库存策略无效"}) from exc
+
+
+@app.post("/api/inventory/alerts/refresh", response_model=list[AlertResponse])
+def refresh_inventory_alerts(request: Request, warehouse_id: int | None = Query(default=None, gt=0), db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.write")
+    if warehouse_id is not None:
+        require_warehouse_access(principal, warehouse_id, db=db)
+    from app.alerts import refresh_low_stock_alerts
+    return refresh_low_stock_alerts(db, workspace_id=principal.workspace_id, warehouse_id=warehouse_id)
+
+
+@app.get("/api/inventory/alerts", response_model=list[AlertResponse])
+def list_inventory_alerts(request: Request, warehouse_id: int | None = Query(default=None, gt=0), status: str | None = Query(default=None, max_length=16), db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.read")
+    if warehouse_id is not None:
+        require_warehouse_access(principal, warehouse_id, db=db)
+    from app.alerts import list_alerts
+    return list_alerts(db, workspace_id=principal.workspace_id, warehouse_id=warehouse_id, status=status)
+
+
+@app.post("/api/inventory/alerts/{alert_id}/ack", response_model=AlertResponse)
+def acknowledge_inventory_alert(alert_id: int, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.write")
+    from app.alerts import acknowledge_alert
+    alert = acknowledge_alert(db, workspace_id=principal.workspace_id, alert_id=alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail={"code": "ALERT_NOT_FOUND", "message": "告警不存在"})
+    return alert
+
+
 @app.post("/api/crawl/fixture", response_model=CrawlJobResponse, status_code=201)
 def crawl_fixture(request: Request, db: Session = Depends(get_db)) -> CrawlJob:
-    require_principal(request, permission="catalog.write")
+    principal = require_principal(request, permission="catalog.write")
+    if principal.workspace_id is None:
+        raise HTTPException(status_code=503, detail={"code": "WORKSPACE_CONTEXT_REQUIRED", "message": "工作空间上下文缺失"})
     """第一周同步入口：直接执行 fixture 采集并写入。保留用于演示。"""
-    job = start_job(db, source="fixture", keyword="fixture")
+    job = start_job(db, source="fixture", keyword="fixture", workspace_id=principal.workspace_id)
     try:
         fixture = Path(__file__).resolve().parent.parent / "fixtures" / "products.html"
         records = collect_fixture(fixture)
-        return import_records(db, records, keyword="fixture", job=job)
+        return import_records(db, records, keyword="fixture", job=job, workspace_id=principal.workspace_id)
     except CrawlError as exc:
         db.rollback()
         job = db.get(CrawlJob, job.id)
@@ -1035,7 +1098,7 @@ def dashboard_summary(
     if warehouse_id is not None:
         require_warehouse_access(principal, warehouse_id, db=db)
     from app.dashboard import build_dashboard_summary
-    return build_dashboard_summary(db, days=days, warehouse_id=warehouse_id, recent_limit=recent_limit)
+    return build_dashboard_summary(db, workspace_id=principal.workspace_id, days=days, warehouse_id=warehouse_id, recent_limit=recent_limit)
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -1046,16 +1109,42 @@ def dashboard_page(request: Request) -> str:
 
 
 
+@app.get("/api/external/sync/runs")
+def list_external_sync_runs(request: Request, platform: str | None = None, status: str | None = None, limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.read")
+    from app.db import ExternalSyncRun
+    filters = [ExternalSyncRun.workspace_id == principal.workspace_id]
+    if platform:
+        filters.append(ExternalSyncRun.platform == platform)
+    if status:
+        filters.append(ExternalSyncRun.status == status)
+    return db.scalars(select(ExternalSyncRun).where(*filters).order_by(ExternalSyncRun.id.desc()).limit(limit)).all()
+
+
+@app.get("/api/external/snapshots/freshness")
+def external_snapshot_freshness(request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.read")
+    from app.external_sync import snapshot_freshness
+    return {"items": snapshot_freshness(db, workspace_id=principal.workspace_id, stale_after_seconds=get_settings().external_snapshot_stale_after_seconds)}
+
+
+@app.post("/api/external/alerts/refresh", response_model=list[AlertResponse])
+def refresh_external_alerts_api(request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.write")
+    from app.alerts import refresh_external_alerts
+    return refresh_external_alerts(db, workspace_id=principal.workspace_id, stale_after_seconds=get_settings().external_snapshot_stale_after_seconds)
+
+
 @app.get("/api/external/connectors")
 def external_connectors(request: Request):
-    require_principal(request, permission="inventory.read")
+    principal = require_principal(request, permission="inventory.read")
     from app.connectors import connector_capabilities
     return {"items": connector_capabilities()}
 
 
 @app.post("/api/external/inventory/preview", response_model=ExternalInventoryPreviewResponse)
 def external_inventory_preview(payload: ExternalInventoryPreviewRequest, request: Request):
-    require_principal(request, permission="inventory.read")
+    principal = require_principal(request, permission="inventory.read")
     from app.connectors import load_records
     try:
         records = load_records(payload.content, platform=payload.platform, source_mode=payload.source_mode)
@@ -1075,14 +1164,22 @@ def external_inventory_preview(payload: ExternalInventoryPreviewRequest, request
 
 @app.post("/api/external/inventory/ingest", response_model=ExternalInventoryIngestResponse)
 def external_inventory_ingest(payload: ExternalInventoryIngestRequest, request: Request, db: Session = Depends(get_db)):
-    require_principal(request, permission="catalog.write")
+    principal = require_principal(request, permission="catalog.write")
     from app.connectors import load_records
-    from app.external_sync import ingest_inventory
+    from app.external_sync import begin_sync_run, complete_sync_run, fail_sync_run, ingest_inventory
     try:
         records = load_records(payload.content, platform=payload.platform, source_mode=payload.source_mode)
-        result = ingest_inventory(db, records)
+        account_ref = records[0].account_ref if records else None
+        store_ref = records[0].store_ref if records else None
+        run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=payload.platform, sync_type="inventory", account_ref=account_ref, store_ref=store_ref, source_mode=payload.source_mode)
+        result = ingest_inventory(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
+        complete_sync_run(db, run, result)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"code": "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+    except Exception as exc:
+        if 'run' in locals():
+            fail_sync_run(db, run, exc)
+        raise HTTPException(status_code=500, detail={"code": "EXTERNAL_SYNC_FAILED", "message": "外部库存同步失败"}) from exc
     return ExternalInventoryIngestResponse(
         platform=payload.platform,
         source_mode=payload.source_mode,
@@ -1093,28 +1190,37 @@ def external_inventory_ingest(payload: ExternalInventoryIngestRequest, request: 
         conflict=result.conflict,
         total=result.total,
         snapshot_ids=result.snapshot_ids or [],
+        sync_run_id=result.sync_run_id,
+        sync_status=result.sync_status,
     )
 
 
 @app.post("/api/external/events/ingest", response_model=ExternalEventIngestResponse)
 def external_events_ingest(payload: ExternalEventIngestRequest, request: Request, db: Session = Depends(get_db)):
-    require_principal(request, permission="catalog.write")
+    principal = require_principal(request, permission="catalog.write")
     from app.connectors import load_events
-    from app.external_sync import ingest_events
+    from app.external_sync import begin_sync_run, complete_sync_run, fail_sync_run, ingest_events
     try:
         events = load_events(payload.content, platform=payload.platform, source_mode=payload.source_mode)
-        result = ingest_events(db, events)
+        account_ref = events[0].account_ref if events else None
+        run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=payload.platform, sync_type="events", account_ref=account_ref, source_mode=payload.source_mode)
+        result = ingest_events(db, events, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
+        complete_sync_run(db, run, result)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"code": "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
-    return ExternalEventIngestResponse(platform=payload.platform, inserted=result.inserted, no_op=result.no_op, conflict=result.conflict, total=result.total)
+    except Exception as exc:
+        if 'run' in locals():
+            fail_sync_run(db, run, exc)
+        raise HTTPException(status_code=500, detail={"code": "EXTERNAL_SYNC_FAILED", "message": "外部事件同步失败"}) from exc
+    return ExternalEventIngestResponse(platform=payload.platform, inserted=result.inserted, no_op=result.no_op, conflict=result.conflict, total=result.total, sync_run_id=result.sync_run_id, sync_status=result.sync_status)
 
 
 @app.get("/api/external/reconciliation/{snapshot_id}")
 def external_reconciliation(snapshot_id: int, request: Request, db: Session = Depends(get_db)):
-    require_principal(request, permission="inventory.read")
+    principal = require_principal(request, permission="inventory.read")
     from app.external_sync import reconcile_inventory
     try:
-        return {"snapshot_id": snapshot_id, "items": reconcile_inventory(db, snapshot_id)}
+        return {"snapshot_id": snapshot_id, "items": reconcile_inventory(db, snapshot_id, workspace_id=principal.workspace_id)}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail={"code": str(exc), "message": "外部快照不存在"}) from exc
 
@@ -1130,8 +1236,8 @@ def list_products(
     category: str | None = Query(default=None, max_length=128),
     db: Session = Depends(get_db),
 ) -> ProductPage:
-    require_principal(request, permission="catalog.read")
-    filters = []
+    principal = require_principal(request, permission="catalog.read")
+    filters = [Product.workspace_id == principal.workspace_id]
     if keyword:
         filters.append(Product.title.contains(keyword))
     if category:
@@ -1149,8 +1255,8 @@ def list_products(
 
 @app.get("/api/products/{product_id}", response_model=ProductResponse)
 def get_product(product_id: int, request: Request, db: Session = Depends(get_db)) -> Product:
-    require_principal(request, permission="catalog.read")
-    product = db.get(Product, product_id)
+    principal = require_principal(request, permission="catalog.read")
+    product = db.scalar(select(Product).where(Product.id == product_id, Product.workspace_id == principal.workspace_id))
     if product is None:
         raise HTTPException(status_code=404, detail={"code": "PRODUCT_NOT_FOUND", "message": "商品不存在"})
     return product
@@ -1158,11 +1264,11 @@ def get_product(product_id: int, request: Request, db: Session = Depends(get_db)
 
 @app.get("/api/products/{product_id}/price-history", response_model=list[PriceHistoryResponse])
 def price_history(product_id: int, request: Request, db: Session = Depends(get_db)) -> list[ProductPriceHistory]:
-    require_principal(request, permission="catalog.read")
-    if db.get(Product, product_id) is None:
+    principal = require_principal(request, permission="catalog.read")
+    if db.scalar(select(Product.id).where(Product.id == product_id, Product.workspace_id == principal.workspace_id)) is None:
         raise HTTPException(status_code=404, detail={"code": "PRODUCT_NOT_FOUND", "message": "商品不存在"})
     return db.scalars(
         select(ProductPriceHistory)
-        .where(ProductPriceHistory.product_id == product_id)
+        .where(ProductPriceHistory.product_id == product_id, ProductPriceHistory.workspace_id == principal.workspace_id)
         .order_by(ProductPriceHistory.observed_at.asc(), ProductPriceHistory.id.asc())
     ).all()

@@ -25,7 +25,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     ROLE_ADMIN: frozenset(),
     ROLE_OPERATIONS: frozenset({
         "catalog.read", "catalog.write", "inbound.create", "inbound.read",
-        "inbound.confirm", "inventory.read", "knowledge.read", "knowledge.write",
+        "inventory.read", "knowledge.read", "knowledge.write", "inventory.write",
     }),
     ROLE_WAREHOUSE: frozenset({"inbound.read", "inbound.receive", "inventory.read"}),
     ROLE_CUSTOMER_SERVICE: frozenset({"catalog.read", "inbound.read", "inventory.read", "knowledge.read"}),
@@ -72,8 +72,48 @@ class Principal:
         return any(permission in role_permissions.get(role, frozenset()) for role in self.roles)
 
 
-def demo_principal(settings: Settings) -> Principal:
-    return Principal(subject="anonymous", tenant_id=settings.api_tenant_id or "default", auth_type="demo")
+def demo_principal(settings: Settings, *, workspace_id: int | None = None) -> Principal:
+    return Principal(
+        subject="anonymous",
+        tenant_id=settings.api_tenant_id or "default",
+        workspace_id=workspace_id,
+        auth_type="demo",
+    )
+
+
+def _resolve_compat_workspace(db: Session, settings: Settings) -> int | None:
+    """Resolve demo scope without ever treating NULL as a wildcard."""
+    workspaces = db.scalars(
+        select(Workspace).where(Workspace.status == "active").order_by(Workspace.id)
+    ).all()
+    if len(workspaces) == 1:
+        from app.db import backfill_legacy_workspace
+        backfill_legacy_workspace(db, workspaces[0].id)
+        return workspaces[0].id
+    if len(workspaces) > 1:
+        configured = (settings.auth_bootstrap_tenant_key or "").strip()
+        matches = [item for item in workspaces if item.tenant_key == configured]
+        return matches[0].id if len(matches) == 1 else None
+    workspace = Workspace(
+        tenant_key=settings.auth_bootstrap_tenant_key or "default",
+        name=settings.auth_bootstrap_workspace_name or "默认商家",
+    )
+    db.add(workspace)
+    db.commit()
+    db.refresh(workspace)
+    from app.db import backfill_legacy_workspace
+    backfill_legacy_workspace(db, workspace.id)
+    return workspace.id
+
+
+def _resolve_api_workspace(db: Session, settings: Settings) -> int | None:
+    workspace = db.scalar(
+        select(Workspace).where(
+            Workspace.tenant_key == settings.api_tenant_id,
+            Workspace.status == "active",
+        )
+    )
+    return workspace.id if workspace is not None else None
 
 
 def validate_auth_config(settings: Settings) -> None:
@@ -86,17 +126,26 @@ def validate_auth_config(settings: Settings) -> None:
         raise ValueError("SESSION_TTL_SECONDS 必须为正数")
 
 
-def authenticate_api_key(value: str | None, settings: Settings) -> Principal | None:
+def authenticate_api_key(value: str | None, settings: Settings, db: Session | None = None) -> Principal | None:
     validate_auth_config(settings)
     if not settings.api_auth_enabled:
-        return demo_principal(settings)
+        workspace_id = None
+        if db is not None:
+            workspace_id = _resolve_compat_workspace(db, settings)
+        return demo_principal(settings, workspace_id=workspace_id)
     if not value or not hmac.compare_digest(value, settings.api_key):
         return None
+    workspace_id = None
+    if db is not None:
+        workspace_id = _resolve_api_workspace(db, settings)
+        if workspace_id is None:
+            return None
     return Principal(
         subject=settings.api_user_id or "api-user",
         tenant_id=settings.api_tenant_id,
         key_id="static-api-key",
         scopes=("*",),
+        workspace_id=workspace_id,
         auth_type="api_key",
     )
 
@@ -192,6 +241,7 @@ def _as_employee_principal(principal) -> Principal:
         tenant_id=principal.tenant_id,
         key_id=principal.key_id,
         scopes=principal.scopes,
+        workspace_id=getattr(principal, "workspace_id", None),
         auth_type="api_key" if principal.key_id else "demo",
     )
 
@@ -205,6 +255,8 @@ def require_principal(request: Request, *, permission: str | None = None, roles:
         employee_auth_enabled and principal.auth_type in ("demo", "api_key")
     ):
         raise HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": "请先登录"})
+    if principal.workspace_id is None and principal.auth_type != "demo":
+        raise HTTPException(status_code=401, detail={"code": "WORKSPACE_CONTEXT_REQUIRED", "message": "工作空间上下文缺失"})
     if principal.auth_type == "demo":
         if get_settings().demo_mode_enabled and not employee_auth_enabled:
             if roles:
