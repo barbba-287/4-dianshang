@@ -43,6 +43,15 @@ from app.db import (  # noqa: F401  触发模型注册
     InventoryPolicy,
     InventoryAlert,
     ExternalSyncRun,
+    ExternalAccount,
+    ExternalProductMapping,
+    ExternalOrder,
+    ExternalOrderLine,
+    DailySkuSale,
+    ReplenishmentSuggestion,
+    ReplenishmentSuggestionAction,
+    PurchaseRequest,
+    PurchaseRequestLine,
 )
 
 

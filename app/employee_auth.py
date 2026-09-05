@@ -24,8 +24,10 @@ ROLE_READONLY = "readonly"
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     ROLE_ADMIN: frozenset(),
     ROLE_OPERATIONS: frozenset({
-        "catalog.read", "catalog.write", "inbound.create", "inbound.read",
+        "catalog.read", "catalog.write", "inbound.create", "inbound.read", "inbound.confirm",
         "inventory.read", "knowledge.read", "knowledge.write", "inventory.write",
+        "replenishment.read", "replenishment.write", "replenishment.confirm",
+        "replenishment.ignore", "purchasing.submit", "purchase.read",
     }),
     ROLE_WAREHOUSE: frozenset({"inbound.read", "inbound.receive", "inventory.read"}),
     ROLE_CUSTOMER_SERVICE: frozenset({"catalog.read", "inbound.read", "inventory.read", "knowledge.read"}),

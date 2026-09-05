@@ -1,0 +1,1 @@
+{"records":[{"external_sku":"TB-SKU-1","available_qty":7,"reserved_qty":1,"inbound_qty":0,"as_of":"2026-09-01T10:00:00Z","received_at":"2026-09-01T10:01:00Z","warehouse_ref":"TB-W-1"}],"has_more":false,"request_id":"fixture-inventory-1","source_ref":"fixture://taobao/inventory/1"}

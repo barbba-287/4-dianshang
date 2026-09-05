@@ -1,7 +1,9 @@
 """电商商品与客服工作台的输入输出数据模型。"""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
+
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 class DashboardSummaryResponse(BaseModel):
@@ -12,6 +14,8 @@ class DashboardSummaryResponse(BaseModel):
     limitations: list[str]
     alert_summary: dict = Field(default_factory=dict)
     snapshot_freshness: list[dict] = Field(default_factory=list)
+    sales_summary: dict = Field(default_factory=dict)
+    sku_health: list[dict] = Field(default_factory=list)
 
 
 class InventoryPolicyCreate(BaseModel):
@@ -422,3 +426,273 @@ class ExternalEventIngestResponse(BaseModel):
 class ReconciliationResponse(BaseModel):
     snapshot_id: int
     items: list[dict]
+
+
+class ExternalOrderPreviewRequest(BaseModel):
+    platform: str = Field(pattern="^(taobao|jd|pdd|douyin|amazon)$")
+    source_mode: str = Field(default="json", pattern="^(json|csv|mock)$")
+    content: str = Field(min_length=1, max_length=2_000_000)
+
+
+class ExternalOrderPreviewResponse(BaseModel):
+    platform: str
+    source_mode: str
+    simulated: bool
+    live_enabled: bool
+    normalized_rows: list[dict]
+    total: int
+    errors: list[str]
+    writes: list[str]
+
+
+class ExternalOrderIngestRequest(ExternalOrderPreviewRequest):
+    pass
+
+
+class ExternalOrderIngestResponse(BaseModel):
+    platform: str
+    source_mode: str
+    simulated: bool
+    live_enabled: bool
+    total: int
+    inserted: int
+    updated: int
+    no_op: int
+    conflict: int
+    stale: int
+    affected_dates: list[str]
+    sync_run_id: str | None = None
+    sync_status: str | None = None
+
+
+class ExternalOrderLineResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    external_line_id: str
+    external_sku: str
+    internal_sku_id: int | None
+    ordered_qty: int
+    cancelled_qty: int
+    refunded_qty: int
+    gross_amount: Decimal
+    refund_amount: Decimal
+    currency: str
+    mapping_status: str
+    data_completeness: str
+
+
+class ExternalOrderResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    platform: str
+    account_ref: str
+    store_ref: str
+    external_order_no: str
+    order_status: str
+    external_created_at: datetime
+    paid_at: datetime | None
+    external_updated_at: datetime
+    event_version: int | None
+    gross_amount: Decimal
+    refund_amount: Decimal
+    currency: str
+    data_completeness: str
+    status_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExternalProductMappingRequest(BaseModel):
+    external_account_id: int = Field(gt=0)
+    external_sku: str = Field(min_length=1, max_length=255)
+    internal_sku_id: int | None = Field(default=None, gt=0)
+
+
+class ExternalProductMappingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    external_account_id: int
+    external_sku: str
+    internal_sku_id: int | None
+    mapping_status: str
+    source: str
+
+
+class ExternalAccountResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    platform: str
+    account_ref: str
+    store_ref: str
+    name: str | None
+    timezone: str
+    status: str
+    source_mode: str
+    simulated: bool
+
+
+class DailySkuSaleResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    platform: str
+    account_ref: str
+    store_ref: str
+    external_sku: str
+    internal_sku_id: int | None
+    sales_date: date
+    gross_qty: int
+    cancelled_qty: int
+    refunded_qty: int
+    net_qty: int
+    gross_amount: Decimal
+    refund_amount: Decimal
+    net_amount: Decimal
+    order_count: int
+    data_completeness: str
+
+
+class DailySkuSalePage(BaseModel):
+    items: list[DailySkuSaleResponse]
+    page: int
+    page_size: int
+    total: int
+
+
+class ReplenishmentGenerateRequest(BaseModel):
+    warehouse_id: int = Field(gt=0)
+    sku_id: int = Field(gt=0)
+    coverage_days: Literal[7, 14, 30] = 14
+    as_of_date: date | None = None
+
+
+class ReplenishmentDecisionRequest(BaseModel):
+    action: str = Field(pattern="^(confirm|modify|ignore)$")
+    decision_qty: int | None = Field(default=None, ge=0)
+    reason: str | None = Field(default=None, max_length=1000)
+    expected_version: int = Field(ge=1)
+
+
+class ReplenishmentSuggestionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    workspace_id: int
+    warehouse_id: int
+    sku_id: int
+    status: str
+    suggested_qty: int | None
+    decision_qty: int | None
+    decision_reason: str | None
+    formula_version: str
+    coverage_days: int
+    daily_avg_qty: Decimal | None
+    on_hand_qty: int
+    safety_stock_qty: int
+    reorder_point_qty: int
+    sales_qty: int
+    effective_sale_days: int
+    data_completeness: str
+    reason: str | None
+    source_hash: str
+    as_of_date: date
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReplenishmentSuggestionPage(BaseModel):
+    items: list[ReplenishmentSuggestionResponse]
+    page: int
+    page_size: int
+    total: int
+
+
+class PurchaseRequestCreate(BaseModel):
+    suggestion_ids: list[int] = Field(min_length=1)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class PurchaseRequestLineResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    purchase_request_id: int
+    warehouse_id: int
+    sku_id: int
+    suggestion_id: int
+    requested_qty: int
+    source_suggestion_version: int
+    note: str | None
+
+
+class PurchaseRequestResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    workspace_id: int
+    warehouse_id: int
+    request_no: str
+    status: str
+    note: str | None
+    submitted_by: str
+    submitted_at: datetime
+    idempotency_key: str
+    created_at: datetime
+    updated_at: datetime
+    lines: list[PurchaseRequestLineResponse] = Field(default_factory=list)
+
+
+class PurchaseRequestPage(BaseModel):
+    items: list[PurchaseRequestResponse]
+    page: int
+    page_size: int
+    total: int
+
+
+class TaobaoCapabilitiesResponse(BaseModel):
+    platform: str
+    read_only: bool
+    live_enabled: bool
+    simulated: bool
+    enabled: bool
+    resources: list[str]
+    limitations: list[str]
+
+
+class TaobaoPreviewRequest(BaseModel):
+    resource: Literal["orders", "inventory"]
+    account_ref: str = Field(min_length=1, max_length=128)
+    store_ref: str = Field(default="default", min_length=1, max_length=128)
+    content: str = Field(min_length=1, max_length=2_000_000)
+    max_pages: int = Field(default=100, ge=1, le=100)
+
+
+class TaobaoPreviewResponse(BaseModel):
+    platform: str
+    resource: str
+    read_only: bool
+    live_enabled: bool
+    simulated: bool
+    total: int
+    normalized_rows: list[dict]
+    data_completeness: str
+    errors: list[str] = Field(default_factory=list)
+
+
+class FixtureSyncRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    platform: str = Field(pattern="^(taobao|jd|pdd|douyin|amazon)$")
+    account_ref: str = Field(min_length=1, max_length=128)
+    store_ref: str = Field(default="default", min_length=1, max_length=128)
+    source_mode: Literal["json", "csv", "mock"] = "mock"
+    orders_content: str | None = Field(default=None, max_length=2_000_000)
+    inventory_content: str | None = Field(default=None, max_length=2_000_000)
+
+
+class FixtureSyncResponse(BaseModel):
+    platform: str
+    account_ref: str
+    store_ref: str
+    simulated: bool
+    live_enabled: bool
+    sync_run_id: str
+    sync_status: str
+    orders: dict | None = None
+    inventory: dict | None = None

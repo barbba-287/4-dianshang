@@ -5,11 +5,11 @@
 """
 
 from collections.abc import Generator
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, create_engine, inspect, text
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.config import get_settings
@@ -554,6 +554,244 @@ class InventoryBalance(Base):
     )
 
 
+class ExternalAccount(Base):
+    __tablename__ = "external_accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "platform", "account_ref", "store_ref",
+            name="uq_external_account_workspace_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    account_ref: Mapped[str] = mapped_column(String(128), index=True)
+    store_ref: Mapped[str] = mapped_column(String(128), default="default", index=True)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    source_mode: Mapped[str] = mapped_column(String(16), default="mock")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ExternalProductMapping(Base):
+    __tablename__ = "external_product_mappings"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "external_account_id", "external_sku",
+            name="uq_external_mapping_workspace_account_sku",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    external_account_id: Mapped[int] = mapped_column(ForeignKey("external_accounts.id"), index=True)
+    external_sku: Mapped[str] = mapped_column(String(255), index=True)
+    internal_sku_id: Mapped[int | None] = mapped_column(ForeignKey("product_skus.id"), nullable=True, index=True)
+    mapping_status: Mapped[str] = mapped_column(String(16), default="unmapped", index=True)
+    source: Mapped[str] = mapped_column(String(32), default="manual")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ExternalOrder(Base):
+    __tablename__ = "external_orders"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "external_account_id", "external_order_no",
+            name="uq_external_order_workspace_account_no",
+        ),
+        UniqueConstraint(
+            "workspace_id", "external_account_id", "idempotency_key",
+            name="uq_external_order_workspace_account_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    external_account_id: Mapped[int] = mapped_column(ForeignKey("external_accounts.id"), index=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    account_ref: Mapped[str] = mapped_column(String(128), index=True)
+    store_ref: Mapped[str] = mapped_column(String(128), default="default", index=True)
+    external_order_no: Mapped[str] = mapped_column(String(255), index=True)
+    order_status: Mapped[str] = mapped_column(String(32), index=True)
+    external_created_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    external_updated_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    event_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gross_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    refund_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    currency: Mapped[str] = mapped_column(String(8), default="CNY")
+    payload_json: Mapped[str] = mapped_column(Text)
+    payload_hash: Mapped[str] = mapped_column(String(72), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), index=True)
+    source_mode: Mapped[str] = mapped_column(String(16), default="mock")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    sync_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    data_completeness: Mapped[str] = mapped_column(String(16), default="complete", index=True)
+    status_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ExternalOrderLine(Base):
+    __tablename__ = "external_order_lines"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "external_order_id", "external_line_id", name="uq_external_order_line_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    external_order_id: Mapped[int] = mapped_column(ForeignKey("external_orders.id"), index=True)
+    external_line_id: Mapped[str] = mapped_column(String(128))
+    external_sku: Mapped[str] = mapped_column(String(255), index=True)
+    internal_sku_id: Mapped[int | None] = mapped_column(ForeignKey("product_skus.id"), nullable=True, index=True)
+    ordered_qty: Mapped[int] = mapped_column(Integer)
+    cancelled_qty: Mapped[int] = mapped_column(Integer, default=0)
+    refunded_qty: Mapped[int] = mapped_column(Integer, default=0)
+    gross_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    refund_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    currency: Mapped[str] = mapped_column(String(8), default="CNY")
+    mapping_status: Mapped[str] = mapped_column(String(16), default="unmapped", index=True)
+    data_completeness: Mapped[str] = mapped_column(String(16), default="complete")
+    payload_hash: Mapped[str] = mapped_column(String(72))
+
+
+class DailySkuSale(Base):
+    __tablename__ = "daily_sku_sales"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "external_account_id", "external_sku", "sales_date",
+            name="uq_daily_sku_sale_workspace_account_sku_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    external_account_id: Mapped[int] = mapped_column(ForeignKey("external_accounts.id"), index=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    account_ref: Mapped[str] = mapped_column(String(128), index=True)
+    store_ref: Mapped[str] = mapped_column(String(128), default="default", index=True)
+    external_sku: Mapped[str] = mapped_column(String(255), index=True)
+    internal_sku_id: Mapped[int | None] = mapped_column(ForeignKey("product_skus.id"), nullable=True, index=True)
+    sales_date: Mapped[date] = mapped_column(Date, index=True)
+    gross_qty: Mapped[int] = mapped_column(Integer, default=0)
+    cancelled_qty: Mapped[int] = mapped_column(Integer, default=0)
+    refunded_qty: Mapped[int] = mapped_column(Integer, default=0)
+    net_qty: Mapped[int] = mapped_column(Integer, default=0)
+    gross_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    refund_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    net_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), default=0)
+    order_count: Mapped[int] = mapped_column(Integer, default=0)
+    data_completeness: Mapped[str] = mapped_column(String(16), default="complete", index=True)
+    calculated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class ReplenishmentSuggestion(Base):
+    __tablename__ = "replenishment_suggestions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "warehouse_id", "sku_id", "source_hash", name="uq_replenishment_suggestion_source"),
+        UniqueConstraint("workspace_id", "warehouse_id", "sku_id", "active_slot", name="uq_replenishment_suggestion_active_slot"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), nullable=False, index=True)
+    sku_id: Mapped[int] = mapped_column(ForeignKey("product_skus.id"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="suggested", index=True)
+    suggested_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decision_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    decision_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    decision_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    submitted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    formula_version: Mapped[str] = mapped_column(String(32), default="replenishment.v1")
+    coverage_days: Mapped[int] = mapped_column(Integer, default=14)
+    daily_avg_qty: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    on_hand_qty: Mapped[int] = mapped_column(Integer, default=0)
+    safety_stock_qty: Mapped[int] = mapped_column(Integer, default=0)
+    reorder_point_qty: Mapped[int] = mapped_column(Integer, default=0)
+    sales_window_days: Mapped[int] = mapped_column(Integer, default=14)
+    sales_qty: Mapped[int] = mapped_column(Integer, default=0)
+    effective_sale_days: Mapped[int] = mapped_column(Integer, default=0)
+    data_completeness: Mapped[str] = mapped_column(String(16), default="insufficient", index=True)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_hash: Mapped[str] = mapped_column(String(72), index=True)
+    source_snapshot_json: Mapped[str] = mapped_column(Text)
+    as_of_date: Mapped[date] = mapped_column(Date, index=True)
+    active_slot: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ReplenishmentSuggestionAction(Base):
+    __tablename__ = "replenishment_suggestion_actions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "suggestion_id", "idempotency_key", name="uq_replenishment_action_idempotency"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    suggestion_id: Mapped[int] = mapped_column(ForeignKey("replenishment_suggestions.id"), nullable=False, index=True)
+    action_type: Mapped[str] = mapped_column(String(24), default="decision")
+    idempotency_key: Mapped[str] = mapped_column(String(128), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(72))
+    from_status: Mapped[str] = mapped_column(String(16))
+    to_status: Mapped[str] = mapped_column(String(16))
+    decision_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actor: Mapped[str] = mapped_column(String(128))
+    expected_version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PurchaseRequest(Base):
+    __tablename__ = "purchase_requests"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "request_no", name="uq_purchase_request_workspace_no"),
+        UniqueConstraint("workspace_id", "idempotency_key", name="uq_purchase_request_workspace_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), nullable=False, index=True)
+    request_no: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="submitted", index=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    submitted_by: Mapped[str] = mapped_column(String(128))
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    idempotency_key: Mapped[str] = mapped_column(String(128), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(72))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PurchaseRequestLine(Base):
+    __tablename__ = "purchase_request_lines"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "purchase_request_id", "sku_id", name="uq_purchase_request_line_sku"),
+        UniqueConstraint("workspace_id", "suggestion_id", name="uq_purchase_request_line_suggestion"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    purchase_request_id: Mapped[int] = mapped_column(ForeignKey("purchase_requests.id"), nullable=False, index=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), nullable=False, index=True)
+    sku_id: Mapped[int] = mapped_column(ForeignKey("product_skus.id"), nullable=False, index=True)
+    suggestion_id: Mapped[int] = mapped_column(ForeignKey("replenishment_suggestions.id"), nullable=False, index=True)
+    requested_qty: Mapped[int] = mapped_column(Integer)
+    source_suggestion_version: Mapped[int] = mapped_column(Integer)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+
 def backfill_legacy_workspace(db, workspace_id: int) -> int:
     """将单工作空间兼容库中的未归属旧数据绑定到该空间。
 
@@ -580,6 +818,15 @@ def backfill_legacy_workspace(db, workspace_id: int) -> int:
         ReconciliationResult,
         InventoryPolicy,
         InventoryAlert,
+        ExternalAccount,
+        ExternalProductMapping,
+        ExternalOrder,
+        ExternalOrderLine,
+        DailySkuSale,
+        ReplenishmentSuggestion,
+        ReplenishmentSuggestionAction,
+        PurchaseRequest,
+        PurchaseRequestLine,
     )
     changed = 0
     for model in models:

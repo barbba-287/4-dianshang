@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     rag_top_k: int = 5
     rag_min_score: float = 0.2
     external_snapshot_stale_after_seconds: int = 24 * 60 * 60
+    taobao_adapter_enabled: bool = False
+    taobao_api_base_url: str = ""
+    taobao_app_key: str = ""
+    taobao_app_secret_ref: str = ""
+    taobao_access_token_ref: str = ""
+    taobao_request_timeout_seconds: int = 15
+    taobao_max_page_size: int = 100
 
     # S7 API 安全（默认关闭以保留本地演示兼容）
     api_auth_enabled: bool = False

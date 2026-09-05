@@ -21,10 +21,14 @@
 | S7 安全硬化 | 上传签名/路径/SHA 校验、Agent 配额、审计摘要脱敏、CSRF 双提交、可选 API Key |
 | 员工账户与角色工作台 | session 登录、workspace 成员、运营/仓库/客服/只读角色、仓库授权、停用/启用、密码重置、管理员页面和角色权限页 |
 | 仓储协同 MVP | SKU、自有/第三方仓库、预计入库、仓库实收、差异确认、库存流水与余额；`/ops` 负责创建/复核/确认，`/warehouse` 负责实收反馈 |
-| 外部平台连接规划 | 国内平台（淘宝/天猫、京东、拼多多、抖音电商）优先作为首个只读连接器候选；Amazon/FBA 作为跨境扩展，统一通过 Adapter/Connector 接入 |
-| 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：已确认内部库存、入库状态/数量、失败任务、口径限制和模拟数据提示 |
+| 统一外部事实层 | 外部账户、SKU 映射、订单/订单明细、每日 SKU 销量、7/14/30 日窗口和 workspace 幂等隔离 |
+| 运营驾驶舱与补货闭环 | 单仓 SKU 健康、确定性补货建议、确认/修改/忽略、内部采购申请幂等提交；采购提交不自动入库 |
+| 淘宝只读 Adapter | 只读协议、脱敏 fixture、能力查询和离线 preview；真实网络默认关闭，不提供下单/付款/退款/改价/库存写回 |
+| 离线多平台同步编排 | JSON/CSV/mock 订单+库存 bundle、ExternalSyncRun 成功/失败、账户/店铺一致性校验和幂等回放 |
+| 测试基线 | 当前全量回归 `135 passed`；MySQL 迁移头 `0011_replenishment_loop` |
+| 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：已确认内部库存、入库状态/数量、销量摘要、SKU 健康、补货建议、失败任务、口径限制和模拟数据提示 |
 
-当前版本已完成员工账户与角色工作台基础闭环，但**完整多租户/RBAC 仍未完成**：仓库列表、入库和库存已按当前 workspace/授权仓库限制；商品、文档、任务、向量、外部快照等全链路 workspace 隔离仍在后续阶段。
+当前版本已完成员工账户、基础 workspace/RBAC、统一外部事实层、补货决策闭环和离线多平台同步编排。外部订单、销量、库存快照和采购申请均按 workspace 隔离；采购申请提交不会直接修改内部库存。仓库列表、入库、库存和新事实层接口均从当前 session 的 workspace 获取边界。
 
 ## 员工登录与角色工作台
 
@@ -79,7 +83,7 @@ DATABASE_URL=mysql+pymysql://dianshang:dianshang@localhost:3306/dianshang?charse
 
 ## 数据库迁移（Alembic，S6）
 
-S6 将 Alembic 作为当前 schema 管理规范：`migrations/versions/0001_baseline.py` 定义基础 7 张表，`0003_inventory_mvp.py` 增加仓储协同与库存表，`0004_inbound_idempotency.py` 补齐入库幂等字段，`0005_external_sync.py` 增加外部库存快照、事件 Inbox 和对账结果表；`init_db.py` 负责识别数据库状态并执行对应动作；`Base.metadata.create_all` 仅保留给测试 fixture 或演示兜底，不作为生产迁移路径。当前迁移头为 `0006_workspace_rbac`；员工身份模型和 InventoryPolicy 已进入 ORM/迁移，完整业务对象的 workspace 全链路隔离仍在后续阶段补齐。
+S6 将 Alembic 作为当前 schema 管理规范：`0001_baseline.py` 定义基础表，`0003_inventory_mvp.py` 增加仓储协同与库存表，`0004_inbound_idempotency.py` 补齐入库幂等字段，`0005_external_sync.py` 增加外部库存快照、事件 Inbox 和对账结果表；`0006`/`0007` 完成员工 RBAC 与 workspace 隔离，`0008` 增加库存告警，`0009` 增加同步健康，`0010_external_sales_facts.py` 增加外部账户、映射、订单和每日销量，`0011_replenishment_loop.py` 增加补货建议和内部采购申请。`init_db.py` 负责识别数据库状态并执行对应动作；`Base.metadata.create_all` 仅保留给测试 fixture 或演示兜底，不作为生产迁移路径。当前迁移头为 `0011_replenishment_loop`。
 
 ```bash
 # 新库：创建全部表并写入 alembic_version
@@ -147,11 +151,21 @@ python -m app.cli status
 | GET | `/api/agent/tools` | **S5 受控 Agent 工具列表** |
 | POST | `/api/agent/invoke` | **S5 受控工具调用** |
 | GET | `/api/settings` | **S4 运行时配置 + 规模** |
-| GET | `/api/external/connectors` | 列出国内平台候选及 Amazon 的离线连接器能力（只读/mock） |
-| POST | `/api/external/inventory/preview` | 预览并标准化外部库存数据，不落库 |
-| POST | `/api/external/inventory/ingest` | 幂等写入外部库存快照，不修改内部库存 |
-| POST | `/api/external/events/ingest` | 幂等写入外部事件 Inbox，不自动投影库存 |
-| GET | `/api/external/reconciliation/{snapshot_id}` | 对比外部快照和内部库存，生成只读结果 |
+| GET | `/api/external/taobao/capabilities` | 淘宝只读 Adapter 能力说明（默认模拟/禁用真实网络） |
+| POST | `/api/external/taobao/preview` | 淘宝脱敏 fixture 离线预览，不落库、不访问网络 |
+| POST | `/api/external/sync/fixture` | Mock/JSON/CSV 订单+库存离线同步 bundle，写入外部事实和同步运行记录，不修改内部库存 |
+| GET | `/api/external/sync/runs` | 查询当前 workspace 外部同步运行记录 |
+| GET | `/api/external/accounts` | 当前 workspace 外部账户 |
+| GET | `/api/external/product-mappings` | 外部 SKU 映射查询 |
+| PUT | `/api/external/product-mappings` | 外部 SKU 映射维护（需人工确认） |
+| POST | `/api/external/orders/preview` | 预览并标准化外部订单，不落库 |
+| POST | `/api/external/orders/ingest` | 幂等写入外部订单事实和每日销量，不修改内部库存 |
+| GET | `/api/external/sales/daily` | 查询 workspace/平台/店铺/SKU 每日销量 |
+| GET | `/api/replenishment/suggestions` | 查询补货建议 |
+| POST | `/api/replenishment/suggestions/generate` | 按单仓/SKU生成确定性补货建议 |
+| POST | `/api/replenishment/suggestions/{id}/decision` | 确认、修改或忽略建议 |
+| POST | `/api/purchase-requests` | 提交内部采购申请，不自动下单或入库 |
+| GET | `/api/purchase-requests` / `{id}` | 查询采购申请 |
 | GET | `/api/admin/users` | 管理员查看当前工作空间成员 |
 | POST | `/api/admin/users` | 管理员创建运营/仓库/客服/只读账户 |
 | PATCH | `/api/admin/users/{id}` | 修改成员名称或角色 |
@@ -165,27 +179,30 @@ python -m app.cli status
 | GET | `/api/dashboard/summary` | 运营概览聚合（已确认库存、入库状态/数量、失败任务和能力边界说明） |
 | GET | `/dashboard` | 运营看板页面（仅管理员/运营） |
 
-### 外部连接器离线演示
+### 外部连接器与离线同步演示
 
-没有真实平台店铺也可以完整演示第一阶段：
+没有真实平台店铺也可以完整演示当前离线链路：
 
 ```bash
-# 查看候选平台能力；当前全部只读、离线、模拟
+# 查看候选平台能力；全部只读/mock
 python -m app.cli external-list-connectors
 
-# 预览淘宝样例，不写数据库
+# 预览淘宝库存样例，不写数据库
 python -m app.cli external-preview --platform taobao --mode json --file examples/external/taobao_inventory.json
 
 # 预览京东 CSV
 python -m app.cli external-preview --platform jd --mode csv --file examples/external/jd_inventory.csv
 
-# API 预览请求（认证关闭的本地演示环境）
-curl -X POST http://127.0.0.1:8000/api/external/inventory/preview \\
+# 淘宝只读 Adapter 能力（需登录）
+curl http://127.0.0.1:8000/api/external/taobao/capabilities
+
+# 淘宝脱敏 fixture preview（只在内存标准化，不访问网络）
+curl -X POST http://127.0.0.1:8000/api/external/taobao/preview \\
   -H "Content-Type: application/json" \\
-  -d @examples/external/taobao_inventory.json
+  -d '{"resource":"orders","account_ref":"demo","store_ref":"store-1","content":"{\\"records\\":[...],\\"has_more\\":false}"}'
 ```
 
-`available_qty` 是平台观察值；导入只保存外部快照，事件只进入 Inbox，对账只生成报告，不会直接改变内部库存。真实淘宝/天猫、京东、拼多多、抖音或 Amazon API 需要后续的官方授权和独立 Adapter，目前不在已完成能力中。
+当前离线同步编排支持 JSON/CSV/mock 的订单+库存 bundle，写入外部事实和 `external_sync_runs`，不修改内部库存。`available_qty` 是平台观察值；不会写入 `inventory_balances` 或 `inventory_transactions`。淘宝真实网络默认关闭，未接入真实店铺、真实 token 或任何平台写操作。
 
 
 ```bash
@@ -286,19 +303,20 @@ Alembic 已是当前生产 schema 管理路径；`Base.metadata.create_all` 仅�
 
 ## 外部平台与运营增效规划
 
-当前不连接真实平台生产 API，先用 `app/connectors.py` 的离线连接器和 `examples/external/` 示例数据验证统一标准化、外部库存快照、事件 Inbox、幂等重放和库存对账。已提供候选平台能力清单以及库存预览/导入/对账 API 基础入口；它们都标记 `simulated=true`、`live_enabled=false`，不访问网络、不需要店铺凭证。
+当前已完成平台无关的离线事实层和同步编排：JSON/CSV/mock 订单+库存 bundle 写入外部事实、每日销量和同步运行记录，失败会收尾为 failed，重复回放按平台/账户/店铺/订单或快照幂等。淘宝只读 Adapter 已提供能力查询和 fixture preview，但 `TAOBAO_ADAPTER_ENABLED=false` 时不访问网络。
 
-国内平台优先作为求职准备阶段的起步候选：淘宝/天猫、京东、拼多多、抖音电商；Amazon/FBA 作为跨境扩展候选。每个平台未来独立封装认证、签名、限流、分页、重试、错误码和字段映射，核心业务不依赖平台协议；具体接口与能力只以官方文档和实际授权为准。
+淘宝、京东、拼多多、抖音电商和 Amazon/FBA 后续都只申请官方只读权限；真实 Adapter 需要独立认证、签名、限流、分页、重试、错误码和字段映射。坚决不实现自动下单、付款、退款、取消订单、改价或库存写回。
 
 当前可复现入口：
 
 ```bash
 python -m app.cli external-list-connectors
 python -m app.cli external-preview --platform taobao --mode json --file examples/external/taobao_inventory.json
-python -m app.cli external-import --platform taobao --mode json --file examples/external/taobao_inventory.json
+# 登录后调用 /api/external/taobao/capabilities 与 /api/external/taobao/preview
+# 使用 /api/external/sync/fixture 回放订单+库存 bundle
 ```
 
-外部 `available_qty` 只是平台观察值，不直接写入 `inventory_balances` 或 `inventory_transactions`；内部库存仍通过“预计入库 → 仓库实收 → 运营确认”流程更新。没有真实店铺不影响连接器底座、字段映射、幂等和对账能力的演示，但不能把 mock 导入表述为真实平台接入或生产指标。
+外部 `available_qty` 只是平台观察值，不直接写入 `inventory_balances` 或 `inventory_transactions`；内部库存仍通过“预计入库 → 仓库实收 → 运营确认”流程更新。没有真实店铺不影响连接器底座、字段映射、幂等、同步运行和对账能力，但不能把 mock 导入表述为真实平台接入或生产指标。
 
 后续增效模块按以下顺序推进：
 
@@ -311,10 +329,32 @@ python -m app.cli external-import --platform taobao --mode json --file examples/
 这条路线将项目从“被动 CRUD + 客服问答”扩展为“外部信息感知 → 自动对账 → 异常告警 → AI 建议 → 人工审批 → 内部台账”，但不会把未经授权的真实接入或目标指标写成已完成能力。
 
 
-### 运营概览看板
+### 补货决策闭环
 
-已提供 `/dashboard` 和 `/api/dashboard/summary`，面向管理员/运营展示已确认内部库存、库存组合数、入库状态与数量、失败任务以及当前不可计算指标。页面保持原生 HTML/JavaScript，不引入图表构建链；外部平台快照暂不跨来源汇总，动态低库存告警和安全库存策略仍待正式迁移与权限接入。
+当前 Dashboard 的静态建议使用“覆盖天数 + 安全库存”确定性公式，不承诺预测准确率：
 
+```text
+目标库存 = ceil(日均销量 × coverage_days + safety_stock)
+建议补货量 = max(0, 目标库存 - 当前仓库库存)
+```
+
+运营可生成建议、确认/修改/忽略，并提交内部采购申请。采购申请提交不会自动下单、付款、创建入库单或修改库存；只有仓库实收并由运营调用入库确认后，库存流水和余额才会变化。建议和采购申请按 workspace/仓库隔离，写操作要求 CSRF 和幂等键。
+
+### 当前阶段完成状态
+
+- 统一外部事实层：`0010_external_sales_facts`
+- 补货决策闭环：`0011_replenishment_loop`
+- 淘宝只读 Adapter、能力查询和 fixture preview：真实网络默认关闭
+- 离线多平台同步编排：订单+库存 fixture bundle、ExternalSyncRun、失败收尾和幂等回放
+- 当前回归：`135 passed`
+- 当前 MySQL/Alembic head：`0011_replenishment_loop`
+
+后续工作优先级：
+
+1. 离线同步健康摘要、失败补偿和运行监控；
+2. 取得平台官方只读授权后，再实现真实 transport Canary；
+3. 活动销量预测和固定评测；
+4. 统一客服领域模型与真实渠道接入。
 
 ```bash
 # 一键演示（需先启动 uvicorn）
@@ -324,7 +364,14 @@ python scripts/demo.py
 python -m pytest -q
 ```
 
-当前统计：第一周 9 + S1 15 + S2 14 + S3 15 + S4 5 + S5 21 + S6 7 + S7 稳定性 5 + 仓储协同 7 + 首页合同 1 + 连接器 4 + 账户与权限 2 = **114 passed**（以当前工作区 `python -m pytest -q` 为准）。
+当前回归基线：
+
+```text
+135 passed
+```
+
+以当前工作区实际 `python -m pytest -q` 结果为准；测试包含外部订单/销量、淘宝只读 Adapter/API、离线同步编排和补货决策闭环。
+
 
 ## S7 当前进度
 

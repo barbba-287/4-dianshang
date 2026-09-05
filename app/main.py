@@ -8,6 +8,7 @@
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+from datetime import date
 
 from hashlib import sha256
 import html
@@ -88,6 +89,29 @@ from app.schemas import (
     InboundListItem,
     ExternalEventIngestRequest,
     ExternalEventIngestResponse,
+    ExternalOrderPreviewRequest,
+    ExternalOrderPreviewResponse,
+    ExternalOrderIngestRequest,
+    ExternalOrderIngestResponse,
+    ExternalOrderResponse,
+    ExternalOrderLineResponse,
+    ExternalProductMappingRequest,
+    ExternalProductMappingResponse,
+    ExternalAccountResponse,
+    DailySkuSalePage,
+    ReplenishmentGenerateRequest,
+    ReplenishmentDecisionRequest,
+    ReplenishmentSuggestionResponse,
+    ReplenishmentSuggestionPage,
+    PurchaseRequestCreate,
+    PurchaseRequestResponse,
+    PurchaseRequestLineResponse,
+    PurchaseRequestPage,
+    TaobaoCapabilitiesResponse,
+    TaobaoPreviewRequest,
+    TaobaoPreviewResponse,
+    FixtureSyncRequest,
+    FixtureSyncResponse,
     ExternalInventoryIngestRequest,
     ExternalInventoryIngestResponse,
     ExternalInventoryPreviewRequest,
@@ -1109,16 +1133,234 @@ def dashboard_page(request: Request) -> str:
 
 
 
+
+@app.post("/api/external/orders/preview", response_model=ExternalOrderPreviewResponse)
+def external_orders_preview(payload: ExternalOrderPreviewRequest, request: Request):
+    require_principal(request, permission="inventory.read")
+    from app.connectors import load_orders
+    try:
+        records = load_orders(payload.content, platform=payload.platform, source_mode=payload.source_mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+    return ExternalOrderPreviewResponse(
+        platform=payload.platform, source_mode=payload.source_mode, simulated=True,
+        live_enabled=False, normalized_rows=[record.as_dict() for record in records],
+        total=len(records), errors=[], writes=[],
+    )
+
+
+@app.post("/api/external/orders/ingest", response_model=ExternalOrderIngestResponse)
+def external_orders_ingest(payload: ExternalOrderIngestRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="catalog.write")
+    from app.connectors import load_orders
+    from app.external_orders import ingest_orders
+    from app.external_sync import begin_sync_run, complete_sync_run, fail_sync_run, ImportStats
+    run = None
+    try:
+        records = load_orders(payload.content, platform=payload.platform, source_mode=payload.source_mode)
+        account_ref = records[0].account_ref if records else None
+        store_ref = records[0].store_ref if records else None
+        if any(record.account_ref != account_ref or record.store_ref != store_ref for record in records):
+            raise ValueError("MIXED_EXTERNAL_ACCOUNT")
+        run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=payload.platform, sync_type="orders", account_ref=account_ref, store_ref=store_ref, source_mode=payload.source_mode)
+        result = ingest_orders(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
+        sync_stats = ImportStats(total=result.total, inserted=result.inserted, no_op=result.no_op, conflict=result.conflict)
+        complete_sync_run(db, run, sync_stats)
+    except ValueError as exc:
+        if run is not None:
+            fail_sync_run(db, run, exc)
+        raise HTTPException(status_code=422, detail={"code": str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+    except Exception as exc:
+        if run is not None:
+            fail_sync_run(db, run, exc)
+        raise HTTPException(status_code=500, detail={"code": "EXTERNAL_SYNC_FAILED", "message": "外部订单同步失败"}) from exc
+    return ExternalOrderIngestResponse(
+        platform=payload.platform, source_mode=payload.source_mode, simulated=True, live_enabled=False,
+        total=result.total, inserted=result.inserted, updated=result.updated, no_op=result.no_op,
+        conflict=result.conflict, stale=result.stale, affected_dates=result.affected_dates or [],
+        sync_run_id=result.sync_run_id, sync_status="succeeded",
+    )
+
+
+@app.get("/api/external/accounts", response_model=list[ExternalAccountResponse])
+def external_accounts(request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.read")
+    from app.db import ExternalAccount
+    return db.scalars(select(ExternalAccount).where(ExternalAccount.workspace_id == principal.workspace_id).order_by(ExternalAccount.id)).all()
+
+
+@app.get("/api/external/product-mappings", response_model=list[ExternalProductMappingResponse])
+def external_product_mappings(request: Request, external_account_id: int | None = Query(default=None, gt=0), db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.read")
+    from app.db import ExternalProductMapping
+    filters = [ExternalProductMapping.workspace_id == principal.workspace_id]
+    if external_account_id is not None:
+        filters.append(ExternalProductMapping.external_account_id == external_account_id)
+    return db.scalars(select(ExternalProductMapping).where(*filters).order_by(ExternalProductMapping.id)).all()
+
+
+@app.put("/api/external/product-mappings", response_model=ExternalProductMappingResponse)
+def save_external_product_mapping(payload: ExternalProductMappingRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="catalog.write")
+    from app.external_orders import set_product_mapping
+    try:
+        return set_product_mapping(db, workspace_id=principal.workspace_id, external_account_id=payload.external_account_id, external_sku=payload.external_sku, internal_sku_id=payload.internal_sku_id)
+    except ValueError as exc:
+        code = str(exc)
+        status = 404 if code.endswith("NOT_FOUND") else 422
+        raise HTTPException(status_code=status, detail={"code": code, "message": "外部 SKU 映射无效"}) from exc
+
+
+@app.get("/api/external/sales/daily", response_model=DailySkuSalePage)
+def external_daily_sales(
+    request: Request,
+    platform: str | None = None,
+    account_ref: str | None = None,
+    store_ref: str | None = None,
+    external_sku: str | None = None,
+    internal_sku_id: int | None = Query(default=None, gt=0),
+    date_from: date | None = None,
+    date_to: date | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    principal = require_principal(request, permission="inventory.read")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=422, detail={"code": "INVALID_DATE_RANGE", "message": "起始日期不能晚于结束日期"})
+    from app.external_orders import list_daily_sales
+    rows, total = list_daily_sales(db, workspace_id=principal.workspace_id, platform=platform, account_ref=account_ref, store_ref=store_ref, external_sku=external_sku, internal_sku_id=internal_sku_id, start=date_from, end=date_to, limit=page_size, offset=(page - 1) * page_size)
+    return DailySkuSalePage(items=rows, page=page, page_size=page_size, total=total)
+
+
+def _replenishment_error(exc: ValueError) -> HTTPException:
+    code = str(exc)
+    if str(exc) == "IDEMPOTENCY_KEY_REQUIRED":
+        return HTTPException(status_code=422, detail={"code": str(exc), "message": "必须提供 Idempotency-Key"})
+    status = 404 if code.endswith("NOT_FOUND") else 409 if code in {"OPEN_SUGGESTION_EXISTS", "IDEMPOTENCY_KEY_REUSE", "SUGGESTION_VERSION_CONFLICT", "INVALID_SUGGESTION_STATE", "SUGGESTION_NOT_READY", "MIXED_WAREHOUSE", "SUGGESTION_ALREADY_SUBMITTED"} else 422
+    return HTTPException(status_code=status, detail={"code": code, "message": "补货决策操作失败"})
+
+
+def _purchase_request_response(db: Session, request_record):
+    from app.db import PurchaseRequestLine
+    lines = db.scalars(select(PurchaseRequestLine).where(
+        PurchaseRequestLine.workspace_id == request_record.workspace_id,
+        PurchaseRequestLine.purchase_request_id == request_record.id,
+    ).order_by(PurchaseRequestLine.id)).all()
+    return PurchaseRequestResponse.model_validate({
+        "id": request_record.id, "workspace_id": request_record.workspace_id,
+        "warehouse_id": request_record.warehouse_id, "request_no": request_record.request_no,
+        "status": request_record.status, "note": request_record.note,
+        "submitted_by": request_record.submitted_by, "submitted_at": request_record.submitted_at,
+        "idempotency_key": request_record.idempotency_key,
+        "created_at": request_record.created_at, "updated_at": request_record.updated_at,
+        "lines": [PurchaseRequestLineResponse.model_validate(line) for line in lines],
+    })
+
+
+@app.get("/api/replenishment/suggestions", response_model=ReplenishmentSuggestionPage)
+def list_replenishment_suggestions(request: Request, warehouse_id: int | None = Query(default=None, gt=0), sku_id: int | None = Query(default=None, gt=0), status: str | None = Query(default=None, max_length=16), page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="replenishment.read")
+    if warehouse_id is not None: require_warehouse_access(principal, warehouse_id, db=db)
+    from app.replenishment import list_suggestions
+    rows, total = list_suggestions(db, workspace_id=principal.workspace_id, warehouse_id=warehouse_id, status=status, sku_id=sku_id, limit=page_size, offset=(page-1)*page_size)
+    if warehouse_id is None and not principal.has_role(ROLE_ADMIN, ROLE_OPERATIONS):
+        rows = [row for row in rows if row.warehouse_id in principal.warehouse_ids]
+    return ReplenishmentSuggestionPage(items=rows, page=page, page_size=page_size, total=total)
+
+
+@app.post("/api/replenishment/suggestions/generate", response_model=ReplenishmentSuggestionResponse, status_code=201)
+def generate_replenishment_suggestion(payload: ReplenishmentGenerateRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="replenishment.write")
+    require_warehouse_access(principal, payload.warehouse_id, db=db)
+    if not request.headers.get("Idempotency-Key"):
+        raise _replenishment_error(ValueError("IDEMPOTENCY_KEY_REQUIRED"))
+    from app.replenishment import generate_suggestion
+    try:
+        return generate_suggestion(db, workspace_id=principal.workspace_id, warehouse_id=payload.warehouse_id, sku_id=payload.sku_id, actor=principal.subject, coverage_days=payload.coverage_days, as_of=payload.as_of_date)
+    except ValueError as exc: raise _replenishment_error(exc) from exc
+
+
+@app.post("/api/replenishment/suggestions/{suggestion_id}/decision", response_model=ReplenishmentSuggestionResponse)
+def decide_replenishment_suggestion(suggestion_id: int, payload: ReplenishmentDecisionRequest, request: Request, db: Session = Depends(get_db)):
+    permission = "replenishment.confirm" if payload.action == "confirm" else "replenishment.ignore" if payload.action == "ignore" else "replenishment.write"
+    principal = require_principal(request, permission=permission)
+    from app.db import ReplenishmentSuggestion
+    suggestion = db.scalar(select(ReplenishmentSuggestion).where(ReplenishmentSuggestion.id == suggestion_id, ReplenishmentSuggestion.workspace_id == principal.workspace_id))
+    if suggestion is None: raise _replenishment_error(ValueError("SUGGESTION_NOT_FOUND"))
+    require_warehouse_access(principal, suggestion.warehouse_id, db=db)
+    from app.replenishment import decide_suggestion
+    try:
+        return decide_suggestion(db, workspace_id=principal.workspace_id, suggestion_id=suggestion_id, action=payload.action, actor=principal.subject, idempotency_key=request.headers.get("Idempotency-Key") or "", decision_qty=payload.decision_qty, reason=payload.reason, expected_version=payload.expected_version)
+    except ValueError as exc: raise _replenishment_error(exc) from exc
+
+
+@app.post("/api/purchase-requests", response_model=PurchaseRequestResponse, status_code=201)
+def submit_purchase_request_api(payload: PurchaseRequestCreate, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="purchasing.submit")
+    from app.db import ReplenishmentSuggestion
+    suggestions = db.scalars(select(ReplenishmentSuggestion).where(ReplenishmentSuggestion.workspace_id == principal.workspace_id, ReplenishmentSuggestion.id.in_(payload.suggestion_ids))).all()
+    if not suggestions: raise _replenishment_error(ValueError("SUGGESTION_NOT_FOUND"))
+    for suggestion in suggestions: require_warehouse_access(principal, suggestion.warehouse_id, db=db)
+    from app.replenishment import submit_purchase_request
+    try:
+        result = submit_purchase_request(db, workspace_id=principal.workspace_id, suggestion_ids=payload.suggestion_ids, actor=principal.subject, idempotency_key=request.headers.get("Idempotency-Key") or "", note=payload.note)
+        return _purchase_request_response(db, result)
+    except ValueError as exc: raise _replenishment_error(exc) from exc
+
+
+@app.get("/api/purchase-requests/{request_id}", response_model=PurchaseRequestResponse)
+def get_purchase_request(request_id: int, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="purchase.read")
+    from app.db import PurchaseRequest
+    result = db.scalar(select(PurchaseRequest).where(PurchaseRequest.id == request_id, PurchaseRequest.workspace_id == principal.workspace_id))
+    if result is None: raise HTTPException(status_code=404, detail={"code": "PURCHASE_REQUEST_NOT_FOUND", "message": "采购申请不存在"})
+    require_warehouse_access(principal, result.warehouse_id, db=db)
+    return _purchase_request_response(db, result)
+
+
+@app.get("/api/purchase-requests", response_model=PurchaseRequestPage)
+def list_purchase_requests(request: Request, page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), warehouse_id: int | None = Query(default=None, gt=0), db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="purchase.read")
+    if warehouse_id is not None: require_warehouse_access(principal, warehouse_id, db=db)
+    from app.db import PurchaseRequest
+    from sqlalchemy import func
+    filters = [PurchaseRequest.workspace_id == principal.workspace_id]
+    if warehouse_id is not None: filters.append(PurchaseRequest.warehouse_id == warehouse_id)
+    elif not principal.has_role(ROLE_ADMIN, ROLE_OPERATIONS): filters.append(PurchaseRequest.warehouse_id.in_(principal.warehouse_ids))
+    total = db.scalar(select(func.count(PurchaseRequest.id)).where(*filters)) or 0
+    rows = db.scalars(select(PurchaseRequest).where(*filters).order_by(PurchaseRequest.id.desc()).offset((page-1)*page_size).limit(page_size)).all()
+    return PurchaseRequestPage(items=[_purchase_request_response(db, row) for row in rows], page=page, page_size=page_size, total=int(total))
+
+
+@app.post("/api/external/sync/fixture", response_model=FixtureSyncResponse)
+def external_fixture_sync(payload: FixtureSyncRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="catalog.write")
+    from app.platform_sync import run_fixture_sync
+    try:
+        result = run_fixture_sync(db, workspace_id=principal.workspace_id, platform=payload.platform, account_ref=payload.account_ref, store_ref=payload.store_ref, orders_content=payload.orders_content, inventory_content=payload.inventory_content, source_mode=payload.source_mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": str(exc), "message": "离线同步失败"}) from exc
+    order_stats = result["orders"]
+    inventory_stats = result["inventory"]
+    return FixtureSyncResponse(
+        platform=payload.platform, account_ref=payload.account_ref, store_ref=payload.store_ref,
+        simulated=True, live_enabled=False, sync_run_id=result["run"].run_id,
+        sync_status=result["run"].status,
+        orders={"total": order_stats.total, "inserted": order_stats.inserted, "updated": order_stats.updated, "no_op": order_stats.no_op, "conflict": order_stats.conflict, "stale": order_stats.stale} if order_stats else None,
+        inventory={"total": inventory_stats.total, "inserted": inventory_stats.inserted, "no_op": inventory_stats.no_op, "conflict": inventory_stats.conflict, "snapshot_ids": inventory_stats.snapshot_ids or []} if inventory_stats else None,
+    )
+
+
 @app.get("/api/external/sync/runs")
 def list_external_sync_runs(request: Request, platform: str | None = None, status: str | None = None, limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)):
     principal = require_principal(request, permission="inventory.read")
     from app.db import ExternalSyncRun
     filters = [ExternalSyncRun.workspace_id == principal.workspace_id]
-    if platform:
-        filters.append(ExternalSyncRun.platform == platform)
-    if status:
-        filters.append(ExternalSyncRun.status == status)
+    if platform: filters.append(ExternalSyncRun.platform == platform)
+    if status: filters.append(ExternalSyncRun.status == status)
     return db.scalars(select(ExternalSyncRun).where(*filters).order_by(ExternalSyncRun.id.desc()).limit(limit)).all()
+
 
 
 @app.get("/api/external/snapshots/freshness")
@@ -1140,6 +1382,39 @@ def external_connectors(request: Request):
     principal = require_principal(request, permission="inventory.read")
     from app.connectors import connector_capabilities
     return {"items": connector_capabilities()}
+
+
+@app.get("/api/external/taobao/capabilities", response_model=TaobaoCapabilitiesResponse)
+def taobao_capabilities(request: Request):
+    require_principal(request, permission="inventory.read")
+    settings = get_settings()
+    return TaobaoCapabilitiesResponse(
+        platform="taobao", read_only=True, live_enabled=False, simulated=True,
+        enabled=settings.taobao_adapter_enabled,
+        resources=["orders", "inventory"],
+        limitations=["仅只读", "当前 preview 仅接受脱敏 fixture，不访问远程 URL", "不会自动下单、付款、退款、取消、改价或回写库存"],
+    )
+
+
+@app.post("/api/external/taobao/preview", response_model=TaobaoPreviewResponse)
+def taobao_preview(payload: TaobaoPreviewRequest, request: Request):
+    require_principal(request, permission="inventory.read")
+    from app.platform_adapters.base import AdapterError
+    from app.platform_adapters.taobao import TaobaoAdapter, fixture_transport
+    from app.platform_sync import preview_adapter
+    try:
+        adapter = TaobaoAdapter(enabled=True, simulated=True, transport=fixture_transport(payload.content, resource=payload.resource), max_page_size=payload.max_pages)
+        adapter.live_enabled = True
+        result = preview_adapter(adapter, account_ref=payload.account_ref, store_ref=payload.store_ref, resource=payload.resource, max_pages=payload.max_pages)
+    except AdapterError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "TAOBAO_FIELD_INVALID", "message": str(exc)}) from exc
+    return TaobaoPreviewResponse(
+        platform="taobao", resource=payload.resource, read_only=True,
+        live_enabled=False, simulated=True, total=result["total"],
+        normalized_rows=result["records"], data_completeness="complete", errors=[],
+    )
 
 
 @app.post("/api/external/inventory/preview", response_model=ExternalInventoryPreviewResponse)

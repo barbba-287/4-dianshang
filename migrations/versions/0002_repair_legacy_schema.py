@@ -7,7 +7,7 @@ alembic_version，不会获得 S1 新增字段。本迁移对这类数据库做�
 
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 
@@ -114,6 +114,8 @@ _TABLE_COLUMNS = {
 
 
 def _inspector():
+    if context.is_offline_mode():
+        return None
     return inspect(op.get_bind())
 
 
@@ -331,6 +333,10 @@ def _create_missing_indexes() -> None:
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        # Offline SQL is intended for a new, complete baseline; the legacy
+        # state-aware repair requires reflection and is executed online.
+        return
     _create_missing_tables()
     _add_missing_columns()
     _create_missing_indexes()
