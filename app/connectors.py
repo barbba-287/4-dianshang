@@ -242,9 +242,12 @@ def normalize_inventory_row(row: dict[str, Any], *, platform: str, source_mode: 
     account_ref = _required_text(row, "account_ref")
     as_of = _parse_time(row.get("as_of") or row.get("captured_at"), field="as_of")
     received_at = _parse_time(row.get("received_at") or row.get("as_of") or row.get("captured_at"), field="received_at")
-    key = str(row.get("idempotency_key") or f"{platform}:{account_ref}:{external_sku}:{as_of.isoformat()}")
+    store_ref = row.get("store_ref")
     warehouse_ref = row.get("warehouse_ref") or row.get("external_warehouse_ref")
     inbound_qty = row.get("inbound_qty", row.get("in_transit_qty", 0))
+    store_key = str(store_ref or "__default_store__")
+    warehouse_key = str(warehouse_ref or "__default_warehouse__")
+    key = str(row.get("idempotency_key") or f"{platform}:{account_ref}:{store_key}:{warehouse_key}:{external_sku}:{as_of.isoformat()}")
     return InventorySnapshotRecord(
         schema_version=str(row.get("schema_version") or "1"),
         platform=platform,

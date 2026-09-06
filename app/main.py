@@ -18,7 +18,7 @@ import uuid
 
 from fastapi import Body, Depends, File, Form, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
@@ -117,6 +117,8 @@ from app.schemas import (
     ExternalInventoryPreviewRequest,
     ExternalInventoryPreviewResponse,
     DashboardSummaryResponse,
+    ExternalSyncRetryRequest,
+    ExternalSyncRunResponse,
     InventoryPolicyCreate,
     InventoryPolicyResponse,
     AdminUserCreate,
@@ -1352,14 +1354,104 @@ def external_fixture_sync(payload: FixtureSyncRequest, request: Request, db: Ses
     )
 
 
-@app.get("/api/external/sync/runs")
+@app.get("/api/external/sync/runs/{run_id}", response_model=ExternalSyncRunResponse)
+def get_external_sync_run(run_id: str, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.read")
+    from app.db import ExternalSyncRun
+    from app.external_sync import resource_status, retryable_resources
+    run = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.run_id == run_id, ExternalSyncRun.workspace_id == principal.workspace_id))
+    if run is None:
+        raise HTTPException(status_code=404, detail={"code": "SYNC_RUN_NOT_FOUND", "message": "同步运行不存在"})
+    return _external_sync_run_response(run)
+
+
+def _external_sync_run_response(run):
+    from app.external_sync import resource_status, retryable_resources
+    from datetime import datetime
+    now = datetime.utcnow()
+    heartbeat = run.heartbeat_at or run.started_at
+    return ExternalSyncRunResponse(
+        run_id=run.run_id, workspace_id=run.workspace_id, platform=run.platform,
+        account_ref=run.account_ref, store_ref=run.store_ref, sync_type=run.sync_type,
+        source_mode=run.source_mode, simulated=run.simulated, status=run.status,
+        attempt=run.attempt or 1, retry_of_run_id=run.retry_of_run_id,
+        started_at=run.started_at, finished_at=run.finished_at, heartbeat_at=run.heartbeat_at,
+        duration_seconds=int(((run.finished_at or now) - run.started_at).total_seconds()) if run.started_at else None,
+        heartbeat_age_seconds=max(0, int((now - heartbeat).total_seconds())) if heartbeat else None,
+        total=run.total, inserted=run.inserted, updated=getattr(run, "updated", 0), no_op=run.no_op, conflict=run.conflict, stale=getattr(run, "stale", 0),
+        error_code=run.error_code, error_message=run.error_message,
+        resource_status=resource_status(run), retryable_resources=retryable_resources(run),
+    )
+
+
+@app.post("/api/external/sync/runs/{run_id}/retry", response_model=ExternalSyncRunResponse)
+def retry_external_sync_run(run_id: str, payload: ExternalSyncRetryRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="catalog.write")
+    key = request.headers.get("Idempotency-Key")
+    if not key:
+        raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供 Idempotency-Key"})
+    if len(key) > 128:
+        raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_TOO_LONG", "message": "Idempotency-Key 超过长度限制"})
+    from app.db import ExternalSyncRun
+    from app.external_sync import resource_status, retryable_resources
+    from app.platform_sync import run_fixture_sync
+    import hashlib
+    import sqlalchemy.exc
+    parent = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.run_id == run_id, ExternalSyncRun.workspace_id == principal.workspace_id))
+    if parent is None:
+        raise HTTPException(status_code=404, detail={"code": "SYNC_RUN_NOT_FOUND", "message": "同步运行不存在"})
+    if parent.status not in {"failed", "partial"} or parent.sync_type not in {"fixture_bundle", "orders", "inventory"}:
+        raise HTTPException(status_code=409, detail={"code": "SYNC_RUN_NOT_RETRYABLE", "message": "该同步运行不支持补偿"})
+    available = set(retryable_resources(parent))
+    selected = set(payload.resources or available)
+    if not selected or not selected.issubset({"orders", "inventory"}) or not selected.issubset(available):
+        raise HTTPException(status_code=409, detail={"code": "SYNC_RESOURCE_NOT_RETRYABLE", "message": "选定资源不可补偿"})
+    if "orders" in selected and not payload.orders_content or "inventory" in selected and not payload.inventory_content:
+        raise HTTPException(status_code=422, detail={"code": "FIXTURE_CONTENT_REQUIRED", "message": "补偿资源必须提供 fixture"})
+    content_hash = hashlib.sha256(json.dumps({
+        "run_id": run_id,
+        "resources": sorted(selected),
+        "orders_content": payload.orders_content if "orders" in selected else None,
+        "inventory_content": payload.inventory_content if "inventory" in selected else None,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    existing = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.workspace_id == principal.workspace_id, ExternalSyncRun.retry_of_run_id == run_id, ExternalSyncRun.retry_idempotency_key == key))
+    if existing is not None:
+        if existing.retry_payload_hash != content_hash:
+            raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_KEY_REUSE", "message": "补偿幂等键对应内容已改变"})
+        response = _external_sync_run_response(existing)
+        return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+    carried = resource_status(parent)
+    try:
+        result = run_fixture_sync(db, workspace_id=principal.workspace_id, platform=parent.platform, account_ref=parent.account_ref or "", store_ref=parent.store_ref or "default", orders_content=payload.orders_content if "orders" in selected else None, inventory_content=payload.inventory_content if "inventory" in selected else None, source_mode=parent.source_mode, attempt=(parent.attempt or 1) + 1, retry_of_run_id=parent.run_id, retry_idempotency_key=key, retry_payload_hash=content_hash, carried_forward={name: item for name, item in carried.items() if name not in selected}, sync_type_override=parent.sync_type)
+    except sqlalchemy.exc.IntegrityError as exc:
+        db.rollback()
+        competing = db.scalar(select(ExternalSyncRun).where(
+            ExternalSyncRun.workspace_id == principal.workspace_id,
+            ExternalSyncRun.retry_of_run_id == run_id,
+            ExternalSyncRun.retry_idempotency_key == key,
+        ))
+        if competing is None:
+            raise HTTPException(status_code=500, detail={"code": "SYNC_RETRY_PERSIST_FAILED", "message": "同步补偿无法持久化"}) from exc
+        if competing.retry_payload_hash != content_hash:
+            raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_KEY_REUSE", "message": "补偿幂等键对应内容已改变"}) from exc
+        response = _external_sync_run_response(competing)
+        return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": str(exc), "message": "同步补偿失败"}) from exc
+    child = result["run"]
+    db.commit(); db.refresh(child)
+    return JSONResponse(status_code=201, content=_external_sync_run_response(child).model_dump(mode="json"))
+
+
+@app.get("/api/external/sync/runs", response_model=list[ExternalSyncRunResponse])
 def list_external_sync_runs(request: Request, platform: str | None = None, status: str | None = None, limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)):
     principal = require_principal(request, permission="inventory.read")
     from app.db import ExternalSyncRun
     filters = [ExternalSyncRun.workspace_id == principal.workspace_id]
     if platform: filters.append(ExternalSyncRun.platform == platform)
     if status: filters.append(ExternalSyncRun.status == status)
-    return db.scalars(select(ExternalSyncRun).where(*filters).order_by(ExternalSyncRun.id.desc()).limit(limit)).all()
+    rows = db.scalars(select(ExternalSyncRun).where(*filters).order_by(ExternalSyncRun.id.desc()).limit(limit)).all()
+    return [_external_sync_run_response(row) for row in rows]
 
 
 
@@ -1374,7 +1466,7 @@ def external_snapshot_freshness(request: Request, db: Session = Depends(get_db))
 def refresh_external_alerts_api(request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, permission="inventory.write")
     from app.alerts import refresh_external_alerts
-    return refresh_external_alerts(db, workspace_id=principal.workspace_id, stale_after_seconds=get_settings().external_snapshot_stale_after_seconds)
+    return refresh_external_alerts(db, workspace_id=principal.workspace_id, stale_after_seconds=get_settings().external_snapshot_stale_after_seconds, sync_stale_after_seconds=get_settings().external_sync_run_stale_after_seconds)
 
 
 @app.get("/api/external/connectors")
@@ -1450,9 +1542,11 @@ def external_inventory_ingest(payload: ExternalInventoryIngestRequest, request: 
         result = ingest_inventory(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
         complete_sync_run(db, run, result)
     except ValueError as exc:
+        if 'run' in locals() and run is not None:
+            fail_sync_run(db, run, exc)
         raise HTTPException(status_code=422, detail={"code": "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
     except Exception as exc:
-        if 'run' in locals():
+        if 'run' in locals() and run is not None:
             fail_sync_run(db, run, exc)
         raise HTTPException(status_code=500, detail={"code": "EXTERNAL_SYNC_FAILED", "message": "外部库存同步失败"}) from exc
     return ExternalInventoryIngestResponse(
@@ -1482,9 +1576,11 @@ def external_events_ingest(payload: ExternalEventIngestRequest, request: Request
         result = ingest_events(db, events, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
         complete_sync_run(db, run, result)
     except ValueError as exc:
+        if 'run' in locals() and run is not None:
+            fail_sync_run(db, run, exc)
         raise HTTPException(status_code=422, detail={"code": "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
     except Exception as exc:
-        if 'run' in locals():
+        if 'run' in locals() and run is not None:
             fail_sync_run(db, run, exc)
         raise HTTPException(status_code=500, detail={"code": "EXTERNAL_SYNC_FAILED", "message": "外部事件同步失败"}) from exc
     return ExternalEventIngestResponse(platform=payload.platform, inserted=result.inserted, no_op=result.no_op, conflict=result.conflict, total=result.total, sync_run_id=result.sync_run_id, sync_status=result.sync_status)

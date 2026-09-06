@@ -7,7 +7,17 @@ from typing import Any
 from app.platform_adapters.base import AdapterError, AdapterPage, ReadOnlyPlatformAdapter
 from app.connectors import load_orders, load_records
 from app.external_orders import ingest_orders
-from app.external_sync import ImportStats, begin_sync_run, complete_sync_run, fail_sync_run, ingest_inventory
+from app.external_sync import (
+    ImportStats,
+    begin_sync_run,
+    finalize_resource_run,
+    ingest_inventory,
+    initialize_resources,
+    mark_resource_failed,
+    mark_resource_running,
+    mark_resource_succeeded,
+    resource_status,
+)
 
 
 def run_fixture_sync(
@@ -20,6 +30,12 @@ def run_fixture_sync(
     orders_content: str | bytes | None = None,
     inventory_content: str | bytes | None = None,
     source_mode: str = "mock",
+    attempt: int = 1,
+    retry_of_run_id: str | None = None,
+    retry_idempotency_key: str | None = None,
+    retry_payload_hash: str | None = None,
+    carried_forward: dict | None = None,
+    sync_type_override: str | None = None,
 ):
     if not workspace_id:
         raise ValueError("WORKSPACE_CONTEXT_REQUIRED")
@@ -33,29 +49,34 @@ def run_fixture_sync(
         sync_type = "orders"
     else:
         sync_type = "inventory"
-    run = begin_sync_run(db, workspace_id=workspace_id, platform=platform, sync_type=sync_type, account_ref=account_ref, store_ref=store_ref, source_mode=source_mode, simulated=True)
-    try:
-        order_stats = None
-        inventory_stats = None
-        if orders_content:
-            records = load_orders(orders_content, platform=platform, source_mode=source_mode)
-            if any(row.account_ref != account_ref or row.store_ref != store_ref for row in records):
-                raise ValueError("MIXED_EXTERNAL_ACCOUNT")
-            order_stats = ingest_orders(db, records, workspace_id=workspace_id, sync_run_id=run.run_id)
-        if inventory_content:
-            records = load_records(inventory_content, platform=platform, source_mode=source_mode)
-            if any(row.account_ref != account_ref or (row.store_ref or "default") != store_ref for row in records):
-                raise ValueError("MIXED_EXTERNAL_ACCOUNT")
-            inventory_stats = ingest_inventory(db, records, workspace_id=workspace_id, sync_run_id=run.run_id)
-        total = (order_stats.total if order_stats else 0) + (inventory_stats.total if inventory_stats else 0)
-        inserted = (order_stats.inserted if order_stats else 0) + (inventory_stats.inserted if inventory_stats else 0)
-        no_op = (order_stats.no_op if order_stats else 0) + (inventory_stats.no_op if inventory_stats else 0)
-        conflict = (order_stats.conflict if order_stats else 0) + (inventory_stats.conflict if inventory_stats else 0)
-        complete_sync_run(db, run, ImportStats(total=total, inserted=inserted, no_op=no_op, conflict=conflict))
-        return {"run": run, "orders": order_stats, "inventory": inventory_stats}
-    except Exception as exc:
-        fail_sync_run(db, run, exc)
-        raise
+    run = begin_sync_run(db, workspace_id=workspace_id, platform=platform, sync_type=sync_type_override or sync_type, account_ref=account_ref, store_ref=store_ref, source_mode=source_mode, simulated=True, attempt=attempt, retry_of_run_id=retry_of_run_id, retry_idempotency_key=retry_idempotency_key, retry_payload_hash=retry_payload_hash)
+    resources = [name for name, content in (("orders", orders_content), ("inventory", inventory_content)) if content]
+    initialize_resources(db, run, resources, carried_forward=carried_forward)
+    order_stats = None
+    inventory_stats = None
+    errors: list[Exception] = []
+    for resource in resources:
+        mark_resource_running(db, run, resource)
+        try:
+            if resource == "orders":
+                records = load_orders(orders_content, platform=platform, source_mode=source_mode)
+                if any(row.account_ref != account_ref or row.store_ref != store_ref for row in records):
+                    raise ValueError("MIXED_EXTERNAL_ACCOUNT")
+                order_stats = ingest_orders(db, records, workspace_id=workspace_id, sync_run_id=run.run_id)
+                mark_resource_succeeded(db, run, resource, order_stats)
+            else:
+                records = load_records(inventory_content, platform=platform, source_mode=source_mode)
+                if any(row.account_ref != account_ref or (row.store_ref or "default") != store_ref for row in records):
+                    raise ValueError("MIXED_EXTERNAL_ACCOUNT")
+                inventory_stats = ingest_inventory(db, records, workspace_id=workspace_id, sync_run_id=run.run_id)
+                mark_resource_succeeded(db, run, resource, inventory_stats)
+        except Exception as exc:
+            errors.append(exc)
+            mark_resource_failed(db, run, resource, exc)
+    finalize_resource_run(db, run, error=errors[0] if errors else None)
+    if errors and run.status == "failed":
+        raise errors[0]
+    return {"run": run, "orders": order_stats, "inventory": inventory_stats, "errors": errors}
 
 
 def collect_pages(fetch: Callable[..., AdapterPage], *, max_pages: int = 100, **kwargs: Any) -> list:

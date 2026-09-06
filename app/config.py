@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     rag_top_k: int = 5
     rag_min_score: float = 0.2
     external_snapshot_stale_after_seconds: int = 24 * 60 * 60
+    external_sync_run_stale_after_seconds: int = 15 * 60
     taobao_adapter_enabled: bool = False
     taobao_api_base_url: str = ""
     taobao_app_key: str = ""

@@ -59,6 +59,69 @@ def test_fixture_bundle_rejects_mixed_store_and_marks_run_failed(monkeypatch, tm
         db.close()
 
 
+def test_fixture_sync_marks_partial_and_keeps_successful_resource(monkeypatch, tmp_path):
+    _cfg, db_mod, sync_mod, _repo, db, workspace = _env(monkeypatch, tmp_path)
+    try:
+        class RetryableFixtureError(RuntimeError):
+            code = "TIMEOUT"
+            retryable = True
+
+        original = sync_mod.load_records
+        monkeypatch.setattr(sync_mod, "load_records", lambda *args, **kwargs: (_ for _ in ()).throw(RetryableFixtureError("temporary")))
+        result = sync_mod.run_fixture_sync(
+            db,
+            workspace_id=workspace.id,
+            platform="jd",
+            account_ref="a",
+            store_ref="s",
+            orders_content=_orders(),
+            inventory_content=_inventory(),
+            source_mode="json",
+        )
+        run = result["run"]
+        assert run.status == "partial"
+        statuses = json.loads(run.resource_status_json)
+        assert statuses["orders"]["status"] == "succeeded"
+        assert statuses["inventory"]["status"] == "failed"
+        assert statuses["inventory"]["error_code"] == "TIMEOUT"
+        assert json.loads(run.retryable_resources_json) == ["inventory"]
+        assert db.query(db_mod.ExternalOrder).count() == 1
+        assert db.query(db_mod.ExternalInventorySnapshot).count() == 0
+        assert db.query(db_mod.InventoryBalance).count() == 0
+
+        monkeypatch.setattr(sync_mod, "load_records", original)
+    finally:
+        db.close()
+
+
+def test_fixture_sync_all_resources_failed_keeps_failed_run(monkeypatch, tmp_path):
+    _cfg, _db_mod, sync_mod, _repo, db, workspace = _env(monkeypatch, tmp_path)
+    try:
+        class RetryableFixtureError(RuntimeError):
+            code = "TIMEOUT"
+            retryable = True
+
+        monkeypatch.setattr(sync_mod, "load_orders", lambda *args, **kwargs: (_ for _ in ()).throw(RetryableFixtureError("temporary")))
+        monkeypatch.setattr(sync_mod, "load_records", lambda *args, **kwargs: (_ for _ in ()).throw(RetryableFixtureError("temporary")))
+        with pytest.raises(RetryableFixtureError):
+            sync_mod.run_fixture_sync(
+                db,
+                workspace_id=workspace.id,
+                platform="jd",
+                account_ref="a",
+                store_ref="s",
+                orders_content=_orders(),
+                inventory_content=_inventory(),
+                source_mode="json",
+            )
+        run = db.query(_db_mod.ExternalSyncRun).order_by(_db_mod.ExternalSyncRun.id.desc()).first()
+        assert run.status == "failed"
+        assert run.finished_at is not None
+        assert json.loads(run.retryable_resources_json) == ["inventory", "orders"]
+    finally:
+        db.close()
+
+
 def test_fixture_sync_requires_resource(monkeypatch, tmp_path):
     _cfg, _db_mod, sync_mod, _repo, db, workspace = _env(monkeypatch, tmp_path)
     try:

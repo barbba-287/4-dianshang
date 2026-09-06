@@ -382,6 +382,7 @@ class ExternalSyncRun(Base):
     __tablename__ = "external_sync_runs"
     __table_args__ = (
         UniqueConstraint("workspace_id", "run_id", name="uq_external_sync_run_workspace_id"),
+        UniqueConstraint("workspace_id", "retry_of_run_id", "retry_idempotency_key", name="uq_external_sync_run_retry_idempotency"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -397,10 +398,18 @@ class ExternalSyncRun(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    retry_of_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    resource_status_json: Mapped[str] = mapped_column(Text, default="{}")
+    retryable_resources_json: Mapped[str] = mapped_column(Text, default="[]")
+    retry_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    retry_payload_hash: Mapped[str | None] = mapped_column(String(72), nullable=True)
     total: Mapped[int] = mapped_column(Integer, default=0)
     inserted: Mapped[int] = mapped_column(Integer, default=0)
+    updated: Mapped[int] = mapped_column(Integer, default=0)
     no_op: Mapped[int] = mapped_column(Integer, default=0)
     conflict: Mapped[int] = mapped_column(Integer, default=0)
+    stale: Mapped[int] = mapped_column(Integer, default=0)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -409,7 +418,8 @@ class ExternalSyncRun(Base):
 class ExternalInventorySnapshot(Base):
     __tablename__ = "external_inventory_snapshots"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "platform", "account_ref", "external_sku", "as_of", "payload_hash", name="uq_external_snapshot_workspace_identity"),
+        UniqueConstraint("workspace_id", "platform", "account_ref", "store_ref_key", "warehouse_ref_key", "external_sku", "as_of", "payload_hash", name="uq_external_snapshot_workspace_identity"),
+        UniqueConstraint("workspace_id", "platform", "account_ref", "store_ref_key", "warehouse_ref_key", "idempotency_key", name="uq_external_snapshot_workspace_key"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -419,8 +429,10 @@ class ExternalInventorySnapshot(Base):
     platform: Mapped[str] = mapped_column(String(32), index=True)
     account_ref: Mapped[str] = mapped_column(String(128), index=True)
     store_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    store_ref_key: Mapped[str] = mapped_column(String(128), nullable=False, server_default="__default_store__", index=True)
     marketplace: Mapped[str | None] = mapped_column(String(64), nullable=True)
     warehouse_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    warehouse_ref_key: Mapped[str] = mapped_column(String(128), nullable=False, server_default="__default_warehouse__", index=True)
     external_sku: Mapped[str] = mapped_column(String(255), index=True)
     internal_sku_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     asin: Mapped[str | None] = mapped_column(String(32), nullable=True)

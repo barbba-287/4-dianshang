@@ -14,8 +14,49 @@ class DashboardSummaryResponse(BaseModel):
     limitations: list[str]
     alert_summary: dict = Field(default_factory=dict)
     snapshot_freshness: list[dict] = Field(default_factory=list)
+    sync_health: dict = Field(default_factory=dict)
     sales_summary: dict = Field(default_factory=dict)
     sku_health: list[dict] = Field(default_factory=list)
+
+
+class ExternalSyncRetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resources: list[Literal["orders", "inventory"]] = Field(default_factory=list)
+    orders_content: str | None = Field(default=None, max_length=2_000_000)
+    inventory_content: str | None = Field(default=None, max_length=2_000_000)
+
+
+class ExternalSyncRunResponse(BaseModel):
+    run_id: str
+    workspace_id: int | None
+    platform: str
+    account_ref: str | None
+    store_ref: str | None
+    sync_type: str
+    source_mode: str
+    simulated: bool
+    status: str
+    attempt: int = 1
+    retry_of_run_id: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    duration_seconds: int | None = None
+    heartbeat_age_seconds: int | None = None
+    total: int
+    inserted: int
+    updated: int = 0
+    no_op: int
+    conflict: int
+    stale: int = 0
+    error_code: str | None = None
+    error_message: str | None = None
+    resource_status: dict = Field(default_factory=dict)
+    retryable_resources: list[str] = Field(default_factory=list)
+
+
+class ExternalSyncRetryResponse(ExternalSyncRunResponse):
+    pass
 
 
 class InventoryPolicyCreate(BaseModel):

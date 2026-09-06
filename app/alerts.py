@@ -88,7 +88,7 @@ def _upsert_external_alert(db: Session, *, workspace_id: int, dedupe_key: str, k
     return alert
 
 
-def refresh_external_alerts(db: Session, *, workspace_id: int, stale_after_seconds: int = 86400, now: datetime | None = None) -> list[InventoryAlert]:
+def refresh_external_alerts(db: Session, *, workspace_id: int, stale_after_seconds: int = 86400, now: datetime | None = None, sync_stale_after_seconds: int = 900) -> list[InventoryAlert]:
     from app.db import ExternalSyncRun
     from app.external_sync import snapshot_freshness
 
@@ -98,10 +98,16 @@ def refresh_external_alerts(db: Session, *, workspace_id: int, stale_after_secon
     for run in runs:
         latest_runs.setdefault((run.platform, run.account_ref, run.store_ref, run.sync_type), run)
     for (platform, account_ref, store_ref, sync_type), run in latest_runs.items():
-        _upsert_external_alert(db, workspace_id=workspace_id, dedupe_key=f"external_sync_failed:{platform}:{account_ref or ''}:{store_ref or ''}:{sync_type}", kind="external_sync_failed", severity="critical", title="外部同步失败", message=f"{platform}/{sync_type} 最近一次同步失败：{run.error_code or 'UNKNOWN'}", platform=platform, active=run.status == "failed", now=now)
+        source_key = f"{platform}:{account_ref or ''}:{store_ref or ''}:{sync_type}"
+        _upsert_external_alert(db, workspace_id=workspace_id, dedupe_key=f"external_sync_failed:{source_key}", kind="external_sync_failed", severity="critical", title="外部同步失败", message=f"{platform}/{sync_type} 最近一次同步失败：{run.error_code or 'UNKNOWN'}", platform=platform, active=run.status == "failed", now=now)
+        _upsert_external_alert(db, workspace_id=workspace_id, dedupe_key=f"external_sync_partial:{source_key}", kind="external_sync_partial", severity="warning", title="外部同步部分成功", message=f"{platform}/{sync_type} 存在资源失败，需人工补偿", platform=platform, active=run.status == "partial", now=now)
+        heartbeat = run.heartbeat_at or run.started_at
+        stalled = run.status == "running" and heartbeat is not None and (now - heartbeat).total_seconds() > sync_stale_after_seconds
+        _upsert_external_alert(db, workspace_id=workspace_id, dedupe_key=f"external_sync_stalled:{source_key}", kind="external_sync_stalled", severity="critical", title="外部同步运行停滞", message=f"{platform}/{sync_type} heartbeat 已超过 {sync_stale_after_seconds} 秒", platform=platform, active=stalled, now=now)
     for item in snapshot_freshness(db, workspace_id=workspace_id, now=now, stale_after_seconds=stale_after_seconds):
-        source_key = ":".join(str(item.get(field) or "") for field in ("platform", "account_ref", "store_ref", "warehouse_ref"))
+        source_key = ":".join(str(item.get(field) or "") for field in ("platform", "account_ref", "store_ref", "marketplace", "warehouse_ref"))
         _upsert_external_alert(db, workspace_id=workspace_id, dedupe_key=f"external_snapshot_stale:{source_key}", kind="external_snapshot_stale", severity="critical", title="外部库存快照过期", message=f"外部快照数据年龄 {item['age_seconds']} 秒，阈值 {item['threshold_seconds']} 秒", platform=item.get("platform"), active=item.get("state") == "stale", now=now)
+        _upsert_external_alert(db, workspace_id=workspace_id, dedupe_key=f"external_snapshot_clock_skew:{source_key}", kind="external_snapshot_clock_skew", severity="warning", title="外部库存快照时钟偏差", message="外部快照观测时间晚于当前时间，需检查平台时钟或数据时间", platform=item.get("platform"), active=item.get("state") == "clock_skew", now=now)
     db.commit()
     return list_alerts(db, workspace_id=workspace_id)
 

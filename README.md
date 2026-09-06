@@ -25,7 +25,7 @@
 | 运营驾驶舱与补货闭环 | 单仓 SKU 健康、确定性补货建议、确认/修改/忽略、内部采购申请幂等提交；采购提交不自动入库 |
 | 淘宝只读 Adapter | 只读协议、脱敏 fixture、能力查询和离线 preview；真实网络默认关闭，不提供下单/付款/退款/改价/库存写回 |
 | 离线多平台同步编排 | JSON/CSV/mock 订单+库存 bundle、ExternalSyncRun 成功/失败、账户/店铺一致性校验和幂等回放 |
-| 测试基线 | 当前全量回归 `135 passed`；MySQL 迁移头 `0011_replenishment_loop` |
+| 测试基线 | 当前全量回归 `140 passed`；MySQL 迁移头 `0013_external_snapshot_scope` |
 | 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：已确认内部库存、入库状态/数量、销量摘要、SKU 健康、补货建议、失败任务、口径限制和模拟数据提示 |
 
 当前版本已完成员工账户、基础 workspace/RBAC、统一外部事实层、补货决策闭环和离线多平台同步编排。外部订单、销量、库存快照和采购申请均按 workspace 隔离；采购申请提交不会直接修改内部库存。仓库列表、入库、库存和新事实层接口均从当前 session 的 workspace 获取边界。
@@ -303,7 +303,7 @@ Alembic 已是当前生产 schema 管理路径；`Base.metadata.create_all` 仅�
 
 ## 外部平台与运营增效规划
 
-当前已完成平台无关的离线事实层和同步编排：JSON/CSV/mock 订单+库存 bundle 写入外部事实、每日销量和同步运行记录，失败会收尾为 failed，重复回放按平台/账户/店铺/订单或快照幂等。淘宝只读 Adapter 已提供能力查询和 fixture preview，但 `TAOBAO_ADAPTER_ENABLED=false` 时不访问网络。
+当前已完成平台无关的离线事实层和同步编排：JSON/CSV/mock 订单+库存 bundle 写入外部事实、每日销量和同步运行记录；运行可收尾为 `succeeded`、`failed` 或资源级 `partial`，失败资源可通过人工补偿 API 重试，重复回放按平台/账户/店铺/来源和事实幂等。Dashboard 已展示同步健康、失败和待补偿摘要。淘宝只读 Adapter 已提供能力查询和 fixture preview，但 `TAOBAO_ADAPTER_ENABLED=false` 时不访问网络。
 
 淘宝、京东、拼多多、抖音电商和 Amazon/FBA 后续都只申请官方只读权限；真实 Adapter 需要独立认证、签名、限流、分页、重试、错误码和字段映射。坚决不实现自动下单、付款、退款、取消订单、改价或库存写回。
 
@@ -346,8 +346,8 @@ python -m app.cli external-preview --platform taobao --mode json --file examples
 - 补货决策闭环：`0011_replenishment_loop`
 - 淘宝只读 Adapter、能力查询和 fixture preview：真实网络默认关闭
 - 离线多平台同步编排：订单+库存 fixture bundle、ExternalSyncRun、失败收尾和幂等回放
-- 当前回归：`135 passed`
-- 当前 MySQL/Alembic head：`0011_replenishment_loop`
+- 当前回归：`140 passed`
+- 当前 MySQL/Alembic head：`0013_external_snapshot_scope`
 
 后续工作优先级：
 
@@ -403,7 +403,7 @@ python -m pytest -q
 - 运营增效扩展：库存看板、差异告警、授权场景 RPA、飞书/钉钉通知与人工审批、运营分析 Agent/Dify 工作流。
 - RAG 固定问答集评测：命中率、无答案率、引用覆盖率和响应耗时。
 - 生产适配器：真实 Embedding、LLM 和外部向量库。
-- 业务扩展：订单、多模态商品信息；写入型 Agent 动作必须经过显式审批。
+- MCP：后续提供只读 AI 运营助手工具，复用业务 Service 和现有 workspace/RBAC；不绕过权限，不直接执行补货、采购、入库或平台交易写操作。
 
 ## 文档
 

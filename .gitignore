@@ -11,5 +11,6 @@ artifacts/*
 !artifacts/.gitkeep
 uploads/*
 
-# 本地执行计划，不上传到远程仓库
+# 本地项目文档和执行计划，不上传到远程仓库
 电商ai.md
+docs/enterprise-production-requirements.md

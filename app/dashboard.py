@@ -9,6 +9,7 @@ import math
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import (
     CrawlJob,
     InboundLine,
@@ -161,6 +162,36 @@ def build_sku_health(
     return result
 
 
+def build_sync_health_summary(db: Session, *, workspace_id: int, stale_after_seconds: int = 900, now: datetime | None = None) -> dict:
+    """汇总外部同步运行健康；只读取当前 workspace 的运行记录。"""
+    from app.db import ExternalSyncRun
+    from app.external_sync import resource_status, retryable_resources
+
+    now = now or datetime.utcnow()
+    rows = db.scalars(select(ExternalSyncRun).where(ExternalSyncRun.workspace_id == workspace_id).order_by(ExternalSyncRun.id.desc()).limit(5000)).all()
+    counts = {key: 0 for key in ("running", "succeeded", "failed", "partial", "stalled", "retryable")}
+    latest: dict[tuple, ExternalSyncRun] = {}
+    recent_failures = []
+    for row in rows:
+        counts[row.status] = counts.get(row.status, 0) + 1
+        heartbeat = row.heartbeat_at or row.started_at
+        age = max(0, int((now - heartbeat).total_seconds())) if heartbeat else None
+        stalled = row.status == "running" and age is not None and age > stale_after_seconds
+        if stalled:
+            counts["stalled"] += 1
+        retryable = retryable_resources(row)
+        key = (row.platform, row.account_ref, row.store_ref, row.sync_type)
+        latest.setdefault(key, row)
+        if row.status in {"failed", "partial"}:
+            recent_failures.append({"run_id": row.run_id, "platform": row.platform, "sync_type": row.sync_type, "status": row.status, "error_code": row.error_code, "retryable_resources": retryable})
+    def item(row: ExternalSyncRun) -> dict:
+        heartbeat = row.heartbeat_at or row.started_at
+        return {"run_id": row.run_id, "platform": row.platform, "account_ref": row.account_ref, "store_ref": row.store_ref, "sync_type": row.sync_type, "status": row.status, "attempt": row.attempt or 1, "retry_of_run_id": row.retry_of_run_id, "resource_status": resource_status(row), "retryable_resources": retryable_resources(row), "duration_seconds": int(((row.finished_at or now) - row.started_at).total_seconds()) if row.started_at else None, "heartbeat_age_seconds": max(0, int((now - heartbeat).total_seconds())) if heartbeat else None}
+    latest_rows = list(latest.values())
+    counts["retryable"] = sum(len(retryable_resources(row)) for row in latest_rows)
+    return {"as_of": now.isoformat(), "stale_after_seconds": stale_after_seconds, "counts": counts, "latest": [item(row) for row in latest_rows], "recent_failures": recent_failures[:20]}
+
+
 def build_dashboard_summary(
     db: Session,
     *,
@@ -214,6 +245,12 @@ def build_dashboard_summary(
     ]
     from app.external_sync import snapshot_freshness
     freshness = snapshot_freshness(db, workspace_id=workspace_id)
+    sync_health = build_sync_health_summary(
+        db,
+        workspace_id=workspace_id,
+        stale_after_seconds=get_settings().external_sync_run_stale_after_seconds,
+        now=now,
+    )
     recent = sorted(orders, key=lambda order: (order.created_at, order.id), reverse=True)[:recent_limit]
     line_by_order = {}
     for line in lines:
@@ -234,6 +271,7 @@ def build_dashboard_summary(
         "recent_inbounds": [{"id": order.id, "reference_no": order.reference_no, "warehouse_id": order.warehouse_id, "status": order.status, "created_at": order.created_at.isoformat(), **line_by_order.get(order.id, {"expected_qty": 0, "received_qty": 0})} for order in recent],
         "alert_summary": alert_summary,
         "snapshot_freshness": freshness,
+        "sync_health": sync_health,
         "sales_summary": build_sales_summary(db, workspace_id=workspace_id),
         "sku_health": build_sku_health(
             db,
