@@ -292,6 +292,32 @@ def _set_run_metadata(db: Session, model, sync_run_id: str | None, workspace_id:
         raise ValueError("SYNC_RUN_NOT_FOUND")
 
 
+def validate_inventory_batch_scope(records: list[InventorySnapshotRecord]) -> tuple[str, str | None, str | None]:
+    if not records:
+        raise ValueError("EXTERNAL_RECORDS_EMPTY")
+    first = records[0]
+    account_ref = first.account_ref
+    store_ref = first.store_ref
+    warehouse_ref = first.warehouse_ref
+    for record in records:
+        if (
+            record.account_ref != account_ref
+            or (record.store_ref or "default") != (store_ref or "default")
+            or (record.warehouse_ref or "__default_warehouse__") != (warehouse_ref or "__default_warehouse__")
+        ):
+            raise ValueError("MIXED_EXTERNAL_SCOPE")
+    return account_ref, store_ref, warehouse_ref
+
+
+def validate_event_batch_scope(events: list[CanonicalEvent]) -> str:
+    if not events:
+        raise ValueError("EXTERNAL_RECORDS_EMPTY")
+    account_ref = events[0].account_ref
+    if any(event.account_ref != account_ref for event in events):
+        raise ValueError("MIXED_EXTERNAL_ACCOUNT")
+    return account_ref
+
+
 def ingest_inventory(
     db: Session,
     records: list[InventorySnapshotRecord],
@@ -300,6 +326,7 @@ def ingest_inventory(
     sync_run_id: str | None = None,
 ) -> ImportStats:
     stats = ImportStats(total=len(records), snapshot_ids=[], sync_run_id=sync_run_id, sync_status="running" if sync_run_id else None)
+    validate_inventory_batch_scope(records)
     if sync_run_id:
         _set_run_metadata(db, ExternalInventorySnapshot, sync_run_id, workspace_id)
     try:
@@ -365,6 +392,7 @@ def ingest_events(
     sync_run_id: str | None = None,
 ) -> ImportStats:
     stats = ImportStats(total=len(events), sync_run_id=sync_run_id, sync_status="running" if sync_run_id else None)
+    validate_event_batch_scope(events)
     if sync_run_id:
         _set_run_metadata(db, ExternalEventInbox, sync_run_id, workspace_id)
     try:

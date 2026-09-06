@@ -99,6 +99,86 @@ def _create_partial(client, monkeypatch):
     return response.json()["sync_run_id"], platform_sync, original
 
 
+def _events(account: str = "a", event_id: str = "E-API-1") -> str:
+    return json.dumps({"records": [{
+        "account_ref": account,
+        "external_event_id": event_id,
+        "event_type": "order.updated",
+        "occurred_at": "2026-09-01T10:00:00Z",
+        "payload": {"status": "paid"},
+    }]})
+
+
+def test_multi_workspace_login_requires_explicit_selection(tmp_path, monkeypatch):
+    client, db_mod, bg_mod = _client(tmp_path, monkeypatch)
+    try:
+        with db_mod.SessionLocal() as db:
+            workspace_b = db_mod.Workspace(tenant_key="sync-api-b", name="同步 API 测试 B")
+            db.add(workspace_b)
+            db.flush()
+            user = db.query(db_mod.UserAccount).filter_by(login="operator").one()
+            db.add(db_mod.WorkspaceMembership(workspace_id=workspace_b.id, user_id=user.id, role="operations"))
+            db.commit()
+        ambiguous = client.post(
+            "/login",
+            data={"login": "operator", "password": "operator-password", "next": "/"},
+            follow_redirects=False,
+        )
+        assert ambiguous.status_code == 409
+        assert ambiguous.json()["detail"]["code"] == "WORKSPACE_SELECTION_REQUIRED"
+        selected = client.post(
+            "/login",
+            data={"login": "operator", "password": "operator-password", "workspace": "sync-api-b", "next": "/"},
+            follow_redirects=False,
+        )
+        assert selected.status_code == 303
+        assert client.get("/me").json()["workspace_id"] == 2
+    finally:
+        bg_mod.reset_executor()
+
+
+def test_direct_inventory_and_events_reject_empty_or_mixed_scope(tmp_path, monkeypatch):
+    client, _db_mod, bg_mod = _client(tmp_path, monkeypatch)
+    try:
+        empty_inventory = client.post(
+            "/api/external/inventory/ingest",
+            json={"platform": "jd", "source_mode": "json", "content": json.dumps({"records": []})},
+        )
+        assert empty_inventory.status_code == 422
+        assert empty_inventory.json()["detail"]["code"] == "EXTERNAL_RECORDS_EMPTY"
+
+        mixed_inventory = json.dumps({"records": [
+            {"account_ref": "a", "store_ref": "s", "warehouse_ref": "w1", "external_sku": "S-1", "available_qty": 1, "as_of": "2026-09-01T10:00:00Z"},
+            {"account_ref": "a", "store_ref": "s", "warehouse_ref": "w2", "external_sku": "S-2", "available_qty": 1, "as_of": "2026-09-01T10:00:00Z"},
+        ]})
+        mixed = client.post(
+            "/api/external/inventory/ingest",
+            json={"platform": "jd", "source_mode": "json", "content": mixed_inventory},
+        )
+        assert mixed.status_code == 422
+        assert mixed.json()["detail"]["code"] == "MIXED_EXTERNAL_SCOPE"
+
+        empty_events = client.post(
+            "/api/external/events/ingest",
+            json={"platform": "jd", "source_mode": "json", "content": json.dumps({"records": []})},
+        )
+        assert empty_events.status_code == 422
+        assert empty_events.json()["detail"]["code"] == "EXTERNAL_RECORDS_EMPTY"
+
+        mixed_events = json.dumps({"records": [
+            {"account_ref": "a", "external_event_id": "E-1", "event_type": "order.updated", "occurred_at": "2026-09-01T10:00:00Z", "payload": {}},
+            {"account_ref": "b", "external_event_id": "E-2", "event_type": "order.updated", "occurred_at": "2026-09-01T10:00:00Z", "payload": {}},
+        ]})
+        mixed_event_response = client.post(
+            "/api/external/events/ingest",
+            json={"platform": "jd", "source_mode": "json", "content": mixed_events},
+        )
+        assert mixed_event_response.status_code == 422
+        assert mixed_event_response.json()["detail"]["code"] == "MIXED_EXTERNAL_ACCOUNT"
+    finally:
+        bg_mod.reset_executor()
+
+
 def test_sync_detail_and_retry_idempotency(tmp_path, monkeypatch):
     client, db_mod, bg_mod = _client(tmp_path, monkeypatch)
     try:

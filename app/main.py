@@ -288,20 +288,56 @@ def index(request: Request) -> str:
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request) -> str:
     next_path = request.query_params.get("next", "/")
+    workspace_key = request.query_params.get("workspace", "")
     if not next_path.startswith("/") or next_path.startswith("//"):
         next_path = "/"
     next_path = html.escape(next_path, quote=True)
-    return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><title>登录 - 电商工作台</title><style>body{{max-width:420px;margin:5rem auto;padding:1rem;font-family:system-ui,sans-serif}}form{{display:grid;gap:.8rem}}input,button{{padding:.7rem;border:1px solid #cbd5e1;border-radius:.4rem;font:inherit}}button{{background:#2563eb;color:white;border:0}}</style></head><body><h1>员工登录</h1><p id='message'>请输入账户和密码</p><form method='post' action='/login'><label>账户<input name='login' required autocomplete='username'></label><label>密码<input name='password' type='password' required autocomplete='current-password'></label><input type='hidden' name='next' value='{next_path}'><button type='submit'>登录</button></form></body></html>"""
+    workspace_key = html.escape(workspace_key, quote=True)
+    return f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><title>登录 - 电商工作台</title><style>body{{max-width:420px;margin:5rem auto;padding:1rem;font-family:system-ui,sans-serif}}form{{display:grid;gap:.8rem}}input,button{{padding:.7rem;border:1px solid #cbd5e1;border-radius:.4rem;font:inherit}}button{{background:#2563eb;color:white;border:0}}</style></head><body><h1>员工登录</h1><p id='message'>请输入账户和密码</p><form method='post' action='/login'><label>账户<input name='login' required autocomplete='username'></label><label>密码<input name='password' type='password' required autocomplete='current-password'></label><label>工作空间（多空间账户必填）<input name='workspace' value='{workspace_key}' autocomplete='organization'></label><input type='hidden' name='next' value='{next_path}'><button type='submit'>登录</button></form></body></html>"""
 
 
 @app.post("/login")
-def login(request: Request, login: str = Form(...), password: str = Form(...), next: str = Form(default="/"), db: Session = Depends(get_db)):
+def login(request: Request, login: str = Form(...), password: str = Form(...), workspace: str = Form(default=""), next: str = Form(default="/"), db: Session = Depends(get_db)):
     if not get_settings().employee_auth_enabled:
         return RedirectResponse(url=next if next.startswith("/") and not next.startswith("//") else "/", status_code=303)
     user = db.scalar(select(UserAccount).where(UserAccount.login == login.strip()))
-    membership = db.scalar(select(WorkspaceMembership).where(WorkspaceMembership.user_id == user.id, WorkspaceMembership.status == "active")) if user else None
-    if user is None or user.status != "active" or membership is None or not verify_password(password, user.password_hash):
+    memberships = []
+    if user is not None and user.status == "active":
+        memberships = db.scalars(
+            select(WorkspaceMembership)
+            .join(Workspace, Workspace.id == WorkspaceMembership.workspace_id)
+            .where(
+                WorkspaceMembership.user_id == user.id,
+                WorkspaceMembership.status == "active",
+                Workspace.status == "active",
+            )
+            .order_by(WorkspaceMembership.id)
+        ).all()
+    if user is None or user.status != "active" or not verify_password(password, user.password_hash):
         raise HTTPException(status_code=401, detail={"code": "INVALID_CREDENTIALS", "message": "账户或密码错误"})
+    if len(memberships) == 0:
+        raise HTTPException(status_code=401, detail={"code": "WORKSPACE_NOT_AVAILABLE", "message": "账户没有可用工作空间"})
+    workspace = workspace.strip()
+    if workspace:
+        selected = [item for item in memberships if str(item.workspace_id) == workspace]
+        if len(selected) != 1:
+            selected = db.scalars(
+                select(WorkspaceMembership)
+                .join(Workspace, Workspace.id == WorkspaceMembership.workspace_id)
+                .where(
+                    WorkspaceMembership.user_id == user.id,
+                    WorkspaceMembership.status == "active",
+                    Workspace.status == "active",
+                    Workspace.tenant_key == workspace,
+                )
+            ).all()
+        if len(selected) != 1:
+            raise HTTPException(status_code=401, detail={"code": "INVALID_WORKSPACE", "message": "工作空间选择无效"})
+        membership = selected[0]
+    elif len(memberships) == 1:
+        membership = memberships[0]
+    else:
+        raise HTTPException(status_code=409, detail={"code": "WORKSPACE_SELECTION_REQUIRED", "message": "多工作空间账户必须明确选择工作空间"})
     from app.db import backfill_legacy_workspace
     backfill_legacy_workspace(db, membership.workspace_id)
     token, csrf, _session = create_session(db, user=user, membership=membership, settings=get_settings(), ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
@@ -1143,7 +1179,7 @@ def external_orders_preview(payload: ExternalOrderPreviewRequest, request: Reque
     try:
         records = load_orders(payload.content, platform=payload.platform, source_mode=payload.source_mode)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+        raise HTTPException(status_code=422, detail={"code": str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
     return ExternalOrderPreviewResponse(
         platform=payload.platform, source_mode=payload.source_mode, simulated=True,
         live_enabled=False, normalized_rows=[record.as_dict() for record in records],
@@ -1516,7 +1552,7 @@ def external_inventory_preview(payload: ExternalInventoryPreviewRequest, request
     try:
         records = load_records(payload.content, platform=payload.platform, source_mode=payload.source_mode)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+        raise HTTPException(status_code=422, detail={"code": str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
     return ExternalInventoryPreviewResponse(
         platform=payload.platform,
         source_mode=payload.source_mode,
@@ -1533,18 +1569,19 @@ def external_inventory_preview(payload: ExternalInventoryPreviewRequest, request
 def external_inventory_ingest(payload: ExternalInventoryIngestRequest, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, permission="catalog.write")
     from app.connectors import load_records
-    from app.external_sync import begin_sync_run, complete_sync_run, fail_sync_run, ingest_inventory
+    from app.external_sync import begin_sync_run, complete_sync_run, fail_sync_run, ingest_inventory, validate_inventory_batch_scope
+    run = None
     try:
         records = load_records(payload.content, platform=payload.platform, source_mode=payload.source_mode)
-        account_ref = records[0].account_ref if records else None
-        store_ref = records[0].store_ref if records else None
+        account_ref, store_ref, _warehouse_ref = validate_inventory_batch_scope(records)
+        run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=payload.platform, sync_type="inventory", account_ref=account_ref, store_ref=store_ref, source_mode=payload.source_mode)
         run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=payload.platform, sync_type="inventory", account_ref=account_ref, store_ref=store_ref, source_mode=payload.source_mode)
         result = ingest_inventory(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
         complete_sync_run(db, run, result)
     except ValueError as exc:
         if 'run' in locals() and run is not None:
             fail_sync_run(db, run, exc)
-        raise HTTPException(status_code=422, detail={"code": "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+        raise HTTPException(status_code=422, detail={"code": str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
     except Exception as exc:
         if 'run' in locals() and run is not None:
             fail_sync_run(db, run, exc)
@@ -1568,17 +1605,18 @@ def external_inventory_ingest(payload: ExternalInventoryIngestRequest, request: 
 def external_events_ingest(payload: ExternalEventIngestRequest, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, permission="catalog.write")
     from app.connectors import load_events
-    from app.external_sync import begin_sync_run, complete_sync_run, fail_sync_run, ingest_events
+    from app.external_sync import begin_sync_run, complete_sync_run, fail_sync_run, ingest_events, validate_event_batch_scope
+    run = None
     try:
         events = load_events(payload.content, platform=payload.platform, source_mode=payload.source_mode)
-        account_ref = events[0].account_ref if events else None
+        account_ref = validate_event_batch_scope(events)
         run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=payload.platform, sync_type="events", account_ref=account_ref, source_mode=payload.source_mode)
         result = ingest_events(db, events, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
         complete_sync_run(db, run, result)
     except ValueError as exc:
         if 'run' in locals() and run is not None:
             fail_sync_run(db, run, exc)
-        raise HTTPException(status_code=422, detail={"code": "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+        raise HTTPException(status_code=422, detail={"code": str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
     except Exception as exc:
         if 'run' in locals() and run is not None:
             fail_sync_run(db, run, exc)
