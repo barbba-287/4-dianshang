@@ -66,14 +66,18 @@ def now_iso() -> str:
 
 def summarise(payload: Any, *, max_len: int = 200) -> str:
     """序列化摘要并遮蔽常见敏感字段。"""
-    sensitive = {"password", "passwd", "token", "secret", "authorization", "cookie", "api_key", "key"}
+    sensitive = {
+        "password", "passwd", "token", "secret", "authorization", "cookie",
+        "apikey", "accesstoken", "key",
+    }
 
     def scrub(value: Any) -> Any:
         if isinstance(value, dict):
-            return {
-                key: "[REDACTED]" if key.lower() in sensitive else scrub(item)
-                for key, item in value.items()
-            }
+            scrubbed = {}
+            for key, item in value.items():
+                normalised = "".join(char.lower() for char in str(key) if char.isalnum())
+                scrubbed[key] = "[REDACTED]" if normalised in sensitive else scrub(item)
+            return scrubbed
         if isinstance(value, (list, tuple)):
             return [scrub(item) for item in value]
         return value

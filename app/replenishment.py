@@ -16,6 +16,7 @@ from app.db import (
     InventoryPolicy,
     ProductSku,
     PurchaseRequest,
+    PurchaseRequestAction,
     PurchaseRequestLine,
     ReplenishmentSuggestion,
     ReplenishmentSuggestionAction,
@@ -206,10 +207,13 @@ def generate_suggestion(
     return suggestion
 
 
-def list_suggestions(db: Session, *, workspace_id: int, warehouse_id: int | None = None, status: str | None = None, sku_id: int | None = None, limit: int = 100, offset: int = 0):
+def list_suggestions(db: Session, *, workspace_id: int, warehouse_id: int | None = None, warehouse_ids: list[int] | tuple[int, ...] | None = None, status: str | None = None, sku_id: int | None = None, limit: int = 100, offset: int = 0):
     filters = [ReplenishmentSuggestion.workspace_id == workspace_id]
     if warehouse_id is not None:
         filters.append(ReplenishmentSuggestion.warehouse_id == warehouse_id)
+    elif warehouse_ids is not None:
+        # Apply the employee's warehouse scope in SQL, before count/pagination.
+        filters.append(ReplenishmentSuggestion.warehouse_id.in_(warehouse_ids))
     if status:
         filters.append(ReplenishmentSuggestion.status == status)
     if sku_id is not None:
@@ -292,6 +296,195 @@ def decide_suggestion(
     db.commit()
     db.refresh(suggestion)
     return suggestion
+
+
+def create_purchase_request_draft(
+    db: Session,
+    *,
+    workspace_id: int,
+    suggestion_ids: list[int],
+    actor: str,
+    idempotency_key: str,
+    note: str | None = None,
+    supplier_ref: str | None = None,
+    expected_arrival_date: date | None = None,
+) -> PurchaseRequest:
+    """Create an editable purchase draft without submitting or changing stock."""
+    if not idempotency_key or len(idempotency_key) > 128:
+        raise ValueError("IDEMPOTENCY_KEY_REQUIRED")
+    if not suggestion_ids:
+        raise ValueError("SUGGESTIONS_REQUIRED")
+    unique_ids = sorted(set(suggestion_ids))
+    payload = {
+        "suggestion_ids": unique_ids,
+        "note": note,
+        "supplier_ref": supplier_ref,
+        "expected_arrival_date": expected_arrival_date.isoformat() if expected_arrival_date else None,
+    }
+    payload_hash = _canonical_hash(payload)
+    existing = db.scalar(select(PurchaseRequest).where(
+        PurchaseRequest.workspace_id == workspace_id,
+        PurchaseRequest.idempotency_key == idempotency_key,
+    ))
+    if existing is not None:
+        if existing.payload_hash != payload_hash:
+            raise ValueError("IDEMPOTENCY_KEY_REUSE")
+        return existing
+    suggestions = db.scalars(select(ReplenishmentSuggestion).where(
+        ReplenishmentSuggestion.workspace_id == workspace_id,
+        ReplenishmentSuggestion.id.in_(unique_ids),
+    ).order_by(ReplenishmentSuggestion.id)).all()
+    if len(suggestions) != len(unique_ids):
+        raise ValueError("SUGGESTION_NOT_FOUND")
+    if any(item.status not in {"confirmed", "modified"} or item.decision_qty is None or item.decision_qty <= 0 for item in suggestions):
+        raise ValueError("SUGGESTION_NOT_READY")
+    already_linked = db.scalar(select(PurchaseRequestLine.suggestion_id).where(
+        PurchaseRequestLine.workspace_id == workspace_id,
+        PurchaseRequestLine.suggestion_id.in_(unique_ids),
+    ))
+    if already_linked is not None:
+        raise ValueError("SUGGESTION_ALREADY_IN_PURCHASE_REQUEST")
+    warehouses = {item.warehouse_id for item in suggestions}
+    if len(warehouses) != 1:
+        raise ValueError("MIXED_WAREHOUSE")
+    warehouse_id = next(iter(warehouses))
+    request = PurchaseRequest(
+        workspace_id=workspace_id, warehouse_id=warehouse_id,
+        request_no=f"PR-{uuid4().hex[:12].upper()}", status="draft", note=note,
+        created_by=actor, idempotency_key=idempotency_key, payload_hash=payload_hash,
+        supplier_ref=supplier_ref, expected_arrival_date=expected_arrival_date, version=1,
+    )
+    db.add(request)
+    db.flush()
+    for item in suggestions:
+        db.add(PurchaseRequestLine(
+            workspace_id=workspace_id, purchase_request_id=request.id,
+            warehouse_id=item.warehouse_id, sku_id=item.sku_id, suggestion_id=item.id,
+            requested_qty=item.decision_qty, source_suggestion_version=item.version,
+        ))
+    db.add(PurchaseRequestAction(
+        workspace_id=workspace_id, purchase_request_id=request.id, action_type="create",
+        from_status=None, to_status="draft", idempotency_key=idempotency_key,
+        payload_hash=payload_hash, actor=actor,
+    ))
+    try:
+        db.commit()
+        db.refresh(request)
+    except Exception:
+        db.rollback()
+        duplicate = db.scalar(select(PurchaseRequest).where(
+            PurchaseRequest.workspace_id == workspace_id,
+            PurchaseRequest.idempotency_key == idempotency_key,
+        ))
+        if duplicate is not None and duplicate.payload_hash == payload_hash:
+            return duplicate
+        raise
+    return request
+
+
+def edit_purchase_request_draft(
+    db: Session,
+    *,
+    workspace_id: int,
+    request_id: int,
+    actor: str,
+    idempotency_key: str,
+    expected_version: int,
+    note: str | None = None,
+    supplier_ref: str | None = None,
+    expected_arrival_date: date | None = None,
+) -> PurchaseRequest:
+    """Edit draft metadata with optimistic version protection."""
+    if not idempotency_key or len(idempotency_key) > 128:
+        raise ValueError("IDEMPOTENCY_KEY_REQUIRED")
+    request = db.scalar(select(PurchaseRequest).where(PurchaseRequest.id == request_id, PurchaseRequest.workspace_id == workspace_id))
+    if request is None:
+        raise ValueError("PURCHASE_REQUEST_NOT_FOUND")
+    payload_hash = _canonical_hash({"request_id": request_id, "note": note, "supplier_ref": supplier_ref, "expected_arrival_date": expected_arrival_date.isoformat() if expected_arrival_date else None, "expected_version": expected_version})
+    action = db.scalar(select(PurchaseRequestAction).where(PurchaseRequestAction.workspace_id == workspace_id, PurchaseRequestAction.purchase_request_id == request_id, PurchaseRequestAction.action_type == "edit", PurchaseRequestAction.idempotency_key == idempotency_key))
+    if action is not None:
+        if action.payload_hash != payload_hash:
+            raise ValueError("IDEMPOTENCY_KEY_REUSE")
+        return request
+    if request.status != "draft":
+        raise ValueError("INVALID_PURCHASE_REQUEST_STATE")
+    if request.version != expected_version:
+        raise ValueError("PURCHASE_REQUEST_VERSION_CONFLICT")
+    request.note = note
+    request.supplier_ref = supplier_ref
+    request.expected_arrival_date = expected_arrival_date
+    request.version += 1
+    db.add(PurchaseRequestAction(workspace_id=workspace_id, purchase_request_id=request_id, action_type="edit", from_status="draft", to_status="draft", idempotency_key=idempotency_key, payload_hash=payload_hash, expected_version=expected_version, actor=actor))
+    db.commit()
+    db.refresh(request)
+    return request
+def submit_purchase_request_draft(
+    db: Session,
+    *,
+    workspace_id: int,
+    request_id: int,
+    actor: str,
+    idempotency_key: str,
+    expected_version: int,
+) -> PurchaseRequest:
+    """Submit one draft for manual approval; never performs purchasing or receiving."""
+    if not idempotency_key or len(idempotency_key) > 128:
+        raise ValueError("IDEMPOTENCY_KEY_REQUIRED")
+    request = db.scalar(select(PurchaseRequest).where(
+        PurchaseRequest.id == request_id,
+        PurchaseRequest.workspace_id == workspace_id,
+    ))
+    if request is None:
+        raise ValueError("PURCHASE_REQUEST_NOT_FOUND")
+    payload_hash = _canonical_hash({"request_id": request_id, "expected_version": expected_version})
+    action = db.scalar(select(PurchaseRequestAction).where(
+        PurchaseRequestAction.workspace_id == workspace_id,
+        PurchaseRequestAction.purchase_request_id == request_id,
+        PurchaseRequestAction.action_type == "submit",
+        PurchaseRequestAction.idempotency_key == idempotency_key,
+    ))
+    if action is not None:
+        if action.payload_hash != payload_hash:
+            raise ValueError("IDEMPOTENCY_KEY_REUSE")
+        return request
+    if request.status != "draft":
+        raise ValueError("INVALID_PURCHASE_REQUEST_STATE")
+    if request.version != expected_version:
+        raise ValueError("PURCHASE_REQUEST_VERSION_CONFLICT")
+    lines = db.scalars(select(PurchaseRequestLine).where(
+        PurchaseRequestLine.purchase_request_id == request.id,
+        PurchaseRequestLine.workspace_id == workspace_id,
+    ).order_by(PurchaseRequestLine.id)).all()
+    # 先完成所有 suggestion 校验，再变更 request/suggestion，避免 service
+    # 被单独调用时留下半提交状态。
+    suggestions = []
+    for line in lines:
+        suggestion = db.scalar(select(ReplenishmentSuggestion).where(
+            ReplenishmentSuggestion.id == line.suggestion_id,
+            ReplenishmentSuggestion.workspace_id == workspace_id,
+        ))
+        if suggestion is None or suggestion.version != line.source_suggestion_version or suggestion.status not in {"confirmed", "modified"}:
+            raise ValueError("SUGGESTION_STALE")
+        suggestions.append(suggestion)
+    now = datetime.utcnow()
+    request.status = "submitted"
+    request.submitted_by = actor
+    request.submitted_at = now
+    request.version += 1
+    for suggestion in suggestions:
+        suggestion.status = "submitted"
+        suggestion.submitted_by = actor
+        suggestion.submitted_at = now
+        suggestion.active_slot = None
+        suggestion.version += 1
+    db.add(PurchaseRequestAction(
+        workspace_id=workspace_id, purchase_request_id=request_id, action_type="submit",
+        from_status="draft", to_status="submitted", idempotency_key=idempotency_key,
+        payload_hash=payload_hash, expected_version=expected_version, actor=actor,
+    ))
+    db.commit()
+    db.refresh(request)
+    return request
 
 
 def submit_purchase_request(

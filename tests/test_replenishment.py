@@ -85,6 +85,53 @@ def test_generate_decide_and_submit_purchase_request_without_inventory_side_effe
         db.close()
 
 
+def test_purchase_draft_lifecycle_and_inventory_invariant(env):
+    db_mod, replenishment = env
+    db, workspace, sku, warehouse = _fixture(db_mod, tenant_key="draft")
+    try:
+        suggestion = replenishment.generate_suggestion(db, workspace_id=workspace.id, warehouse_id=warehouse.id, sku_id=sku.id, actor="ops")
+        confirmed = replenishment.decide_suggestion(db, workspace_id=workspace.id, suggestion_id=suggestion.id, action="confirm", actor="ops", idempotency_key="draft-decision", expected_version=1)
+        before_balance = db.scalar(select(db_mod.InventoryBalance.on_hand_qty).where(db_mod.InventoryBalance.workspace_id == workspace.id))
+        before_transactions = db.scalar(select(func.count(db_mod.InventoryTransaction.id)).where(db_mod.InventoryTransaction.workspace_id == workspace.id)) or 0
+        draft = replenishment.create_purchase_request_draft(db, workspace_id=workspace.id, suggestion_ids=[suggestion.id], actor="ops", idempotency_key="draft-create", note="检查后提交", supplier_ref="supplier-a")
+        assert draft.status == "draft"
+        assert draft.submitted_by is None
+        assert draft.version == 1
+        replay = replenishment.create_purchase_request_draft(db, workspace_id=workspace.id, suggestion_ids=[suggestion.id], actor="ops", idempotency_key="draft-create", note="检查后提交", supplier_ref="supplier-a")
+        assert replay.id == draft.id
+        edited = replenishment.edit_purchase_request_draft(db, workspace_id=workspace.id, request_id=draft.id, actor="ops", idempotency_key="draft-edit", expected_version=1, note="已检查", supplier_ref="supplier-b")
+        assert edited.version == 2
+        submitted = replenishment.submit_purchase_request_draft(db, workspace_id=workspace.id, request_id=draft.id, actor="ops", idempotency_key="draft-submit", expected_version=2)
+        assert submitted.status == "submitted"
+        assert submitted.submitted_by == "ops"
+        after_balance = db.scalar(select(db_mod.InventoryBalance.on_hand_qty).where(db_mod.InventoryBalance.workspace_id == workspace.id))
+        after_transactions = db.scalar(select(func.count(db_mod.InventoryTransaction.id)).where(db_mod.InventoryTransaction.workspace_id == workspace.id)) or 0
+        assert before_balance == after_balance == 4
+        assert before_transactions == after_transactions == 0
+        db.refresh(confirmed)
+        assert confirmed.status == "submitted"
+    finally:
+        db.close()
+
+
+def test_purchase_draft_rejects_stale_version_without_partial_commit(env):
+    db_mod, replenishment = env
+    db, workspace, sku, warehouse = _fixture(db_mod, tenant_key="stale-draft")
+    try:
+        suggestion = replenishment.generate_suggestion(db, workspace_id=workspace.id, warehouse_id=warehouse.id, sku_id=sku.id, actor="ops")
+        replenishment.decide_suggestion(db, workspace_id=workspace.id, suggestion_id=suggestion.id, action="confirm", actor="ops", idempotency_key="stale-decision", expected_version=1)
+        draft = replenishment.create_purchase_request_draft(db, workspace_id=workspace.id, suggestion_ids=[suggestion.id], actor="ops", idempotency_key="stale-create")
+        suggestion.version += 1
+        db.commit()
+        with pytest.raises(ValueError, match="SUGGESTION_STALE"):
+            replenishment.submit_purchase_request_draft(db, workspace_id=workspace.id, request_id=draft.id, actor="ops", idempotency_key="stale-submit", expected_version=1)
+        db.rollback()
+        db.expire_all()
+        assert db.get(db_mod.PurchaseRequest, draft.id).status == "draft"
+    finally:
+        db.close()
+
+
 def test_decision_idempotency_and_version_conflict(env):
     db_mod, replenishment = env
     db, workspace, sku, warehouse = _fixture(db_mod, tenant_key="version")
@@ -99,7 +146,6 @@ def test_decision_idempotency_and_version_conflict(env):
             replenishment.decide_suggestion(db, workspace_id=workspace.id, suggestion_id=suggestion.id, action="modify", actor="ops", idempotency_key="different", decision_qty=1, reason="改数量", expected_version=1)
     finally:
         db.close()
-
 
 def test_ignore_requires_reason_and_workspace_isolation(env):
     db_mod, replenishment = env

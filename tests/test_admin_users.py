@@ -96,6 +96,49 @@ def test_admin_user_lifecycle_and_warehouse_scope(client):
     created = client.post(
         "/api/admin/users",
         json={
+            "login": "second-admin",
+            "display_name": "第二管理员",
+            "password": "second-admin-password",
+            "role": "admin",
+            "warehouse_ids": [],
+        },
+    )
+    assert created.status_code == 201, created.text
+    second_admin = created.json()
+    assert second_admin["role"] == "admin"
+    assert second_admin["warehouse_ids"] == []
+
+    rejected_scope = client.post(
+        "/api/admin/users",
+        json={
+            "login": "scoped-admin",
+            "display_name": "带仓库管理员",
+            "password": "scoped-admin-password",
+            "role": "admin",
+            "warehouse_ids": [warehouse["id"]],
+        },
+    )
+    assert rejected_scope.status_code == 422
+    assert rejected_scope.json()["detail"]["code"] == "ADMIN_WAREHOUSE_SCOPE_FORBIDDEN"
+
+    current_admin = next(
+        item for item in client.get("/api/admin/users").json() if item["role"] == "admin" and item["login"] == "admin"
+    )
+    removable_admin = client.patch(
+        f"/api/admin/users/{second_admin['id']}",
+        json={"role": "operations"},
+    )
+    assert removable_admin.status_code == 200
+    cannot_remove_last_admin = client.patch(
+        f"/api/admin/users/{current_admin['id']}",
+        json={"role": "operations"},
+    )
+    assert cannot_remove_last_admin.status_code == 409
+    assert cannot_remove_last_admin.json()["detail"]["code"] == "LAST_ADMIN_FORBIDDEN"
+
+    created = client.post(
+        "/api/admin/users",
+        json={
             "login": "operator",
             "display_name": "运营成员",
             "password": "operator-password",
@@ -167,5 +210,12 @@ def test_admin_csrf_and_page_contract(client):
         "data-action=\"revoke\"",
         "/api/admin/warehouses/",
         "退出登录",
+        "管理员（当前商家）",
+        "admin / operations / warehouse / customer_service / readonly",
     ):
         assert marker in page.text
+    assert '<title>成员权限</title>' in page.text
+    assert '<h1>成员权限</h1>' in page.text
+    assert '返回运营工作台' not in page.text
+    assert 'class="member-table"' in page.text
+    assert 'member-avatar' in page.text

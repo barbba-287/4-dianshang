@@ -33,10 +33,13 @@ def _sales_window(db: Session, *, workspace_id: int, start: date, end: date) -> 
     total_gross = sum(row.gross_qty for row in rows)
     total_refund = sum(row.refunded_qty for row in rows)
     days = (end - start).days + 1
+    observed_days = len({row.sales_date for row in rows})
     complete_days = {row.sales_date for row in rows if row.data_completeness == "complete"}
     complete = len(complete_days) >= days if rows else False
     return {
-        "from": start.isoformat(), "to": end.isoformat(), "gross_qty": total_gross,
+        "from": start.isoformat(), "to": end.isoformat(), "required_days": days,
+        "observed_days": observed_days, "missing_days": max(0, days - len(complete_days)),
+        "gross_qty": total_gross,
         "refunded_qty": total_refund, "net_qty": total_net,
         "effective_sale_days": len(complete_days),
         "daily_avg_qty": float(Decimal(total_net) / len(complete_days)) if complete and complete_days else None,
@@ -54,6 +57,7 @@ def build_sales_summary(db: Session, *, workspace_id: int, as_of: date | None = 
             "30": _sales_window(db, workspace_id=workspace_id, start=as_of - timedelta(days=29), end=as_of),
         },
         "limitations": ["销量按外部订单创建日统计；取消和退款修订创建日", "缺少完整覆盖日期时不把缺失日期当作零销量"],
+        "as_of": as_of.isoformat(),
     }
 
 
@@ -162,6 +166,52 @@ def build_sku_health(
     return result
 
 
+def _sales_trend(db: Session, *, workspace_id: int, as_of: date, days: int, sku_id: int | None = None) -> dict:
+    """Return a sparse daily trend; missing dates stay null, never become zero."""
+    from app.db import DailySkuSale
+
+    start = as_of - timedelta(days=days - 1)
+    filters = [
+        DailySkuSale.workspace_id == workspace_id,
+        DailySkuSale.sales_date >= start,
+        DailySkuSale.sales_date <= as_of,
+    ]
+    if sku_id is not None:
+        filters.append(DailySkuSale.internal_sku_id == sku_id)
+    rows = db.scalars(select(DailySkuSale).where(*filters)).all()
+    by_day = {}
+    for row in rows:
+        item = by_day.setdefault(row.sales_date.isoformat(), {"qty": 0, "complete": True})
+        item["qty"] += row.net_qty
+        item["complete"] = item["complete"] and row.data_completeness == "complete"
+    dates = [(start + timedelta(days=i)).isoformat() for i in range(days)]
+    values = [by_day.get(day, {}).get("qty") if by_day.get(day, {}).get("complete", False) else None for day in dates]
+    return {"days": days, "from": start.isoformat(), "to": as_of.isoformat(), "sku_id": sku_id, "dates": dates, "values": values, "complete_days": sum(value is not None for value in values), "missing_days": sum(value is None for value in values)}
+
+
+def _inventory_chart(db: Session, *, workspace_id: int, warehouse_id: int | None = None, limit: int = 10) -> dict:
+    filters = [ProductSku.workspace_id == workspace_id, InventoryBalance.workspace_id == workspace_id]
+    if warehouse_id is not None:
+        filters.append(InventoryBalance.warehouse_id == warehouse_id)
+    rows = db.execute(
+        select(ProductSku.sku_code, Warehouse.code, func.coalesce(InventoryBalance.on_hand_qty, 0))
+        .join(InventoryBalance, InventoryBalance.sku_id == ProductSku.id)
+        .join(Warehouse, Warehouse.id == InventoryBalance.warehouse_id)
+        .where(*filters)
+        .order_by(InventoryBalance.on_hand_qty.asc(), ProductSku.id, Warehouse.id)
+    ).all()
+    totals = {}
+    quantities = {}
+    for sku_code, warehouse_code, quantity in rows:
+        value = int(quantity or 0)
+        totals[sku_code] = totals.get(sku_code, 0) + value
+        quantities[(sku_code, warehouse_code)] = value
+    selected = [sku for sku, _ in sorted(totals.items(), key=lambda item: (item[1], item[0]))[:limit]]
+    warehouses = sorted({warehouse_code for _, warehouse_code, _ in rows})
+    series = [{"name": warehouse, "values": [quantities.get((code, warehouse), 0) for code in selected]} for warehouse in warehouses]
+    return {"skus": selected, "warehouses": warehouses, "series": series, "limit": limit}
+
+
 def build_sync_health_summary(db: Session, *, workspace_id: int, stale_after_seconds: int = 900, now: datetime | None = None) -> dict:
     """汇总外部同步运行健康；只读取当前 workspace 的运行记录。"""
     from app.db import ExternalSyncRun
@@ -198,9 +248,11 @@ def build_dashboard_summary(
     workspace_id: int,
     days: int = 7,
     warehouse_id: int | None = None,
+    sku_id: int | None = None,
     recent_limit: int = 10,
 ) -> dict:
     now = datetime.utcnow()
+    as_of = now.date()
     start = now - timedelta(days=days)
     warehouse_filter = [InboundOrder.workspace_id == workspace_id]
     if warehouse_id is not None:
@@ -223,9 +275,20 @@ def build_dashboard_summary(
     damaged_qty = sum(line.damaged_qty or 0 for line in lines)
     balance_total = db.scalar(select(func.coalesce(func.sum(InventoryBalance.on_hand_qty), 0)).where(*balance_filter)) or 0
     balance_count = db.scalar(select(func.count(InventoryBalance.id)).where(*balance_filter)) or 0
+    current_in_transit_filter = [InboundOrder.workspace_id == workspace_id, InboundOrder.status == "expected"]
+    if warehouse_id is not None:
+        current_in_transit_filter.append(InboundOrder.warehouse_id == warehouse_id)
+    current_in_transit_orders = db.scalars(select(InboundOrder).where(*current_in_transit_filter)).all()
+    current_in_transit_ids = [order.id for order in current_in_transit_orders]
+    current_in_transit_qty = db.scalar(select(func.coalesce(func.sum(InboundLine.expected_qty), 0)).where(InboundLine.workspace_id == workspace_id, InboundLine.inbound_order_id.in_(current_in_transit_ids))) if current_in_transit_ids else 0
     failed_jobs = db.scalar(select(func.count(CrawlJob.id)).where(CrawlJob.workspace_id == workspace_id, CrawlJob.status == "failed", CrawlJob.finished_at >= start, CrawlJob.finished_at < now)) or 0
     from app.db import InventoryAlert
     alert_rows = db.scalars(select(InventoryAlert).where(InventoryAlert.workspace_id == workspace_id, InventoryAlert.warehouse_id == warehouse_id if warehouse_id is not None else True)).all()
+    sku_ids = {alert.sku_id for alert in alert_rows if alert.sku_id is not None}
+    sku_labels = {}
+    if sku_ids:
+        for sku, product in db.execute(select(ProductSku, Product).join(Product, Product.id == ProductSku.product_id).where(ProductSku.workspace_id == workspace_id, ProductSku.id.in_(sku_ids))).all():
+            sku_labels[sku.id] = {"product_id": product.id, "product_title": product.title, "sku_code": sku.sku_code, "variant_label": sku.variant_label}
     alert_summary = {
         "total": len(alert_rows),
         "active": sum(1 for alert in alert_rows if alert.status != "resolved"),
@@ -240,9 +303,19 @@ def build_dashboard_summary(
         alert_summary["by_kind"][alert.kind] = alert_summary["by_kind"].get(alert.kind, 0) + 1
         alert_summary["by_severity"][alert.severity] = alert_summary["by_severity"].get(alert.severity, 0) + 1
     alert_summary["recent"] = [
-        {"id": alert.id, "kind": alert.kind, "severity": alert.severity, "status": alert.status, "title": alert.title, "message": alert.message}
+        {"id": alert.id, "kind": alert.kind, "severity": alert.severity, "status": alert.status, "title": alert.title, "message": alert.message, "warehouse_id": alert.warehouse_id, "sku_id": alert.sku_id, **sku_labels.get(alert.sku_id, {}), "platform": alert.platform, "last_seen_at": alert.last_seen_at.isoformat() if alert.last_seen_at else None}
         for alert in sorted(alert_rows, key=lambda item: (item.last_seen_at, item.id), reverse=True)[:10]
     ]
+    alert_summary["details"] = []
+    grouped_alerts = {}
+    for alert in alert_rows:
+        if alert.sku_id not in sku_labels:
+            continue
+        grouped_alerts.setdefault(alert.sku_id, []).append({"id": alert.id, "kind": alert.kind, "severity": alert.severity, "status": alert.status, "title": alert.title, "message": alert.message, "warehouse_id": alert.warehouse_id, "sku_id": alert.sku_id, "platform": alert.platform, "last_seen_at": alert.last_seen_at.isoformat() if alert.last_seen_at else None})
+    for sku_id, alerts in grouped_alerts.items():
+        label = sku_labels[sku_id]
+        alert_summary["details"].append({**label, "sku_id": sku_id, "alerts": alerts})
+    alert_summary["unlinked"] = [item for item in alert_summary["recent"] if item.get("sku_id") not in sku_labels]
     from app.external_sync import snapshot_freshness
     freshness = snapshot_freshness(db, workspace_id=workspace_id)
     sync_health = build_sync_health_summary(
@@ -251,6 +324,24 @@ def build_dashboard_summary(
         stale_after_seconds=get_settings().external_sync_run_stale_after_seconds,
         now=now,
     )
+    sku_health = build_sku_health(
+        db,
+        workspace_id=workspace_id,
+        as_of=as_of,
+        warehouse_ids=None if warehouse_id is None else (warehouse_id,),
+    )
+    product_skus = {row.id: row for row in db.scalars(select(ProductSku).where(ProductSku.workspace_id == workspace_id)).all()}
+    products = {row.id: row for row in db.scalars(select(Product).where(Product.workspace_id == workspace_id)).all()}
+    alerts_by_sku = {}
+    for alert in alert_rows:
+        if alert.sku_id is not None:
+            alerts_by_sku.setdefault(alert.sku_id, []).append({"id": alert.id, "kind": alert.kind, "severity": alert.severity, "status": alert.status, "title": alert.title, "message": alert.message, "warehouse_id": alert.warehouse_id, "sku_id": alert.sku_id, "platform": alert.platform})
+    for row in sku_health:
+        sku = product_skus.get(row["sku_id"])
+        product = products.get(sku.product_id) if sku else None
+        row["product_title"] = product.title if product else None
+        row["variant_label"] = sku.variant_label if sku else None
+        row["alerts"] = alerts_by_sku.get(row["sku_id"], [])
     recent = sorted(orders, key=lambda order: (order.created_at, order.id), reverse=True)[:recent_limit]
     line_by_order = {}
     for line in lines:
@@ -267,17 +358,20 @@ def build_dashboard_summary(
             "expected_inbound_count": statuses["expected"], "received_inbound_count": statuses["received"], "confirmed_inbound_count": statuses["confirmed"],
             "expected_qty": expected_qty, "received_qty": received_qty, "damaged_qty": damaged_qty,
             "accepted_qty": received_qty - damaged_qty, "difference_qty": received_qty - expected_qty, "failed_job_count": int(failed_jobs),
+            "current_in_transit_expected_qty": int(current_in_transit_qty or 0), "current_in_transit_inbound_count": len(current_in_transit_orders),
+            "current_in_transit_expected_qty": int(current_in_transit_qty or 0), "current_in_transit_inbound_count": len(current_in_transit_orders),
         },
         "recent_inbounds": [{"id": order.id, "reference_no": order.reference_no, "warehouse_id": order.warehouse_id, "status": order.status, "created_at": order.created_at.isoformat(), **line_by_order.get(order.id, {"expected_qty": 0, "received_qty": 0})} for order in recent],
         "alert_summary": alert_summary,
         "snapshot_freshness": freshness,
         "sync_health": sync_health,
-        "sales_summary": build_sales_summary(db, workspace_id=workspace_id),
-        "sku_health": build_sku_health(
-            db,
-            workspace_id=workspace_id,
-            warehouse_ids=None if warehouse_id is None else (warehouse_id,),
-        ),
+        "sales_summary": {
+            **build_sales_summary(db, workspace_id=workspace_id, as_of=as_of),
+            "as_of": as_of.isoformat(),
+        },
+        "sales_trend": _sales_trend(db, workspace_id=workspace_id, as_of=as_of, days=min(max(days, 7), 30), sku_id=sku_id),
+        "inventory_chart": _inventory_chart(db, workspace_id=workspace_id, warehouse_id=warehouse_id),
+        "sku_health": sku_health,
         "unsupported_metrics": ["gmv", "inventory_turnover", "forecast", "dynamic_replenishment_qty"],
         "limitations": ["库存指标仅代表已确认的内部 on_hand；外部平台快照不在本汇总中跨来源相加", "入库数量按入库单创建时间统计", "销量按外部订单创建日统计，覆盖不完整时不计算日均"],
     }

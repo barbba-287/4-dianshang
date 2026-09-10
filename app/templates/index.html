@@ -2,47 +2,16 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>电商运营工作台</title>
+  <title>运营工作台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/workspace-shell.css">
   <style>
-    :root { color-scheme: light; --ink: #243044; --muted: #64748b; --line: #e2e8f0; --primary: #2563eb; --danger: #dc2626; --success: #15803d; --warning: #b45309; }
-    * { box-sizing: border-box; }
-    body { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; font-family: system-ui, sans-serif; color: var(--ink); background: #f8fafc; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-    h1, h2, h3 { margin-top: 0; }
-    section { margin-top: 1.5rem; padding: 1.2rem; background: white; border: 1px solid var(--line); border-radius: .7rem; }
-    button, input, select { min-height: 2.5rem; padding: .55rem .75rem; border: 1px solid #cbd5e1; border-radius: .4rem; font: inherit; }
-    button { background: var(--primary); color: white; cursor: pointer; border: 0; }
-    button.secondary { background: #475569; }
-    button:disabled { background: #94a3b8; cursor: not-allowed; }
-    input:invalid { border-color: #fca5a5; }
-    .muted { color: var(--muted); }
-    .row { display: flex; flex-wrap: wrap; gap: .6rem; align-items: end; margin: .8rem 0; }
-    .field { display: flex; flex-direction: column; gap: .25rem; flex: 1 1 150px; }
-    .field label { font-size: .85rem; color: #475569; }
-    #products { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-top: 1rem; }
-    .card { padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; box-shadow: 0 1px 2px #0000000d; }
-    .price { color: var(--danger); font-size: 1.2rem; font-weight: 700; }
-    .status { min-height: 1.5rem; margin: .5rem 0; }
-    .status.error { color: var(--danger); }
-    .status.success { color: var(--success); }
-    .status.warning { color: var(--warning); }
-    .step { margin-top: 1rem; padding: .9rem; border: 1px solid var(--line); border-radius: .5rem; }
-    .step h3 { margin-bottom: .5rem; font-size: 1rem; }
-    .table-wrap { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; margin-top: .8rem; }
-    th, td { padding: .55rem; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
-    .ok { color: var(--success); font-weight: 600; } .warn { color: var(--warning); }
-    .empty { padding: 1rem; color: var(--muted); border: 1px dashed #cbd5e1; border-radius: .4rem; }
-    @media (max-width: 640px) { body { margin: 1rem auto; } header { align-items: flex-start; flex-direction: column; } section { padding: .9rem; } .row > button { width: 100%; } }
+    #products { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .85rem; margin-top: 1rem; }
+    .price { color: var(--danger); font-size: 1.2rem; font-weight: 700; } .step { margin-top: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: #fbfcfe; } .step h3 { margin-bottom: .55rem; font-size: .95rem; }
   </style>
 </head>
 <body>
-  <header>
-    <div><h1>电商运营工作台</h1><p class="muted">商品资料与仓储入库协同</p><p><a href="/admin/users">账户与仓库授权</a> · <a href="/dashboard">运营看板</a> · <button id="logout" class="secondary" type="button">退出登录</button></p></div>
-    <button id="crawl" type="button">采集样例商品</button>
-  </header>
-  <p id="message" class="status" role="status">点击按钮从本地 fixture 采集商品。</p>
+  <div class="shell"><aside class="sidebar"></aside><main class="main"><header class="topbar"><div class="muted">Workspace / <strong>运营工作台</strong></div><div><button id="logout" type="button">退出登录</button></div></header><div class="content"><div class="page-heading"><div><h1>运营工作台</h1><p class="muted">商品资料、仓储入库与补货采购协同。</p></div><button id="crawl" type="button">采集样例商品</button></div><p id="message" class="status" role="status">点击按钮从本地 fixture 采集商品。</p>
 
   <section aria-labelledby="products-heading">
     <h2 id="products-heading">商品资料</h2>
@@ -104,6 +73,13 @@
     </div>
   </section>
 
+  <section id="purchase-workflow" aria-labelledby="purchase-heading">
+    <h2 id="purchase-heading">补货建议与采购草稿</h2>
+    <p id="purchase-message" class="status" role="status">加载已确认的补货建议…</p>
+    <div class="row"><button id="refresh-purchases" class="secondary" type="button">刷新建议与草稿</button></div>
+    <div class="table-wrap"><table><thead><tr><th>建议</th><th>仓库/SKU</th><th>数量</th><th>状态</th><th>操作</th></tr></thead><tbody id="purchase-items"></tbody></table></div>
+    <p class="muted">草稿可编辑备注、供应商和预计到货日期；“提交审批”仅表示人工提交审批，不代表审批通过、已采购或已入库。</p>
+  </section>
   <script>
     const products = document.querySelector('#products');
     const message = document.querySelector('#message');
@@ -119,6 +95,9 @@
     const loadReceivedInboundButton = document.querySelector('#load-received-inbound');
     const refreshReceivedInboundsButton = document.querySelector('#refresh-received-inbounds');
     const confirmButton = document.querySelector('#confirm-inbound');
+    const purchaseItems = document.querySelector('#purchase-items');
+    const purchaseMessage = document.querySelector('#purchase-message');
+    const refreshPurchasesButton = document.querySelector('#refresh-purchases');
     let currentInbound = null;
     let confirmIdempotencyKey = null;
 
@@ -192,6 +171,45 @@
       document.querySelector('#base-data-hint').textContent = data.items.length ? '可选择商品创建一个或多个库存 SKU。' : '没有商品，请先点击“采集样例商品”。';
       message.textContent = `共 ${data.total} 件商品`;
     }
+
+    async function loadPurchaseWorkflow() {
+      setBusy(refreshPurchasesButton, true);
+      setMessage(purchaseMessage, '正在刷新补货建议与采购草稿…');
+      try {
+        const [suggestions, requests] = await Promise.all([
+          api('/api/replenishment/suggestions?status=confirmed&page_size=100'),
+          api('/api/purchase-requests?page_size=100')
+        ]);
+        const drafts = new Map((requests.items || []).map(item => item.lines || []).flat().map(line => [line.suggestion_id, requests.items.find(item => item.lines.includes(line))]));
+        const items = suggestions.items || [];
+        purchaseItems.innerHTML = items.length ? items.map(item => {
+          const request = drafts.get(item.id);
+          const state = request ? `${request.status} #${request.id}` : '未创建草稿';
+          const action = request ? (request.status === 'draft' ? `<button data-purchase-action="submit" data-id="${request.id}" data-version="${request.version}">提交审批</button>` : '已提交审批') : `<button data-purchase-action="draft" data-id="${item.id}">生成草稿</button>`;
+          return `<tr><td>#${escapeHtml(item.id)}<br><span class="muted">${escapeHtml(item.data_completeness)} / ${escapeHtml(item.reason || '')}</span></td><td>仓库 #${escapeHtml(item.warehouse_id)} / SKU #${escapeHtml(item.sku_id)}</td><td>${escapeHtml(item.decision_qty ?? item.suggested_qty ?? '数据不足')}</td><td>${escapeHtml(state)}</td><td>${action}</td></tr>`;
+        }).join('') : '<tr><td colspan="5" class="muted">暂无已确认补货建议</td></tr>';
+        setMessage(purchaseMessage, `已刷新 ${items.length} 条补货建议`, 'success');
+      } catch (error) { setMessage(purchaseMessage, `采购草稿加载失败：${error.message || '网络错误'}`, 'error'); }
+      finally { setBusy(refreshPurchasesButton, false); }
+    }
+
+    purchaseItems.onclick = async event => {
+      const button = event.target.closest('button[data-purchase-action]');
+      if (!button) return;
+      const action = button.dataset.purchaseAction;
+      setBusy(button, true);
+      try {
+        if (action === 'draft') {
+          await api('/api/purchase-requests/drafts', jsonOptions({suggestion_ids: [Number(button.dataset.id)]}, {'Idempotency-Key': newIdempotencyKey('draft')}));
+          setMessage(purchaseMessage, '采购草稿已生成，请检查后提交审批。', 'success');
+        } else if (action === 'submit') {
+          await api(`/api/purchase-requests/${button.dataset.id}/submit`, {method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey('submit')}, body: JSON.stringify({expected_version: Number(button.dataset.version)})});
+          setMessage(purchaseMessage, '已人工提交审批；不代表已采购或已入库。', 'success');
+        }
+        await loadPurchaseWorkflow();
+      } catch (error) { setMessage(purchaseMessage, `采购操作失败：${error.message || '网络错误'}`, 'error'); }
+      finally { setBusy(button, false); }
+    };
 
     async function loadProducts() {
       try {
@@ -271,7 +289,8 @@
 
     async function loadInventory() {
       setBusy(refreshInventoryButton, true);
-      try { renderInventory(await api('/api/inventory?page_size=100')); }
+      setMessage(warehouseMessage, '正在刷新库存…');
+      try { renderInventory(await api('/api/inventory?page_size=100')); setMessage(warehouseMessage, '库存已刷新', 'success'); }
       catch (error) { setMessage(warehouseMessage, `库存加载失败：${error.message || '网络错误'}`, 'error'); }
       finally { setBusy(refreshInventoryButton, false); }
     }
@@ -282,7 +301,7 @@
         warehouseSelect.innerHTML = warehouses.length ? warehouses.map(w => `<option value="${w.id}">${escapeHtml(w.code)} · ${escapeHtml(w.name)}</option>`).join('') : '<option value="">暂无仓库</option>';
         skuSelect.innerHTML = skus.length ? skus.map(s => `<option value="${s.id}">${escapeHtml(s.sku_code)} · ${escapeHtml(s.variant_label || '')}</option>`).join('') : '<option value="">暂无 SKU</option>';
         updateControls();
-        await loadInventory();
+        // 库存独立按需刷新，避免初始化请求挂起时一直锁住刷新按钮。
       } catch (error) { setMessage(warehouseMessage, `仓储数据加载失败：${error.message || '网络错误'}`, 'error'); }
     }
 
@@ -334,6 +353,7 @@
     skuSelect.onchange = updateControls;
     skuProductSelect.onchange = updateControls;
     refreshInventoryButton.onclick = loadInventory;
+    refreshPurchasesButton.onclick = loadPurchaseWorkflow;
     document.querySelector('#search').onsubmit = event => { event.preventDefault(); loadProducts(); };
     crawlButton.onclick = crawl;
     document.querySelector('#logout').onclick = async () => {
@@ -344,6 +364,7 @@
     loadProducts();
     loadWarehouseData();
     loadPendingConfirmations();
-  </script>
+    loadPurchaseWorkflow();
+  </script></div></main></div>
 </body>
 </html>

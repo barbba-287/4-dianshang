@@ -91,7 +91,7 @@ def test_alembic_current_shows_head(tmp_path):
 
     current = _run_alembic(["current"], database_url=db_url)
     assert current.returncode == 0
-    assert "0013_external_snapshot_scope" in current.stdout
+    assert "0014_purchase_request_drafts" in current.stdout
     assert "head" in current.stdout
 
 

@@ -19,8 +19,130 @@ def _create_index_if_missing(name: str, table: str, columns: list[str]) -> None:
         op.create_index(name, table, columns)
 
 
+def _offline_upgrade() -> None:
+    """Emit deterministic DDL for a new database without reflection.
+
+    Legacy repair decisions require a live connection; offline export only
+    describes the known fresh-schema path.
+    """
+    op.create_table(
+        "workspaces",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("tenant_key", sa.String(128), nullable=False),
+        sa.Column("name", sa.String(255), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False, server_default="active"),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("tenant_key", name="uq_workspace_tenant_key"),
+    )
+    op.create_index("ix_workspaces_tenant_key", "workspaces", ["tenant_key"])
+    op.create_index("ix_workspaces_status", "workspaces", ["status"])
+    op.create_table(
+        "user_accounts",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("login", sa.String(128), nullable=False),
+        sa.Column("password_hash", sa.String(255), nullable=False),
+        sa.Column("display_name", sa.String(255), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False, server_default="active"),
+        sa.Column("last_login_at", sa.DateTime(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("login", name="uq_user_account_login"),
+    )
+    op.create_index("ix_user_accounts_login", "user_accounts", ["login"])
+    op.create_index("ix_user_accounts_status", "user_accounts", ["status"])
+    op.create_table(
+        "workspace_memberships",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("workspace_id", sa.Integer(), nullable=False),
+        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("role", sa.String(32), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False, server_default="active"),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], name="fk_membership_workspace"),
+        sa.ForeignKeyConstraint(["user_id"], ["user_accounts.id"], name="fk_membership_user"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("workspace_id", "user_id", name="uq_workspace_membership"),
+    )
+    for name, columns in (
+        ("ix_workspace_memberships_workspace_id", ["workspace_id"]),
+        ("ix_workspace_memberships_user_id", ["user_id"]),
+        ("ix_workspace_memberships_role", ["role"]),
+        ("ix_workspace_memberships_status", ["status"]),
+    ):
+        op.create_index(name, "workspace_memberships", columns)
+    op.create_table(
+        "warehouse_access",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("warehouse_id", sa.Integer(), nullable=False),
+        sa.Column("role_override", sa.String(32), nullable=True),
+        sa.Column("status", sa.String(16), nullable=False, server_default="active"),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.ForeignKeyConstraint(["user_id"], ["user_accounts.id"], name="fk_warehouse_access_user"),
+        sa.ForeignKeyConstraint(["warehouse_id"], ["warehouses.id"], name="fk_warehouse_access_warehouse"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("user_id", "warehouse_id", name="uq_warehouse_access"),
+    )
+    for name, columns in (
+        ("ix_warehouse_access_user_id", ["user_id"]),
+        ("ix_warehouse_access_warehouse_id", ["warehouse_id"]),
+        ("ix_warehouse_access_status", ["status"]),
+    ):
+        op.create_index(name, "warehouse_access", columns)
+    op.create_table(
+        "auth_sessions",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("token_hash", sa.String(64), nullable=False),
+        sa.Column("csrf_token_hash", sa.String(64), nullable=False),
+        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("membership_id", sa.Integer(), nullable=False),
+        sa.Column("workspace_id", sa.Integer(), nullable=False),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("last_seen_at", sa.DateTime(), nullable=False),
+        sa.Column("expires_at", sa.DateTime(), nullable=False),
+        sa.Column("revoked_at", sa.DateTime(), nullable=True),
+        sa.Column("ip_address", sa.String(64), nullable=True),
+        sa.Column("user_agent", sa.String(512), nullable=True),
+        sa.ForeignKeyConstraint(["user_id"], ["user_accounts.id"], name="fk_auth_session_user"),
+        sa.ForeignKeyConstraint(["membership_id"], ["workspace_memberships.id"], name="fk_auth_session_membership"),
+        sa.ForeignKeyConstraint(["workspace_id"], ["workspaces.id"], name="fk_auth_session_workspace"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("token_hash", name="uq_auth_session_token_hash"),
+    )
+    for name, columns in (
+        ("ix_auth_sessions_token_hash", ["token_hash"]),
+        ("ix_auth_sessions_user_id", ["user_id"]),
+        ("ix_auth_sessions_membership_id", ["membership_id"]),
+        ("ix_auth_sessions_workspace_id", ["workspace_id"]),
+        ("ix_auth_sessions_expires_at", ["expires_at"]),
+    ):
+        op.create_index(name, "auth_sessions", columns)
+    op.create_table(
+        "inventory_policies",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("warehouse_id", sa.Integer(), nullable=False),
+        sa.Column("sku_id", sa.Integer(), nullable=False),
+        sa.Column("safety_stock_qty", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("reorder_point_qty", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.ForeignKeyConstraint(["warehouse_id"], ["warehouses.id"], name="fk_inventory_policy_warehouse"),
+        sa.ForeignKeyConstraint(["sku_id"], ["product_skus.id"], name="fk_inventory_policy_sku"),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("warehouse_id", "sku_id", name="uq_inventory_policy_warehouse_sku"),
+    )
+    op.create_index("ix_inventory_policies_warehouse_id", "inventory_policies", ["warehouse_id"])
+    op.create_index("ix_inventory_policies_sku_id", "inventory_policies", ["sku_id"])
+
+
 def upgrade() -> None:
     if context.is_offline_mode():
+        _offline_upgrade()
         return
     bind = op.get_bind()
     existing = set(inspect(bind).get_table_names())

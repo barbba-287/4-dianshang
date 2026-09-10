@@ -10,11 +10,11 @@ python -m app.cli --help
 # 初始化数据库表（幂等）
 python -m app.cli init-db
 
-# 向 uploads/ 写入示例 PDF + DOCX 并同步解析、索引
-python -m app.cli seed-docs
+# 向 uploads/ 写入示例 PDF + DOCX 并同步解析、索引（可用 --workspace 指定商家）
+python -m app.cli seed-docs [--workspace <workspace-id 或 tenant-key>]
 
-# 入队 fixture 采集任务，等待 ThreadPoolExecutor 完成
-python -m app.cli enqueue-crawl
+# 入队 fixture 采集任务，等待 ThreadPoolExecutor 完成（可用 --workspace 指定商家）
+python -m app.cli enqueue-crawl [--workspace <workspace-id 或 tenant-key>]
 
 # RAG 客服问答
 python -m app.cli query "green tea"
@@ -43,6 +43,58 @@ from app.repository import (
 from app.main import safe_database_url
 from app.storage import save_upload
 from app.versioning import content_sha256, estimate_token_count
+
+
+def _option(args: list[str], name: str, default: str | None = None) -> str | None:
+    if name not in args:
+        return default
+    index = args.index(name)
+    if index + 1 >= len(args):
+        raise ValueError(f"缺少参数: {name}")
+    return args[index + 1]
+
+
+def _resolve_cli_workspace(db, args: list[str]) -> int:
+    """解析 CLI 写入目标；多商家场景禁止猜测。"""
+    from sqlalchemy import func, select
+    from app.db import Workspace
+
+    value = _option(args, "--workspace")
+    active = db.scalars(select(Workspace).where(Workspace.status == "active").order_by(Workspace.id)).all()
+    if value:
+        try:
+            workspace = db.scalar(select(Workspace).where(Workspace.status == "active", Workspace.id == int(value))) if value.isdigit() else db.scalar(select(Workspace).where(Workspace.status == "active", Workspace.tenant_key == value))
+        except (ValueError, OverflowError):
+            raise ValueError("WORKSPACE_NOT_FOUND") from None
+        if workspace is None:
+            raise ValueError("WORKSPACE_NOT_FOUND")
+        return workspace.id
+    if len(active) == 1:
+        return active[0].id
+    if len(active) > 1:
+        raise ValueError("WORKSPACE_SELECTION_REQUIRED")
+    total_workspaces = db.scalar(select(func.count(Workspace.id))) or 0
+    if total_workspaces:
+        raise ValueError("WORKSPACE_REQUIRED")
+    from app.db import Product, Document, CrawlJob
+    has_data = any(db.scalar(select(func.count(model.id))) for model in (Product, Document, CrawlJob))
+    if has_data:
+        raise ValueError("WORKSPACE_REQUIRED")
+    from app.config import get_settings
+    settings = get_settings()
+    workspace = Workspace(tenant_key=settings.auth_bootstrap_tenant_key, name=settings.auth_bootstrap_workspace_name)
+    db.add(workspace)
+    db.commit()
+    db.refresh(workspace)
+    return workspace.id
+
+
+def _resolve_workspace_or_report(db, args: list[str]) -> int | None:
+    try:
+        return _resolve_cli_workspace(db, args)
+    except (ValueError, OverflowError) as exc:
+        print(f"工作空间解析失败: {exc}")
+        return None
 
 
 def _ensure_schema() -> None:
@@ -108,6 +160,7 @@ def cmd_seed_docs(args: list[str]) -> int:
     ]
     db = SessionLocal()
     try:
+        workspace_id = _resolve_cli_workspace(db, args)
         for filename, content, _mime in samples:
             source_type = "pdf" if filename.endswith(".pdf") else "docx"
             sha = content_sha256(content)
@@ -117,6 +170,7 @@ def cmd_seed_docs(args: list[str]) -> int:
                 title=filename,
                 filename=filename,
                 sha256_hex=sha,
+                workspace_id=workspace_id,
             )
             storage_uri = save_upload(
                 source_type=source_type,
@@ -130,6 +184,7 @@ def cmd_seed_docs(args: list[str]) -> int:
                 sha256_hex=sha,
                 size_bytes=len(content),
                 storage_uri=storage_uri,
+                workspace_id=workspace_id,
             )
             db.commit()
             if not version_created and version.status == "ready":
@@ -156,8 +211,9 @@ def cmd_seed_docs(args: list[str]) -> int:
                     token_count=estimate_token_count(draft.text),
                     page_no=draft.page_no,
                     paragraph_no=draft.paragraph_no,
+                    workspace_id=workspace_id,
                 )
-            mark_version_ready(db, version_id=version.id)
+            mark_version_ready(db, version_id=version.id, workspace_id=workspace_id)
 
             # 同步索引到向量库
             import json
@@ -169,6 +225,7 @@ def cmd_seed_docs(args: list[str]) -> int:
                 id=0,
                 source=source_type,
                 keyword=filename[:255],
+                workspace_id=workspace_id,
                 type="document_index",
                 status="running",
                 cursor=json.dumps(
@@ -194,7 +251,8 @@ def cmd_enqueue_crawl(args: list[str]) -> int:
     fixture = Path(__file__).resolve().parent.parent / "fixtures" / "products.html"
     db = SessionLocal()
     try:
-        job = submit_crawl_fixture(db, fixture_path=fixture)
+        workspace_id = _resolve_cli_workspace(db, args)
+        job = submit_crawl_fixture(db, fixture_path=fixture, workspace_id=workspace_id)
         print(f"已入队: job_id={job.id}, status={job.status}")
         wait_for_jobs(timeout=10)
         db.expire_all()
@@ -248,13 +306,15 @@ def cmd_external_import(args: list[str]) -> int:
     from app.connectors import load_records
     from app.external_sync import ingest_inventory
 
+    _ensure_schema()
     platform = args[args.index("--platform") + 1]
     path = Path(args[args.index("--file") + 1])
     mode = args[args.index("--mode") + 1] if "--mode" in args else "json"
-    records = load_records(path.read_bytes(), platform=platform, source_mode=mode)
     db = SessionLocal()
     try:
-        result = ingest_inventory(db, records)
+        workspace_id = _resolve_cli_workspace(db, args)
+        records = load_records(path.read_bytes(), platform=platform, source_mode=mode)
+        result = ingest_inventory(db, records, workspace_id=workspace_id)
         print(__import__("json").dumps({"platform": platform, "inserted": result.inserted, "no_op": result.no_op, "conflict": result.conflict, "total": result.total, "snapshot_ids": result.snapshot_ids or [], "simulated": True, "live_enabled": False}, ensure_ascii=False, sort_keys=True))
     finally:
         db.close()
@@ -314,6 +374,41 @@ def cmd_init_admin(args: list[str]) -> int:
         db.close()
 
 
+def cmd_seed_demo(args: list[str]) -> int:
+    """在隔离的 demo workspace 创建虚构补货演示数据。"""
+    from datetime import date
+    import json as _json
+
+    from app.config import get_settings
+    if not get_settings().demo_mode_enabled:
+        print("seed-demo 失败: DEMO_MODE_ENABLED=true 才允许执行")
+        return 2
+    workspace_key = _option(args, "--workspace")
+    if not workspace_key or not workspace_key.startswith("demo-"):
+        print("seed-demo 失败: --workspace 必须使用 demo- 前缀")
+        return 2
+    database_url = get_settings().database_url
+    if not database_url.startswith("sqlite:"):
+        print("seed-demo 失败: 仅允许 SQLite 演示数据库")
+        return 2
+    _ensure_schema()
+    db = SessionLocal()
+    try:
+        from app.demo_seed import seed_demo_workspace
+        as_of_text = _option(args, "--as-of-date", "2026-09-07")
+        as_of = date.fromisoformat(as_of_text)
+        result = seed_demo_workspace(db, tenant_key=workspace_key, workspace_name=_option(args, "--workspace-name", "[虚构] 电商演示商家"), as_of_date=as_of)
+        output = result.as_dict()
+        print(_json.dumps(output, ensure_ascii=False, indent=2, default=str) if "--json" in args else f"seed-demo 完成: workspace={result.tenant_key}, products={len(result.product_ids)}, suggestions={len(result.suggestion_ids)}, drafts={len(result.purchase_request_ids)}")
+        return 0
+    except Exception as exc:
+        db.rollback()
+        print(f"seed-demo 失败: {exc}")
+        return 1
+    finally:
+        db.close()
+
+
 def cmd_status(args: list[str]) -> int:
     """打印运行时配置与数据库 / 向量库规模。"""
     from sqlalchemy import func, inspect, select
@@ -355,6 +450,7 @@ COMMANDS = {
     "seed-docs": cmd_seed_docs,
     "enqueue-crawl": cmd_enqueue_crawl,
     "query": cmd_query,
+    "seed-demo": cmd_seed_demo,
     "status": cmd_status,
     "external-list-connectors": cmd_external_list_connectors,
     "external-preview": cmd_external_preview,
@@ -365,13 +461,14 @@ COMMANDS = {
 COMMAND_HELP = {
     "init-db": "初始化数据库表（幂等，重复执行安全）",
     "init-admin": "创建首个管理员账户（显式执行）",
-    "seed-docs": "向 uploads/ 写入示例 PDF + DOCX 并同步解析、索引",
-    "enqueue-crawl": "把 fixtures/products.html 入队到 ThreadPoolExecutor，等待完成",
+    "seed-docs": "向 uploads/ 写入示例 PDF + DOCX 并同步解析、索引（可用 --workspace 指定商家）",
+    "enqueue-crawl": "把 fixtures/products.html 入队到 ThreadPoolExecutor，等待完成（可用 --workspace 指定商家）",
     "query": "用法: python -m app.cli query <text...>   从向量库检索并返回 answer + 引用",
+    "seed-demo": "创建隔离的虚构商品、库存、销量、补货、告警和采购草稿演示数据",
     "status": "打印当前配置与数据库 / 向量库规模",
     "external-list-connectors": "列出离线平台连接器能力",
     "external-preview": "预览并标准化外部库存文件（不落库）",
-    "external-import": "导入外部库存快照（不修改内部库存）",
+    "external-import": "导入外部库存快照（不修改内部库存，可用 --workspace 指定商家）",
 }
 
 

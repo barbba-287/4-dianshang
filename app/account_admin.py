@@ -6,9 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import AuthSession, UserAccount, Warehouse, WarehouseAccess, Workspace, WorkspaceMembership
-from app.employee_auth import hash_password
+from app.employee_auth import ROLE_ADMIN, hash_password
 
-ROLES = {"operations", "warehouse", "customer_service", "readonly"}
+ROLES = {ROLE_ADMIN, "operations", "warehouse", "customer_service", "readonly"}
 
 
 def _membership(db: Session, *, workspace_id: int, user_id: int) -> WorkspaceMembership | None:
@@ -86,6 +86,8 @@ def create_workspace_user(
         raise ValueError("INVALID_ROLE")
     if role == "warehouse" and not warehouse_ids:
         raise ValueError("WAREHOUSE_SCOPE_REQUIRED")
+    if role == ROLE_ADMIN and warehouse_ids:
+        raise ValueError("ADMIN_WAREHOUSE_SCOPE_FORBIDDEN")
     workspace = db.get(Workspace, workspace_id)
     if workspace is None or workspace.status != "active":
         raise ValueError("WORKSPACE_NOT_FOUND")

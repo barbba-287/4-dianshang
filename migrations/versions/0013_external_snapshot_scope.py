@@ -1,7 +1,7 @@
 """补齐外部库存快照的店铺/外部仓隔离身份。"""
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 
@@ -32,6 +32,27 @@ def _duplicate_count(bind, columns: str) -> int:
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        op.add_column("external_inventory_snapshots", sa.Column("store_ref_key", sa.String(128), nullable=False, server_default=_STORE_SENTINEL))
+        op.add_column("external_inventory_snapshots", sa.Column("warehouse_ref_key", sa.String(128), nullable=False, server_default=_WAREHOUSE_SENTINEL))
+        # SQLite's offline dialect cannot ALTER a table constraint. Keep the
+        # baseline constraint in the generated script and add the scoped keys
+        # as unique indexes; online SQLite uses the batch rebuild below.
+        op.create_index(
+            "uq_external_snapshot_workspace_identity_v2",
+            "external_inventory_snapshots",
+            ["workspace_id", "platform", "account_ref", "store_ref_key", "warehouse_ref_key", "external_sku", "as_of", "payload_hash"],
+            unique=True,
+        )
+        op.create_index(
+            "uq_external_snapshot_workspace_key_v2",
+            "external_inventory_snapshots",
+            ["workspace_id", "platform", "account_ref", "store_ref_key", "warehouse_ref_key", "idempotency_key"],
+            unique=True,
+        )
+        op.create_index("ix_external_inventory_snapshots_store_ref_key", "external_inventory_snapshots", ["store_ref_key"])
+        op.create_index("ix_external_inventory_snapshots_warehouse_ref_key", "external_inventory_snapshots", ["warehouse_ref_key"])
+        return
     bind = op.get_bind()
     tables = set(inspect(bind).get_table_names())
     if "external_inventory_snapshots" not in tables:

@@ -63,6 +63,16 @@ _REQUIRED_TABLES = {
     "auth_sessions",
     "inventory_alerts",
     "external_sync_runs",
+    "external_accounts",
+    "external_product_mappings",
+    "external_orders",
+    "external_order_lines",
+    "daily_sku_sales",
+    "replenishment_suggestions",
+    "replenishment_suggestion_actions",
+    "purchase_requests",
+    "purchase_request_lines",
+    "purchase_request_actions",
 }
 _REQUIRED_CRAWL_COLUMNS = {
     "type",

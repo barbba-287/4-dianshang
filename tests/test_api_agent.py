@@ -72,6 +72,7 @@ def test_list_agent_tools_returns_three_readonly(client):
     tools = response.json()
     names = {t["name"] for t in tools}
     assert {"search_products", "get_product_detail", "get_price_history"}.issubset(names)
+    assert {"get_inventory", "list_sku_health", "get_replenishment_evidence"}.issubset(names)
     for tool in tools:
         assert tool["is_readonly"] is True
 
@@ -142,3 +143,25 @@ def test_invoke_missing_required_field(client):
     body = response.json()
     assert body["ok"] is False
     assert body["error_code"] == "MISSING_FIELD"
+
+
+def test_assistant_rejects_write_intent_without_side_effect(client):
+    response = client.post(
+        "/api/agent/assistant",
+        json={"message": "直接帮我提交采购申请"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error_code"] == "MOCK_INTENT_NOT_UNDERSTOOD"
+
+
+def test_assistant_requires_operator_permission_in_demo_mode(client):
+    response = client.post(
+        "/api/agent/assistant",
+        json={"message": "查询库存", "input_hints": {"workspace_id": 999, "tenant_id": "other"}},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error_code"] == "PERMISSION_DENIED"

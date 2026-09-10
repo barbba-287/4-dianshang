@@ -10,6 +10,7 @@
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.schema import CreateIndex, CreateTable
 
 from alembic import context
 

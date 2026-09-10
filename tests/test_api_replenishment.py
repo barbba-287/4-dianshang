@@ -82,9 +82,114 @@ def test_replenishment_api_flow_and_inventory_unchanged(client):
         assert (db.scalar(__import__("sqlalchemy").select(__import__("sqlalchemy").func.count(InventoryTransaction.id)).where(InventoryTransaction.warehouse_id == warehouse_id, InventoryTransaction.sku_id == sku_id)) or 0) == 0
 
 
-def test_replenishment_api_requires_idempotency_and_csrf(client):
+def test_purchase_draft_api_lifecycle_and_idempotency(client):
     client, _workspace_id, warehouse_id, sku_id = client
-    missing = client.post("/api/replenishment/suggestions/generate", json={"warehouse_id": warehouse_id, "sku_id": sku_id, "coverage_days": 14}, headers={"X-CSRF-Token": client.cookies.get("dianshang_csrf")})
+    generated = client.post(
+        "/api/replenishment/suggestions/generate",
+        json={"warehouse_id": warehouse_id, "sku_id": sku_id, "coverage_days": 14},
+        headers={"Idempotency-Key": "draft-generate-api"},
+    )
+    assert generated.status_code == 201, generated.text
+    suggestion_id = generated.json()["id"]
+    confirmed = client.post(
+        f"/api/replenishment/suggestions/{suggestion_id}/decision",
+        json={"action": "confirm", "expected_version": 1},
+        headers={"Idempotency-Key": "draft-decision-api"},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    created = client.post(
+        "/api/purchase-requests/drafts",
+        json={"suggestion_ids": [suggestion_id], "note": "待人工复核", "supplier_ref": "supplier-a"},
+        headers={"Idempotency-Key": "draft-create-api"},
+    )
+    assert created.status_code == 201, created.text
+    draft = created.json()
+    assert draft["status"] == "draft"
+    assert draft["version"] == 1
+    assert draft["submitted_by"] is None
+
+    replay = client.post(
+        "/api/purchase-requests/drafts",
+        json={"suggestion_ids": [suggestion_id], "note": "待人工复核", "supplier_ref": "supplier-a"},
+        headers={"Idempotency-Key": "draft-create-api"},
+    )
+    assert replay.status_code == 201
+    assert replay.json()["id"] == draft["id"]
+
+    edited = client.patch(
+        f"/api/purchase-requests/{draft['id']}",
+        json={"expected_version": 1, "note": "已复核", "supplier_ref": "supplier-b"},
+        headers={"Idempotency-Key": "draft-edit-api"},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["version"] == 2
+    assert edited.json()["note"] == "已复核"
+
+    submitted = client.post(
+        f"/api/purchase-requests/{draft['id']}/submit",
+        json={"expected_version": 2},
+        headers={"Idempotency-Key": "draft-submit-api"},
+    )
+    assert submitted.status_code == 200, submitted.text
+    assert submitted.json()["status"] == "submitted"
+    assert submitted.json()["version"] == 3
+
+    submit_replay = client.post(
+        f"/api/purchase-requests/{draft['id']}/submit",
+        json={"expected_version": 2},
+        headers={"Idempotency-Key": "draft-submit-api"},
+    )
+    assert submit_replay.status_code == 200
+    assert submit_replay.json()["id"] == draft["id"]
+
+
+def test_purchase_draft_api_rejects_idempotency_reuse_and_stale_version(client):
+    client, _workspace_id, warehouse_id, sku_id = client
+    generated = client.post(
+        "/api/replenishment/suggestions/generate",
+        json={"warehouse_id": warehouse_id, "sku_id": sku_id, "coverage_days": 14},
+        headers={"Idempotency-Key": "draft-reuse-generate"},
+    )
+    suggestion_id = generated.json()["id"]
+    assert client.post(
+        f"/api/replenishment/suggestions/{suggestion_id}/decision",
+        json={"action": "confirm", "expected_version": 1},
+        headers={"Idempotency-Key": "draft-reuse-decision"},
+    ).status_code == 200
+    created = client.post(
+        "/api/purchase-requests/drafts",
+        json={"suggestion_ids": [suggestion_id], "note": "原始备注"},
+        headers={"Idempotency-Key": "draft-reuse-create"},
+    )
+    assert created.status_code == 201
+    draft_id = created.json()["id"]
+    reused = client.post(
+        "/api/purchase-requests/drafts",
+        json={"suggestion_ids": [suggestion_id], "note": "不同备注"},
+        headers={"Idempotency-Key": "draft-reuse-create"},
+    )
+    assert reused.status_code == 409
+    assert reused.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REUSE"
+
+    stale = client.patch(
+        f"/api/purchase-requests/{draft_id}",
+        json={"expected_version": 2, "note": "不应写入"},
+        headers={"Idempotency-Key": "draft-stale-edit"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "PURCHASE_REQUEST_VERSION_CONFLICT"
+    current = client.get(f"/api/purchase-requests/{draft_id}")
+    assert current.status_code == 200
+    assert current.json()["version"] == 1
+    assert current.json()["note"] == "原始备注"
+
+
+def test_replenishment_api_requires_idempotency(client):
+    client, _workspace_id, warehouse_id, sku_id = client
+    missing = client.post(
+        "/api/replenishment/suggestions/generate",
+        json={"warehouse_id": warehouse_id, "sku_id": sku_id, "coverage_days": 14},
+    )
     assert missing.status_code == 422
-    no_csrf = client.post("/api/replenishment/suggestions/generate", json={"warehouse_id": warehouse_id, "sku_id": sku_id, "coverage_days": 14}, headers={"Idempotency-Key":"generate-no-csrf"})
-    assert no_csrf.status_code == 201
+    assert missing.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"

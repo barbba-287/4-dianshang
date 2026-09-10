@@ -16,6 +16,8 @@ class DashboardSummaryResponse(BaseModel):
     snapshot_freshness: list[dict] = Field(default_factory=list)
     sync_health: dict = Field(default_factory=dict)
     sales_summary: dict = Field(default_factory=dict)
+    sales_trend: dict = Field(default_factory=dict)
+    inventory_chart: dict = Field(default_factory=dict)
     sku_health: list[dict] = Field(default_factory=list)
 
 
@@ -96,10 +98,12 @@ class AlertResponse(BaseModel):
 
 
 class AdminUserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     login: str = Field(min_length=1, max_length=128)
     display_name: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=8, max_length=128)
-    role: str = Field(pattern="^(operations|warehouse|customer_service|readonly)$")
+    role: str = Field(pattern="^(admin|operations|warehouse|customer_service|readonly)$")
     warehouse_ids: list[int] = Field(default_factory=list)
 
 
@@ -113,8 +117,10 @@ class AdminUserResponse(BaseModel):
 
 
 class AdminUserPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
-    role: str | None = Field(default=None, pattern="^(operations|warehouse|customer_service|readonly)$")
+    role: str | None = Field(default=None, pattern="^(admin|operations|warehouse|customer_service|readonly)$")
 
 
 class AdminUserPasswordReset(BaseModel):
@@ -288,6 +294,30 @@ class AgentToolSpec(BaseModel):
     input_schema: dict
     output_schema: dict | None = None
     max_calls_per_minute: int
+
+
+class AgentAssistantRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    input_hints: dict = Field(default_factory=dict)
+    max_turns: int = Field(default=3, ge=1, le=5)
+    max_tool_calls: int = Field(default=3, ge=1, le=5)
+
+
+class AgentAssistantTrace(BaseModel):
+    tool: str
+    input: dict
+    ok: bool
+    output: object | None = None
+    error_code: str | None = None
+    duration_ms: int = 0
+
+
+class AgentAssistantResponse(BaseModel):
+    ok: bool
+    answer: str
+    error_code: str | None = None
+    turns: int = 0
+    traces: list[AgentAssistantTrace] = Field(default_factory=list)
 
 
 class WarehouseCreate(BaseModel):
@@ -652,6 +682,24 @@ class PurchaseRequestCreate(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
 
 
+class PurchaseRequestDraftCreate(BaseModel):
+    suggestion_ids: list[int] = Field(min_length=1)
+    note: str | None = Field(default=None, max_length=1000)
+    supplier_ref: str | None = Field(default=None, max_length=128)
+    expected_arrival_date: date | None = None
+
+
+class PurchaseRequestDraftUpdate(BaseModel):
+    note: str | None = Field(default=None, max_length=1000)
+    supplier_ref: str | None = Field(default=None, max_length=128)
+    expected_arrival_date: date | None = None
+    expected_version: int = Field(ge=1)
+
+
+class PurchaseRequestDraftSubmit(BaseModel):
+    expected_version: int = Field(ge=1)
+
+
 class PurchaseRequestLineResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -672,8 +720,12 @@ class PurchaseRequestResponse(BaseModel):
     request_no: str
     status: str
     note: str | None
-    submitted_by: str
-    submitted_at: datetime
+    submitted_by: str | None
+    submitted_at: datetime | None
+    created_by: str | None
+    version: int
+    supplier_ref: str | None
+    expected_arrival_date: date | None
     idempotency_key: str
     created_at: datetime
     updated_at: datetime

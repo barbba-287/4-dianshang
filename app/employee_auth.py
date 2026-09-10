@@ -96,8 +96,13 @@ def _resolve_compat_workspace(db: Session, settings: Settings) -> int | None:
         configured = (settings.auth_bootstrap_tenant_key or "").strip()
         matches = [item for item in workspaces if item.tenant_key == configured]
         return matches[0].id if len(matches) == 1 else None
+    configured = (settings.auth_bootstrap_tenant_key or "default").strip()
+    existing = db.scalar(select(Workspace).where(Workspace.tenant_key == configured))
+    if existing is not None:
+        # 停用空间不能被兼容模式偷偷复活，也不能因重名再次创建。
+        return None
     workspace = Workspace(
-        tenant_key=settings.auth_bootstrap_tenant_key or "default",
+        tenant_key=configured,
         name=settings.auth_bootstrap_workspace_name or "默认商家",
     )
     db.add(workspace)

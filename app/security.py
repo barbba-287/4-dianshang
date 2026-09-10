@@ -34,8 +34,11 @@ def _resolve_workspace(db, settings: Settings, *, tenant_key: str | None = None)
         matches = [item for item in workspaces if item.tenant_key == configured]
         return matches[0].id if len(matches) == 1 else None
     configured = (tenant_key or settings.auth_bootstrap_tenant_key or "default").strip()
-    workspace = db.scalar(select(Workspace).where(Workspace.tenant_key == configured))
+    workspace = db.scalar(select(Workspace).where(Workspace.tenant_key == configured, Workspace.status == "active"))
     if workspace is None:
+        existing = db.scalar(select(Workspace).where(Workspace.tenant_key == configured))
+        if existing is not None:
+            return None
         workspace = Workspace(
             tenant_key=configured,
             name=settings.auth_bootstrap_workspace_name or configured,

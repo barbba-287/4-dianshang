@@ -777,12 +777,38 @@ class PurchaseRequest(Base):
     request_no: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(16), default="submitted", index=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    submitted_by: Mapped[str] = mapped_column(String(128))
-    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    submitted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    supplier_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    expected_arrival_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), index=True)
     payload_hash: Mapped[str] = mapped_column(String(72))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PurchaseRequestAction(Base):
+    __tablename__ = "purchase_request_actions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "purchase_request_id", "action_type", "idempotency_key", name="uq_purchase_request_action_idempotency"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    purchase_request_id: Mapped[int] = mapped_column(ForeignKey("purchase_requests.id"), nullable=False, index=True)
+    action_type: Mapped[str] = mapped_column(String(24))
+    from_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    to_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), index=True)
+    payload_hash: Mapped[str] = mapped_column(String(72))
+    expected_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actor: Mapped[str] = mapped_column(String(128))
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    result: Mapped[str] = mapped_column(String(16), default="succeeded")
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class PurchaseRequestLine(Base):
@@ -807,9 +833,16 @@ class PurchaseRequestLine(Base):
 def backfill_legacy_workspace(db, workspace_id: int) -> int:
     """将单工作空间兼容库中的未归属旧数据绑定到该空间。
 
-    旧版本没有 workspace_id；只有在调用方已经确认目标空间是唯一活动空间时
-    才允许执行，避免把无法判定归属的数据静默分配给错误商家。
+    旧版本没有 workspace_id；只有在数据库恰好只有一个活动 Workspace，且
+    目标就是这个 Workspace 时才允许执行，避免把无法判定归属的数据静默
+    分配给错误商家。
     """
+    active_workspaces = db.query(Workspace).filter(
+        Workspace.status == "active"
+    ).order_by(Workspace.id).all()
+    if len(active_workspaces) != 1 or active_workspaces[0].id != workspace_id:
+        raise ValueError("LEGACY_WORKSPACE_TARGET_NOT_UNIQUE")
+
     models = (
         Product,
         ProductPriceHistory,
@@ -819,7 +852,6 @@ def backfill_legacy_workspace(db, workspace_id: int) -> int:
         DocumentChunk,
         DocumentProductLink,
         ProductSku,
-        Warehouse,
         InboundOrder,
         InboundLine,
         InventoryTransaction,
@@ -875,7 +907,20 @@ def init_db() -> None:
             return
         product_columns = {column["name"] for column in inspector.get_columns("products")}
         required_current = {"workspace_id", "source", "external_product_id"}
-        required_tables = {"products", "crawl_jobs", "workspaces", "documents"}
+        required_tables = {
+            "products", "product_price_history", "crawl_jobs", "documents",
+            "document_versions", "document_chunks", "document_product_links",
+            "product_skus", "warehouses", "inbound_orders", "inbound_lines",
+            "inventory_balances", "inventory_transactions", "inventory_policies",
+            "external_inventory_snapshots", "external_event_inbox",
+            "reconciliation_results", "inventory_alerts", "external_sync_runs",
+            "external_accounts", "external_product_mappings", "external_orders",
+            "external_order_lines", "daily_sku_sales", "replenishment_suggestions",
+            "replenishment_suggestion_actions", "purchase_requests",
+            "purchase_request_lines", "purchase_request_actions", "workspaces",
+            "user_accounts", "workspace_memberships", "warehouse_access",
+            "auth_sessions",
+        }
         if required_current.issubset(product_columns) and required_tables.issubset(tables):
             from alembic import command
             from alembic.config import Config

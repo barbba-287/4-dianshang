@@ -14,11 +14,13 @@ from hashlib import sha256
 import html
 import json
 import logging
+import re
 import uuid
 
 from fastapi import Body, Depends, File, Form, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
@@ -66,6 +68,9 @@ from app.schemas import (
     AgentActionRequest,
     AgentActionResponse,
     AgentToolSpec,
+    AgentAssistantRequest,
+    AgentAssistantTrace,
+    AgentAssistantResponse,
     CrawlJobDetailResponse,
     CrawlJobResponse,
     DocumentUploadResponse,
@@ -104,6 +109,9 @@ from app.schemas import (
     ReplenishmentSuggestionResponse,
     ReplenishmentSuggestionPage,
     PurchaseRequestCreate,
+    PurchaseRequestDraftCreate,
+    PurchaseRequestDraftUpdate,
+    PurchaseRequestDraftSubmit,
     PurchaseRequestResponse,
     PurchaseRequestLineResponse,
     PurchaseRequestPage,
@@ -168,6 +176,55 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title=get_settings().app_name, version="0.2.0-week2", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+
+_WORKSPACE_NAV_ITEMS = (
+    ("/dashboard", "运营驾驶舱", "▦", (ROLE_ADMIN, ROLE_OPERATIONS), "inventory.read"),
+    ("/ops", "运营工作台", "◫", (ROLE_ADMIN, ROLE_OPERATIONS), None),
+    ("/warehouse", "仓库收货", "▤", (ROLE_ADMIN, ROLE_OPERATIONS, ROLE_WAREHOUSE), "inbound.read"),
+    ("/admin/users", "成员权限", "♙", (ROLE_ADMIN,), None),
+)
+_SYSTEM_NAV_ITEMS = (
+    ("/customer-service", "客服知识", "?", (ROLE_ADMIN, ROLE_OPERATIONS, ROLE_CUSTOMER_SERVICE, ROLE_READONLY), "knowledge.read"),
+)
+
+
+def _visible_navigation(principal, active_path: str) -> str:
+    def can_see(roles: tuple[str, ...], permission: str | None) -> bool:
+        if getattr(principal, "auth_type", None) == "demo":
+            return True
+        return principal.has_role(*roles) and (permission is None or principal.can(permission))
+
+    def render_item(item: tuple[str, str, str, tuple[str, ...], str | None]) -> str:
+        path, label, icon, roles, permission = item
+        if not can_see(roles, permission):
+            return ""
+        active = ' class="active" aria-current="page"' if path == active_path else ""
+        return f'<a href="{path}"{active}><span aria-hidden="true">{icon}</span><span>{label}</span></a>'
+
+    workspace = "".join(render_item(item) for item in _WORKSPACE_NAV_ITEMS)
+    system = "".join(render_item(item) for item in _SYSTEM_NAV_ITEMS)
+    system_section = f'<div class="nav-label">System</div><nav class="nav" aria-label="系统导航">{system}</nav>' if system else ""
+    return (
+        '<a class="brand" href="/ops"><span class="brand-mark">商</span>'
+        '<span class="brand-text">电商运营台</span></a>'
+        '<div class="nav-label">Workspace</div>'
+        f'<nav class="nav" aria-label="工作区导航">{workspace}</nav>{system_section}'
+    )
+
+
+def _render_workspace_page(template_name: str, principal, active_path: str) -> HTMLResponse:
+    template = (Path(__file__).parent / "templates" / template_name).read_text(encoding="utf-8")
+    navigation = _visible_navigation(principal, active_path)
+    template = re.sub(
+        r'<aside class="sidebar">.*?</aside>',
+        f'<aside class="sidebar">{navigation}</aside>',
+        template,
+        count=1,
+        flags=re.DOTALL,
+    )
+    return HTMLResponse(content=template, headers={"Cache-Control": "no-store, max-age=0"})
 
 
 @app.middleware("http")
@@ -276,8 +333,8 @@ def health() -> dict[str, str]:
 def index(request: Request) -> str:
     settings = get_settings()
     if not settings.employee_auth_enabled:
-        template = Path(__file__).parent / "templates" / "index.html"
-        return template.read_text(encoding="utf-8")
+        principal = getattr(request.state, "principal", None)
+        return _render_workspace_page("index.html", principal, "/ops")
     principal = require_principal(request)
     if principal.has_role(ROLE_WAREHOUSE):
         return RedirectResponse(url="/warehouse", status_code=303)
@@ -339,7 +396,11 @@ def login(request: Request, login: str = Form(...), password: str = Form(...), w
     else:
         raise HTTPException(status_code=409, detail={"code": "WORKSPACE_SELECTION_REQUIRED", "message": "多工作空间账户必须明确选择工作空间"})
     from app.db import backfill_legacy_workspace
-    backfill_legacy_workspace(db, membership.workspace_id)
+    active_workspace_ids = db.scalars(
+        select(Workspace.id).where(Workspace.status == "active").order_by(Workspace.id)
+    ).all()
+    if len(active_workspace_ids) == 1 and active_workspace_ids[0] == membership.workspace_id:
+        backfill_legacy_workspace(db, membership.workspace_id)
     token, csrf, _session = create_session(db, user=user, membership=membership, settings=get_settings(), ip_address=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"))
     from datetime import datetime
     user.last_login_at = datetime.utcnow()
@@ -378,24 +439,19 @@ def me(request: Request):
 @app.get("/ops", response_class=HTMLResponse)
 def ops_page(request: Request) -> HTMLResponse:
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
-    template = (Path(__file__).parent / "templates" / "index.html").read_text(encoding="utf-8")
-    return HTMLResponse(
-        content=template.replace("电商运营工作台", "运营工作台").replace("仓储协同", "入库审核与库存").replace("实收总数（含破损）", "实收总数（含破损）"),
-        headers={"Cache-Control": "no-store, max-age=0"},
-    )
+    return _render_workspace_page("index.html", principal, "/ops")
 
 
 @app.get("/warehouse", response_class=HTMLResponse)
-def warehouse_page(request: Request) -> str:
-    require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS, ROLE_WAREHOUSE))
-    template = (Path(__file__).parent / "templates" / "warehouse.html").read_text(encoding="utf-8")
-    return template
+def warehouse_page(request: Request) -> HTMLResponse:
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS, ROLE_WAREHOUSE))
+    return _render_workspace_page("warehouse.html", principal, "/warehouse")
 
 
 @app.get("/customer-service", response_class=HTMLResponse)
-def customer_service_page(request: Request) -> str:
-    require_principal(request, roles=(ROLE_ADMIN, ROLE_CUSTOMER_SERVICE, ROLE_READONLY))
-    return """<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>客服工作台</title><body><h1>客服工作台</h1><p>当前账户拥有商品、库存和知识库只读权限。</p><p><a href='/'>返回入口</a></p></body></html>"""
+def customer_service_page(request: Request) -> HTMLResponse:
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_CUSTOMER_SERVICE, ROLE_READONLY))
+    return _render_workspace_page("customer_service.html", principal, "/customer-service")
 def _require_csrf(request: Request, db: Session) -> None:
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         validate_csrf(request, db)
@@ -485,9 +541,9 @@ def roles_page(request: Request) -> str:
 
 
 @app.get("/admin/users", response_class=HTMLResponse)
-def admin_users_page(request: Request) -> str:
-    require_principal(request, roles=(ROLE_ADMIN,))
-    return (Path(__file__).parent / "templates" / "admin_users.html").read_text(encoding="utf-8")
+def admin_users_page(request: Request) -> HTMLResponse:
+    principal = require_principal(request, roles=(ROLE_ADMIN,))
+    return _render_workspace_page("admin_users.html", principal, "/admin/users")
 
 
 @app.post("/api/admin/users/{user_id}/deactivate", status_code=204)
@@ -827,9 +883,44 @@ def get_runtime_settings(request: Request, db: Session = Depends(get_db)) -> Set
 # ---------- S5 受控 Agent ----------
 
 
+def _register_agent_tools() -> None:
+    """Register every read-only Agent tool before serving any Agent route."""
+    from app.agent.impl import register_default_tools
+    from app.agent.registry import default_registry
+    from app.agent.skills import register_operator_skills
+
+    register_default_tools(default_registry)
+    register_operator_skills(default_registry)
+
+
+def _agent_context(request: Request, principal) :
+    """Build Agent context only from the authenticated principal."""
+    from app.agent.registry import ToolContext
+    from app.employee_auth import ROLE_ADMIN, ROLE_OPERATIONS
+
+    permissions = set(getattr(principal, "scopes", ()))
+    if getattr(principal, "auth_type", None) == "session":
+        for permission in ("inventory.read", "replenishment.read"):
+            if principal.can(permission):
+                permissions.add(permission)
+    has_role = getattr(principal, "has_role", lambda *roles: False)
+    return ToolContext(
+        tenant_id=principal.tenant_id,
+        workspace_id=principal.workspace_id,
+        user_id=principal.subject,
+        request_id=request.state.request_id,
+        extras={
+            "permissions": tuple(permissions),
+            "warehouse_ids": tuple(getattr(principal, "warehouse_ids", ())),
+            "all_warehouse_access": bool(has_role(ROLE_ADMIN, ROLE_OPERATIONS)),
+        },
+    )
+
+
 @app.get("/api/agent/tools", response_model=list[AgentToolSpec])
 def list_agent_tools(request: Request) -> list[AgentToolSpec]:
     require_principal(request, permission="knowledge.read")
+    _register_agent_tools()
     from app.agent.orchestrator import AgentOrchestrator
 
     orchestrator = AgentOrchestrator()
@@ -852,17 +943,11 @@ def invoke_agent_tool(
     payload: AgentActionRequest, request: Request
 ) -> AgentActionResponse:
     principal = require_principal(request, permission="knowledge.read")
+    _register_agent_tools()
     from app.agent.orchestrator import AgentAction, AgentOrchestrator
-    from app.agent.registry import ToolContext
 
+    context = _agent_context(request, principal)
     orchestrator = AgentOrchestrator()
-    principal = request.state.principal
-    context = ToolContext(
-        tenant_id=principal.tenant_id,
-        workspace_id=principal.workspace_id,
-        user_id=principal.subject,
-        request_id=request.state.request_id,
-    )
     result = orchestrator.invoke(
         AgentAction(tool=payload.tool, input=payload.input, call_id=payload.call_id),
         context=context,
@@ -877,8 +962,34 @@ def invoke_agent_tool(
     )
 
 
-# ---------- 仓储协同与库存 ----------
+# ---------- V3 单核运营助手 ----------
 
+
+@app.post("/api/agent/assistant", response_model=AgentAssistantResponse)
+def operator_assistant(payload: AgentAssistantRequest, request: Request) -> AgentAssistantResponse:
+    principal = require_principal(request, permission="knowledge.read")
+    _register_agent_tools()
+    from app.agent.adapters import MockAdapter
+    from app.agent.core import AgentCore
+    from app.agent.orchestrator import AgentOrchestrator
+    from app.agent.registry import default_registry
+
+    context = _agent_context(request, principal)
+    core = AgentCore(
+        adapter=MockAdapter(),
+        registry=default_registry,
+        orchestrator=AgentOrchestrator(registry=default_registry),
+        max_turns=payload.max_turns,
+        max_tool_calls=payload.max_tool_calls,
+    )
+    result = core.run(payload.message, context=context, input_hints=payload.input_hints)
+    return AgentAssistantResponse(
+        ok=result.ok,
+        answer=result.answer,
+        error_code=result.error_code,
+        turns=result.turns,
+        traces=[AgentAssistantTrace(tool=t.tool, input=t.input, ok=t.result.ok, output=t.result.output, error_code=t.result.error_code, duration_ms=t.result.duration_ms) for t in result.traces],
+    )
 
 def _warehouse_error(exc: ValueError) -> HTTPException:
     code = str(exc)
@@ -979,7 +1090,7 @@ def list_inbounds(
     principal = require_principal(request, permission="inbound.read")
     from app.db import InboundOrder
 
-    filters = []
+    filters = [InboundOrder.workspace_id == principal.workspace_id]
     if warehouse_id is not None:
         require_warehouse_access(principal, warehouse_id, db=db)
         filters.append(InboundOrder.warehouse_id == warehouse_id)
@@ -1153,20 +1264,26 @@ def dashboard_summary(
     request: Request,
     days: int = Query(default=7, ge=1, le=90),
     warehouse_id: int | None = Query(default=None, gt=0),
+    sku_id: int | None = Query(default=None, gt=0),
     recent_limit: int = Query(default=10, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     if warehouse_id is not None:
         require_warehouse_access(principal, warehouse_id, db=db)
+    if sku_id is not None:
+        from app.db import ProductSku
+        sku = db.scalar(select(ProductSku).where(ProductSku.id == sku_id, ProductSku.workspace_id == principal.workspace_id, ProductSku.is_active.is_(True)))
+        if sku is None:
+            raise HTTPException(status_code=404, detail={"code": "SKU_NOT_FOUND", "message": "SKU 不存在"})
     from app.dashboard import build_dashboard_summary
-    return build_dashboard_summary(db, workspace_id=principal.workspace_id, days=days, warehouse_id=warehouse_id, recent_limit=recent_limit)
+    return build_dashboard_summary(db, workspace_id=principal.workspace_id, days=days, warehouse_id=warehouse_id, sku_id=sku_id, recent_limit=recent_limit)
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard_page(request: Request) -> str:
-    require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
-    return (Path(__file__).parent / "templates" / "dashboard.html").read_text(encoding="utf-8")
+def dashboard_page(request: Request) -> HTMLResponse:
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    return _render_workspace_page("dashboard.html", principal, "/dashboard")
 
 
 
@@ -1275,7 +1392,7 @@ def _replenishment_error(exc: ValueError) -> HTTPException:
     code = str(exc)
     if str(exc) == "IDEMPOTENCY_KEY_REQUIRED":
         return HTTPException(status_code=422, detail={"code": str(exc), "message": "必须提供 Idempotency-Key"})
-    status = 404 if code.endswith("NOT_FOUND") else 409 if code in {"OPEN_SUGGESTION_EXISTS", "IDEMPOTENCY_KEY_REUSE", "SUGGESTION_VERSION_CONFLICT", "INVALID_SUGGESTION_STATE", "SUGGESTION_NOT_READY", "MIXED_WAREHOUSE", "SUGGESTION_ALREADY_SUBMITTED"} else 422
+    status = 404 if code.endswith("NOT_FOUND") else 409 if code in {"OPEN_SUGGESTION_EXISTS", "IDEMPOTENCY_KEY_REUSE", "SUGGESTION_VERSION_CONFLICT", "INVALID_SUGGESTION_STATE", "SUGGESTION_NOT_READY", "MIXED_WAREHOUSE", "SUGGESTION_ALREADY_SUBMITTED", "SUGGESTION_ALREADY_IN_PURCHASE_REQUEST", "INVALID_PURCHASE_REQUEST_STATE", "PURCHASE_REQUEST_VERSION_CONFLICT", "SUGGESTION_STALE"} else 422
     return HTTPException(status_code=status, detail={"code": code, "message": "补货决策操作失败"})
 
 
@@ -1290,6 +1407,8 @@ def _purchase_request_response(db: Session, request_record):
         "warehouse_id": request_record.warehouse_id, "request_no": request_record.request_no,
         "status": request_record.status, "note": request_record.note,
         "submitted_by": request_record.submitted_by, "submitted_at": request_record.submitted_at,
+        "created_by": request_record.created_by, "version": request_record.version,
+        "supplier_ref": request_record.supplier_ref, "expected_arrival_date": request_record.expected_arrival_date,
         "idempotency_key": request_record.idempotency_key,
         "created_at": request_record.created_at, "updated_at": request_record.updated_at,
         "lines": [PurchaseRequestLineResponse.model_validate(line) for line in lines],
@@ -1301,9 +1420,8 @@ def list_replenishment_suggestions(request: Request, warehouse_id: int | None = 
     principal = require_principal(request, permission="replenishment.read")
     if warehouse_id is not None: require_warehouse_access(principal, warehouse_id, db=db)
     from app.replenishment import list_suggestions
-    rows, total = list_suggestions(db, workspace_id=principal.workspace_id, warehouse_id=warehouse_id, status=status, sku_id=sku_id, limit=page_size, offset=(page-1)*page_size)
-    if warehouse_id is None and not principal.has_role(ROLE_ADMIN, ROLE_OPERATIONS):
-        rows = [row for row in rows if row.warehouse_id in principal.warehouse_ids]
+    scoped_warehouse_ids = None if principal.has_role(ROLE_ADMIN, ROLE_OPERATIONS) else principal.warehouse_ids
+    rows, total = list_suggestions(db, workspace_id=principal.workspace_id, warehouse_id=warehouse_id, warehouse_ids=scoped_warehouse_ids, status=status, sku_id=sku_id, limit=page_size, offset=(page-1)*page_size)
     return ReplenishmentSuggestionPage(items=rows, page=page, page_size=page_size, total=total)
 
 
@@ -1333,18 +1451,79 @@ def decide_replenishment_suggestion(suggestion_id: int, payload: ReplenishmentDe
     except ValueError as exc: raise _replenishment_error(exc) from exc
 
 
+@app.post("/api/purchase-requests/drafts", response_model=PurchaseRequestResponse, status_code=201)
+def create_purchase_request_draft_api(payload: PurchaseRequestDraftCreate, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="purchasing.submit")
+    for suggestion_id in payload.suggestion_ids:
+        from app.db import ReplenishmentSuggestion
+        suggestion = db.scalar(select(ReplenishmentSuggestion).where(ReplenishmentSuggestion.id == suggestion_id, ReplenishmentSuggestion.workspace_id == principal.workspace_id))
+        if suggestion is None:
+            raise _replenishment_error(ValueError("SUGGESTION_NOT_FOUND"))
+        require_warehouse_access(principal, suggestion.warehouse_id, db=db)
+    from app.replenishment import create_purchase_request_draft
+    try:
+        result = create_purchase_request_draft(db, workspace_id=principal.workspace_id, suggestion_ids=payload.suggestion_ids, actor=principal.subject, idempotency_key=request.headers.get("Idempotency-Key") or "", note=payload.note, supplier_ref=payload.supplier_ref, expected_arrival_date=payload.expected_arrival_date)
+        return _purchase_request_response(db, result)
+    except ValueError as exc:
+        raise _replenishment_error(exc) from exc
+
+
+@app.patch("/api/purchase-requests/{request_id}", response_model=PurchaseRequestResponse)
+def edit_purchase_request_draft_api(request_id: int, payload: PurchaseRequestDraftUpdate, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="purchasing.submit")
+    from app.db import PurchaseRequest
+
+    # 先按 workspace 定位并校验仓库范围，再进入会 commit 的领域服务。
+    # 越权请求必须保持数据库零变化。
+    draft = db.scalar(select(PurchaseRequest).where(
+        PurchaseRequest.id == request_id,
+        PurchaseRequest.workspace_id == principal.workspace_id,
+    ))
+    if draft is None:
+        raise _replenishment_error(ValueError("PURCHASE_REQUEST_NOT_FOUND"))
+    require_warehouse_access(principal, draft.warehouse_id, db=db)
+    from app.replenishment import edit_purchase_request_draft
+    try:
+        result = edit_purchase_request_draft(db, workspace_id=principal.workspace_id, request_id=request_id, actor=principal.subject, idempotency_key=request.headers.get("Idempotency-Key") or "", expected_version=payload.expected_version, note=payload.note, supplier_ref=payload.supplier_ref, expected_arrival_date=payload.expected_arrival_date)
+        return _purchase_request_response(db, result)
+    except ValueError as exc:
+        raise _replenishment_error(exc) from exc
+
+
+@app.post("/api/purchase-requests/{request_id}/submit", response_model=PurchaseRequestResponse)
+def submit_purchase_request_draft_api(request_id: int, payload: PurchaseRequestDraftSubmit, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="purchasing.submit")
+    from app.db import PurchaseRequest
+
+    # 提交同样必须在领域服务写库前完成 workspace/warehouse 鉴权。
+    draft = db.scalar(select(PurchaseRequest).where(
+        PurchaseRequest.id == request_id,
+        PurchaseRequest.workspace_id == principal.workspace_id,
+    ))
+    if draft is None:
+        raise _replenishment_error(ValueError("PURCHASE_REQUEST_NOT_FOUND"))
+    require_warehouse_access(principal, draft.warehouse_id, db=db)
+    from app.replenishment import submit_purchase_request_draft
+    try:
+        result = submit_purchase_request_draft(db, workspace_id=principal.workspace_id, request_id=request_id, actor=principal.subject, idempotency_key=request.headers.get("Idempotency-Key") or "", expected_version=payload.expected_version)
+        return _purchase_request_response(db, result)
+    except ValueError as exc:
+        raise _replenishment_error(exc) from exc
 @app.post("/api/purchase-requests", response_model=PurchaseRequestResponse, status_code=201)
 def submit_purchase_request_api(payload: PurchaseRequestCreate, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, permission="purchasing.submit")
     from app.db import ReplenishmentSuggestion
     suggestions = db.scalars(select(ReplenishmentSuggestion).where(ReplenishmentSuggestion.workspace_id == principal.workspace_id, ReplenishmentSuggestion.id.in_(payload.suggestion_ids))).all()
-    if not suggestions: raise _replenishment_error(ValueError("SUGGESTION_NOT_FOUND"))
-    for suggestion in suggestions: require_warehouse_access(principal, suggestion.warehouse_id, db=db)
+    if not suggestions:
+        raise _replenishment_error(ValueError("SUGGESTION_NOT_FOUND"))
+    for suggestion in suggestions:
+        require_warehouse_access(principal, suggestion.warehouse_id, db=db)
     from app.replenishment import submit_purchase_request
     try:
         result = submit_purchase_request(db, workspace_id=principal.workspace_id, suggestion_ids=payload.suggestion_ids, actor=principal.subject, idempotency_key=request.headers.get("Idempotency-Key") or "", note=payload.note)
         return _purchase_request_response(db, result)
-    except ValueError as exc: raise _replenishment_error(exc) from exc
+    except ValueError as exc:
+        raise _replenishment_error(exc) from exc
 
 
 @app.get("/api/purchase-requests/{request_id}", response_model=PurchaseRequestResponse)
@@ -1358,14 +1537,16 @@ def get_purchase_request(request_id: int, request: Request, db: Session = Depend
 
 
 @app.get("/api/purchase-requests", response_model=PurchaseRequestPage)
-def list_purchase_requests(request: Request, page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), warehouse_id: int | None = Query(default=None, gt=0), db: Session = Depends(get_db)):
+def list_purchase_requests(request: Request, page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), warehouse_id: int | None = Query(default=None, gt=0), status: str | None = Query(default=None, max_length=16), db: Session = Depends(get_db)):
     principal = require_principal(request, permission="purchase.read")
     if warehouse_id is not None: require_warehouse_access(principal, warehouse_id, db=db)
     from app.db import PurchaseRequest
     from sqlalchemy import func
     filters = [PurchaseRequest.workspace_id == principal.workspace_id]
     if warehouse_id is not None: filters.append(PurchaseRequest.warehouse_id == warehouse_id)
-    elif not principal.has_role(ROLE_ADMIN, ROLE_OPERATIONS): filters.append(PurchaseRequest.warehouse_id.in_(principal.warehouse_ids))
+    if not principal.has_role(ROLE_ADMIN, ROLE_OPERATIONS):
+        filters.append(PurchaseRequest.warehouse_id.in_(principal.warehouse_ids))
+    if status is not None: filters.append(PurchaseRequest.status == status)
     total = db.scalar(select(func.count(PurchaseRequest.id)).where(*filters)) or 0
     rows = db.scalars(select(PurchaseRequest).where(*filters).order_by(PurchaseRequest.id.desc()).offset((page-1)*page_size).limit(page_size)).all()
     return PurchaseRequestPage(items=[_purchase_request_response(db, row) for row in rows], page=page, page_size=page_size, total=int(total))

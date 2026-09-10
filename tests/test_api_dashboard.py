@@ -140,3 +140,8 @@ def test_dashboard_sync_health_latest_is_deduplicated(client):
     assert response.status_code == 200
     assert 'id="kpis"' in response.text
     assert 'api/dashboard/summary' in response.text
+    assert '<title>运营驾驶舱</title>' in response.text
+    assert '<h1>运营驾驶舱</h1>' in response.text
+    assert response.text.count('id="logout"') == 1
+    assert 'id="logout-link"' not in response.text
+    assert '商品与补货' not in response.text

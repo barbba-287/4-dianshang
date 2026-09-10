@@ -24,7 +24,9 @@ def upgrade() -> None:
         op.add_column("external_sync_runs", sa.Column("updated", sa.Integer(), nullable=False, server_default="0"))
         op.add_column("external_sync_runs", sa.Column("stale", sa.Integer(), nullable=False, server_default="0"))
         op.create_index("ix_external_sync_runs_retry_of_run_id", "external_sync_runs", ["retry_of_run_id"])
-        op.create_unique_constraint("uq_external_sync_run_retry_idempotency", "external_sync_runs", ["workspace_id", "retry_of_run_id", "retry_idempotency_key"])
+        # SQLite cannot ALTER TABLE to add a constraint in offline mode; emit
+        # an index with equivalent uniqueness semantics for the known schema.
+        op.create_index("uq_external_sync_run_retry_idempotency", "external_sync_runs", ["workspace_id", "retry_of_run_id", "retry_idempotency_key"], unique=True)
         return
     bind = op.get_bind()
     if "external_sync_runs" not in set(inspect(bind).get_table_names()):

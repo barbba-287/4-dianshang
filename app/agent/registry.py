@@ -119,6 +119,10 @@ class AgentToolRegistry:
         with self._lock:
             return self._tools.get(name)
 
+    def has(self, name: str) -> bool:
+        with self._lock:
+            return name in self._tools
+
     def list_tools(self, *, include_readonly_only: bool = False) -> list[AgentTool]:
         with self._lock:
             tools = list(self._tools.values())
@@ -147,6 +151,19 @@ class AgentToolRegistry:
                     ok=False,
                     error_code="TOOL_NOT_READONLY",
                     error_message=f"工具 {name} 非只读，已被禁用",
+                )
+            required_permissions = set(tool.requires)
+            granted_permissions = set(context.extras.get("permissions", ()))
+            missing_permissions = (
+                set()
+                if "*" in granted_permissions
+                else required_permissions - granted_permissions
+            )
+            if missing_permissions:
+                return ToolCallResult(
+                    ok=False,
+                    error_code="PERMISSION_DENIED",
+                    error_message="工具权限不足",
                 )
             try:
                 self._check_rate_limit(name, context.tenant_id, tool.max_calls_per_minute)

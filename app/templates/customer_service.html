@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>客服知识</title>
+<link rel="stylesheet" href="/static/workspace-shell.css">
+</head>
+<body>
+<div class="shell"><aside class="sidebar"></aside><main class="main">
+<header class="topbar"><div class="muted">Workspace / <strong>客服知识</strong></div><button id="logout" type="button">退出登录</button></header>
+<div class="content"><div class="page-heading"><div><h1>客服知识</h1><p class="muted">当前账户拥有商品、库存和知识库只读权限。</p></div></div>
+<section class="panel"><h2>知识库</h2><p class="muted">客服知识库能力正在建设中。</p></section></div>
+</main></div>
+<script>
+function csrfToken(){const item=document.cookie.split('; ').find(value=>value.startsWith('dianshang_csrf='));return item?decodeURIComponent(item.slice('dianshang_csrf='.length)):'';}
+document.querySelector('#logout').onclick=async()=>{try{const response=await fetch('/logout',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrfToken()}});if(!response.ok)throw new Error('退出失败');location.href='/login';}catch(error){alert(error.message);}};
+</script>
+</body></html>

@@ -57,3 +57,16 @@ def test_audit_summary_redacts_sensitive_fields():
     assert "secret" not in summary
     assert "abc" not in summary
     assert "[REDACTED]" in summary
+
+
+def test_audit_summary_redacts_aliases_and_truncates():
+    summary = summarise({
+        "access_token": "access-secret",
+        "apiKey": "api-secret",
+        "nested": {"AUTHORIZATION": "bearer-secret"},
+        "description": "x" * 500,
+    })
+    assert "access-secret" not in summary
+    assert "api-secret" not in summary
+    assert "bearer-secret" not in summary
+    assert len(summary) <= 200

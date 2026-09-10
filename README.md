@@ -25,7 +25,7 @@
 | 运营驾驶舱与补货闭环 | 单仓 SKU 健康、确定性补货建议、确认/修改/忽略、内部采购申请幂等提交；采购提交不自动入库 |
 | 淘宝只读 Adapter | 只读协议、脱敏 fixture、能力查询和离线 preview；真实网络默认关闭，不提供下单/付款/退款/改价/库存写回 |
 | 离线多平台同步编排 | JSON/CSV/mock 订单+库存 bundle、ExternalSyncRun 成功/失败、账户/店铺一致性校验和幂等回放 |
-| 测试基线 | 当前全量回归 `140 passed`；MySQL 迁移头 `0013_external_snapshot_scope` |
+| 测试基线 | 当前全量回归 `156 passed`；当前 Alembic head `0014_purchase_request_drafts`（MySQL 迁移未在本次环境验证） |
 | 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：已确认内部库存、入库状态/数量、销量摘要、SKU 健康、补货建议、失败任务、口径限制和模拟数据提示 |
 
 当前版本已完成员工账户、基础 workspace/RBAC、统一外部事实层、补货决策闭环和离线多平台同步编排。外部订单、销量、库存快照和采购申请均按 workspace 隔离；采购申请提交不会直接修改内部库存。仓库列表、入库、库存和新事实层接口均从当前 session 的 workspace 获取边界。
@@ -42,11 +42,21 @@ python -m app.cli init-admin --login admin --display-name 管理员 --password "
 
 - `/ops`：管理员/运营创建商品 SKU、仓库和预计入库；查看仓库收货反馈并确认入账。
 - `/warehouse`：仓库协作方查看授权仓库的预计入库单，提交实收总数和破损数量；不直接改库存。
-- `/admin/users`：管理员创建运营、仓库、客服和只读账户，分配/撤销仓库授权，停用/启用账户和重置密码。
+- `/admin/users`：管理员创建当前商家的管理员、运营、仓库、客服和只读账户，分配/撤销仓库授权，停用/启用账户和重置密码；管理员权限只作用于当前 Workspace，不能创建商家或管理其他 Workspace。
 - `/roles`：管理员查看固定角色及权限说明。
 - `/dashboard`：管理员/运营查看运营概览。
 
+工作台页面统一使用侧边栏导航，页面名称为“运营驾驶舱”“运营工作台”“仓库收货”“成员权限”和“客服知识”。退出登录统一放在页面右上角，并通过 `POST /logout` 和 CSRF 双提交完成会话撤销。侧边栏由服务端根据当前 session 的角色和权限裁剪：无权访问的功能不会显示，但后端路由鉴权仍然保留。成员权限页面提供成员身份、角色、状态和授权仓库的清晰列表，并支持响应式查看。
+
+同一登录账户如果属于多个 Workspace，登录时必须填写 Workspace 数字 ID 或 `tenant_key`；session 建立后会固定到所选商家。新商家的 Workspace 和首个管理员由受信任的 `init-admin` 命令创建：
+
+```bash
+python -m app.cli init-admin --login tea_admin --tenant-key tea-shop --workspace-name 茶叶商家
+python -m app.cli init-admin --login home_admin --tenant-key home-shop --workspace-name 家居商家
+```
+
 浏览器 session 写请求使用 CSRF 双提交校验；页面会自动携带 `X-CSRF-Token`。API Key 是机器调用凭证，不用于员工网页登录；生产环境请按实际部署开启 HTTPS 和安全 Cookie。
+
 
 ## 启动
 
@@ -83,7 +93,7 @@ DATABASE_URL=mysql+pymysql://dianshang:dianshang@localhost:3306/dianshang?charse
 
 ## 数据库迁移（Alembic，S6）
 
-S6 将 Alembic 作为当前 schema 管理规范：`0001_baseline.py` 定义基础表，`0003_inventory_mvp.py` 增加仓储协同与库存表，`0004_inbound_idempotency.py` 补齐入库幂等字段，`0005_external_sync.py` 增加外部库存快照、事件 Inbox 和对账结果表；`0006`/`0007` 完成员工 RBAC 与 workspace 隔离，`0008` 增加库存告警，`0009` 增加同步健康，`0010_external_sales_facts.py` 增加外部账户、映射、订单和每日销量，`0011_replenishment_loop.py` 增加补货建议和内部采购申请。`init_db.py` 负责识别数据库状态并执行对应动作；`Base.metadata.create_all` 仅保留给测试 fixture 或演示兜底，不作为生产迁移路径。当前迁移头为 `0011_replenishment_loop`。
+S6 将 Alembic 作为当前 schema 管理规范：`0001_baseline.py` 定义基础表，`0003_inventory_mvp.py` 增加仓储协同与库存表，`0004_inbound_idempotency.py` 补齐入库幂等字段，`0005_external_sync.py` 增加外部库存快照、事件 Inbox 和对账结果表；`0006`/`0007` 完成员工 RBAC 与 workspace 隔离，`0008` 增加库存告警，`0009` 增加同步健康，`0010_external_sales_facts.py` 增加外部账户、映射、订单和每日销量，`0011_replenishment_loop.py` 增加补货建议和内部采购申请，`0012`/`0013` 补齐同步补偿及外部快照来源范围，`0014_purchase_request_drafts.py` 增加采购草稿编辑、提交和 action 审计。`init_db.py` 负责识别数据库状态并执行对应动作；`Base.metadata.create_all` 仅保留给测试 fixture 或演示兜底，不作为生产迁移路径。当前迁移头为 `0014_purchase_request_drafts`。
 
 ```bash
 # 新库：创建全部表并写入 alembic_version
@@ -131,7 +141,125 @@ python -m app.cli query "green tea"
 python -m app.cli status
 ```
 
-## API 速查
+## 假数据一键演示（推荐）
+
+项目提供一个**完全虚构、仅限本地 SQLite** 的演示数据初始化命令，覆盖商品、SKU、两个仓库、已确认库存、30 天销量、低库存告警、补货建议和采购草稿。它不会访问淘宝/京东等真实平台，不需要真实账号或 Token，也不会执行下单、付款、退款、改价或平台库存写回。
+
+### 1. 配置演示模式
+
+在项目根目录创建或编辑 `.env`（可复制 `.env.example`），确认：
+
+```dotenv
+DATABASE_URL=sqlite:///./data/dianshang.db
+EMPLOYEE_AUTH_ENABLED=true
+DEMO_MODE_ENABLED=true
+```
+
+`seed-demo` 只接受 `demo-` 开头的 Workspace，并且拒绝 MySQL，避免把演示数据误写入生产数据库。
+
+### 2. 初始化数据库并写入假数据
+
+在项目根目录执行：
+
+```bash
+python -m app.cli init-db
+python -m app.cli seed-demo --workspace demo-shop --workspace-name "[虚构] 电商演示商家"
+```
+
+想查看完整的生成结果，可加 `--json`：
+
+```bash
+python -m app.cli seed-demo --workspace demo-shop --json
+```
+
+命令是幂等的，同一个 Workspace 重复执行会复用已有演示数据，不会按每次执行无限追加同一批商品、库存和销量。也可以固定数据日期：
+
+```bash
+python -m app.cli seed-demo --workspace demo-shop --as-of-date 2026-09-07
+```
+
+### 3. 创建演示登录账号
+
+员工认证开启时，创建一个管理员账号：
+
+```bash
+python -m app.cli init-admin \
+  --login demo-admin \
+  --display-name "演示管理员" \
+  --password "DemoPass123!" \
+  --tenant-key demo-shop \
+  --workspace-name "[虚构] 电商演示商家"
+```
+
+然后启动服务：
+
+```bash
+python -m uvicorn app.main:app --reload
+```
+
+浏览器访问 <http://127.0.0.1:8000/login>，使用上面的账号登录。若账户只属于一个 Workspace，通常不需要额外填写 Workspace；也可以在登录页输入 `demo-shop`。
+
+### 4. 推荐演示路线
+
+登录后按以下顺序操作：
+
+1. 打开 `/dashboard`：查看已确认库存、30 天销量摘要、SKU 健康、低库存告警、补货建议和采购草稿。
+2. 打开 `/ops`：查看演示仓库和入库状态，演示“运营确认入账”边界。
+3. 打开 `/warehouse`：查看两个虚构仓库的预计入库/实收协同流程；仓库反馈不会直接改库存。
+4. 回到 `/dashboard`：说明只有运营确认入库后，内部 `on_hand` 才会变化。
+5. 使用 API 或页面演示补货建议 → 人工确认 → 采购草稿；采购草稿提交不会自动下单、付款、创建入库单或修改库存。
+6. 访问 `/customer-service` 或调用 RAG 接口，演示知识检索时要强调当前使用的是本地可重放的演示实现，不是真实客服渠道。
+
+### 5. 用 API 快速检查演示数据
+
+登录后可调用：
+
+```bash
+# 运营概览
+curl http://127.0.0.1:8000/api/dashboard/summary
+
+# 当前 Workspace 的库存
+curl http://127.0.0.1:8000/api/inventory
+
+# SKU 健康和补货依据（以返回的实际 warehouse_id/sku_id 为准）
+curl "http://127.0.0.1:8000/api/replenishment/suggestions"
+
+# 只读 Agent 工具列表
+curl http://127.0.0.1:8000/api/agent/tools
+
+# Mock Agent 助手，只查询不执行写操作
+curl -X POST http://127.0.0.1:8000/api/agent/assistant \\
+  -H "Content-Type: application/json" \\
+  -d '{"message":"查询库存"}'
+```
+
+如果需要查看当前数据库和向量库规模：
+
+```bash
+python -m app.cli status
+```
+
+### 6. 一键脚本与 `seed-demo` 的区别
+
+旧的一键脚本仍可用于“采集 fixture + 导入文档 + RAG 查询”：
+
+```bash
+python scripts/demo.py
+```
+
+它默认不会创建 V3 补货演示 Workspace。要演示昨天新增的商品/库存/销量/告警/补货/采购草稿完整链路，请使用上面的 `seed-demo`；两者可以按需分别执行。
+
+### 7. 清理演示数据
+
+演示 Workspace 使用 `demo-` 前缀，建议在 SQLite 数据库中单独使用。需要重新开始时，先停止服务，再删除本地演示数据库和向量文件后重新初始化；不要对生产数据库执行删除操作：
+
+```bash
+# 仅适用于明确确认是本地演示数据库的情况
+rm -f data/dianshang.db data/vectors.json
+python -m app.cli init-db
+python -m app.cli seed-demo --workspace demo-shop
+```
+
 
 | Method | Path | 说明 |
 |---|---|---|
@@ -178,6 +306,7 @@ python -m app.cli status
 | GET | `/roles` | 管理员角色权限页面 |
 | GET | `/api/dashboard/summary` | 运营概览聚合（已确认库存、入库状态/数量、失败任务和能力边界说明） |
 | GET | `/dashboard` | 运营看板页面（仅管理员/运营） |
+| GET | `/customer-service` | 客服知识页面（按角色显示可用导航） |
 
 ### 外部连接器与离线同步演示
 
@@ -346,8 +475,8 @@ python -m app.cli external-preview --platform taobao --mode json --file examples
 - 补货决策闭环：`0011_replenishment_loop`
 - 淘宝只读 Adapter、能力查询和 fixture preview：真实网络默认关闭
 - 离线多平台同步编排：订单+库存 fixture bundle、ExternalSyncRun、失败收尾和幂等回放
-- 当前回归：`140 passed`
-- 当前 MySQL/Alembic head：`0013_external_snapshot_scope`
+- 当前回归：`156 passed`
+- 当前 Alembic head：`0014_purchase_request_drafts`（MySQL 迁移未在本次环境验证）
 
 后续工作优先级：
 
@@ -364,10 +493,10 @@ python scripts/demo.py
 python -m pytest -q
 ```
 
-当前回归基线：
+当前回归基线（本次工作区验证）：
 
 ```text
-135 passed
+156 passed
 ```
 
 以当前工作区实际 `python -m pytest -q` 结果为准；测试包含外部订单/销量、淘宝只读 Adapter/API、离线同步编排和补货决策闭环。

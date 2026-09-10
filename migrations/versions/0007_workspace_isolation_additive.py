@@ -1,7 +1,7 @@
 """为业务数据补齐 workspace 归属、旧数据回填和空间内业务键。"""
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 from sqlalchemy import inspect
 
@@ -51,6 +51,23 @@ _UNIQUE_REPLACEMENTS = {
         ("uq_inventory_balance_warehouse_sku", "uq_inventory_balance_workspace_warehouse_sku", ("workspace_id", "warehouse_id", "sku_id")),
     ),
 }
+def _offline_upgrade() -> None:
+    """Emit additive workspace columns for a fresh-schema SQL export.
+
+    Legacy backfill and constraint inspection are intentionally online-only.
+    """
+    tables = (
+        "products", "product_price_history", "product_skus", "crawl_jobs",
+        "documents", "document_versions", "document_chunks",
+        "document_product_links", "warehouses", "inbound_orders",
+        "inbound_lines", "inventory_transactions", "inventory_balances",
+        "inventory_policies", "external_inventory_snapshots",
+        "external_event_inbox", "reconciliation_results",
+    )
+    for table in tables:
+        op.add_column(table, sa.Column("workspace_id", sa.Integer(), nullable=True))
+        op.create_index(f"ix_{table}_workspace_id", table, ["workspace_id"])
+    op.add_column("crawl_jobs", sa.Column("payload_json", sa.Text(), nullable=True))
 
 
 def _add_workspace_column(table: str) -> None:
@@ -138,6 +155,9 @@ def _add_document_identity_constraint(existing: set[str]) -> None:
 
 
 def upgrade() -> None:
+    if context.is_offline_mode():
+        _offline_upgrade()
+        return
     bind = op.get_bind()
     existing = set(inspect(bind).get_table_names())
     for table in _TABLES:
