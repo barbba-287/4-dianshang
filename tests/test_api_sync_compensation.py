@@ -179,6 +179,26 @@ def test_direct_inventory_and_events_reject_empty_or_mixed_scope(tmp_path, monke
         bg_mod.reset_executor()
 
 
+def test_direct_inventory_ingest_creates_one_completed_run(tmp_path, monkeypatch):
+    client, db_mod, bg_mod = _client(tmp_path, monkeypatch)
+    try:
+        response = client.post(
+            "/api/external/inventory/ingest",
+            json={"platform": "jd", "source_mode": "json", "content": _inventory()},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["sync_status"] == "succeeded"
+        with db_mod.SessionLocal() as db:
+            runs = db.query(db_mod.ExternalSyncRun).all()
+            assert len(runs) == 1
+            assert runs[0].run_id == body["sync_run_id"]
+            assert runs[0].status == "succeeded"
+            assert runs[0].finished_at is not None
+    finally:
+        bg_mod.reset_executor()
+
+
 def test_sync_detail_and_retry_idempotency(tmp_path, monkeypatch):
     client, db_mod, bg_mod = _client(tmp_path, monkeypatch)
     try:

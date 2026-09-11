@@ -53,6 +53,7 @@ from app.db import (  # noqa: F401  触发模型注册
     ReplenishmentSuggestionAction,
     PurchaseRequest,
     PurchaseRequestLine,
+    ReplenishmentEvaluation,
 )
 
 

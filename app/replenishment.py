@@ -20,6 +20,7 @@ from app.db import (
     PurchaseRequestLine,
     ReplenishmentSuggestion,
     ReplenishmentSuggestionAction,
+    ReplenishmentEvaluation,
     Warehouse,
 )
 
@@ -207,12 +208,91 @@ def generate_suggestion(
     return suggestion
 
 
+def evaluate_replenishment(
+    db: Session,
+    *,
+    workspace_id: int,
+    suggestion_id: int,
+    window_start: date,
+    window_end: date,
+    source_mode: str = "mock",
+    simulated: bool = True,
+):
+    if workspace_id is None or window_start > window_end:
+        raise ValueError("INVALID_EVALUATION_WINDOW")
+    suggestion = db.scalar(select(ReplenishmentSuggestion).where(
+        ReplenishmentSuggestion.id == suggestion_id,
+        ReplenishmentSuggestion.workspace_id == workspace_id,
+    ))
+    if suggestion is None:
+        raise ValueError("SUGGESTION_NOT_FOUND")
+    if suggestion.suggested_qty is None:
+        raise ValueError("SUGGESTION_DATA_INCOMPLETE")
+    if suggestion.as_of_date >= window_end:
+        raise ValueError("EVALUATION_WINDOW_BEFORE_SUGGESTION")
+    days = (window_end - window_start).days + 1
+    rows = db.scalars(select(DailySkuSale).where(
+        DailySkuSale.workspace_id == workspace_id,
+        DailySkuSale.internal_sku_id == suggestion.sku_id,
+        DailySkuSale.sales_date >= window_start,
+        DailySkuSale.sales_date <= window_end,
+    )).all()
+    complete_days = {row.sales_date for row in rows if row.data_completeness == "complete"}
+    snapshot = {
+        "suggestion_id": suggestion.id,
+        "suggested_qty": suggestion.suggested_qty,
+        "formula_version": suggestion.formula_version,
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "sales": [{"date": row.sales_date.isoformat(), "net_qty": row.net_qty, "data_completeness": row.data_completeness} for row in sorted(rows, key=lambda item: item.sales_date)],
+    }
+    source_hash = _canonical_hash(snapshot)
+    existing = db.scalar(select(ReplenishmentEvaluation).where(
+        ReplenishmentEvaluation.workspace_id == workspace_id,
+        ReplenishmentEvaluation.suggestion_id == suggestion.id,
+        ReplenishmentEvaluation.window_start == window_start,
+        ReplenishmentEvaluation.window_end == window_end,
+        ReplenishmentEvaluation.formula_version == suggestion.formula_version,
+        ReplenishmentEvaluation.source_snapshot_hash == source_hash,
+    ))
+    if existing is not None:
+        return existing
+    complete = len(complete_days) == days
+    actual = sum(row.net_qty for row in rows) if complete else None
+    status = "evaluated" if complete else "insufficient"
+    evaluation = ReplenishmentEvaluation(
+        workspace_id=workspace_id, suggestion_id=suggestion.id, sku_id=suggestion.sku_id, warehouse_id=suggestion.warehouse_id,
+        formula_version=suggestion.formula_version, suggested_qty=suggestion.suggested_qty,
+        window_start=window_start, window_end=window_end, actual_sales_qty=actual,
+        absolute_error=abs(actual - suggestion.suggested_qty) if actual is not None else None,
+        evaluation_status=status, data_completeness="complete" if complete else "insufficient",
+        source_snapshot_hash=source_hash, source_snapshot_json=json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+        source_mode=source_mode, simulated=simulated,
+    )
+    db.add(evaluation)
+    db.commit()
+    db.refresh(evaluation)
+    return evaluation
+
+
+def list_replenishment_evaluations(db: Session, *, workspace_id: int, suggestion_id: int | None = None, warehouse_id: int | None = None, sku_id: int | None = None, status: str | None = None, limit: int = 20, offset: int = 0):
+    from app.db import ReplenishmentEvaluation
+    filters = [ReplenishmentEvaluation.workspace_id == workspace_id]
+    if suggestion_id is not None: filters.append(ReplenishmentEvaluation.suggestion_id == suggestion_id)
+    if warehouse_id is not None: filters.append(ReplenishmentEvaluation.warehouse_id == warehouse_id)
+    if sku_id is not None: filters.append(ReplenishmentEvaluation.sku_id == sku_id)
+    if status: filters.append(ReplenishmentEvaluation.evaluation_status == status)
+    from sqlalchemy import func
+    total = db.scalar(select(func.count(ReplenishmentEvaluation.id)).where(*filters)) or 0
+    rows = db.scalars(select(ReplenishmentEvaluation).where(*filters).order_by(ReplenishmentEvaluation.id.desc()).offset(offset).limit(limit)).all()
+    return rows, int(total)
+
+
 def list_suggestions(db: Session, *, workspace_id: int, warehouse_id: int | None = None, warehouse_ids: list[int] | tuple[int, ...] | None = None, status: str | None = None, sku_id: int | None = None, limit: int = 100, offset: int = 0):
     filters = [ReplenishmentSuggestion.workspace_id == workspace_id]
     if warehouse_id is not None:
         filters.append(ReplenishmentSuggestion.warehouse_id == warehouse_id)
     elif warehouse_ids is not None:
-        # Apply the employee's warehouse scope in SQL, before count/pagination.
         filters.append(ReplenishmentSuggestion.warehouse_id.in_(warehouse_ids))
     if status:
         filters.append(ReplenishmentSuggestion.status == status)

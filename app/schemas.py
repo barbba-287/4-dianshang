@@ -383,7 +383,6 @@ class InboundReceiveLine(BaseModel):
 class InboundReceive(BaseModel):
     lines: list[InboundReceiveLine] = Field(min_length=1)
     note: str | None = Field(default=None, max_length=1000)
-    note: str | None = Field(default=None, max_length=1000)
 
 
 class InboundLineResponse(BaseModel):
@@ -668,6 +667,37 @@ class ReplenishmentSuggestionResponse(BaseModel):
     version: int
     created_at: datetime
     updated_at: datetime
+
+
+class ReplenishmentEvaluationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    workspace_id: int
+    suggestion_id: int
+    sku_id: int
+    warehouse_id: int
+    formula_version: str
+    suggested_qty: int
+    window_start: date
+    window_end: date
+    actual_sales_qty: int | None
+    stockout_days: int | None
+    post_replenishment_coverage_days: Decimal | None
+    absolute_error: int | None
+    evaluation_status: str
+    data_completeness: str
+    source_snapshot_hash: str
+    source_mode: str
+    simulated: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReplenishmentEvaluationPage(BaseModel):
+    items: list[ReplenishmentEvaluationResponse]
+    page: int
+    page_size: int
+    total: int
 
 
 class ReplenishmentSuggestionPage(BaseModel):

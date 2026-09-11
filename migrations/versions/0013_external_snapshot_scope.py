@@ -108,11 +108,10 @@ def upgrade() -> None:
     with op.batch_alter_table("external_inventory_snapshots") as batch:
         if "uq_external_snapshot_workspace_identity" in constraints:
             batch.drop_constraint("uq_external_snapshot_workspace_identity", type_="unique")
-        if "uq_external_snapshot_workspace_identity" not in constraints:
-            batch.create_unique_constraint(
-                "uq_external_snapshot_workspace_identity",
-                ["workspace_id", "platform", "account_ref", "store_ref_key", "warehouse_ref_key", "external_sku", "as_of", "payload_hash"],
-            )
+        batch.create_unique_constraint(
+            "uq_external_snapshot_workspace_identity",
+            ["workspace_id", "platform", "account_ref", "store_ref_key", "warehouse_ref_key", "external_sku", "as_of", "payload_hash"],
+        )
         if "uq_external_snapshot_workspace_key" not in constraints:
             batch.create_unique_constraint(
                 "uq_external_snapshot_workspace_key",

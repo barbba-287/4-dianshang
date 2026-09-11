@@ -1,15 +1,5 @@
 # 本地开发数据库迁移
 
-本项目第一周使用 SQLAlchemy `Base.metadata.create_all()` 管理最小 Schema，适合从零快速启动。表结构定义位于 `app/db.py`，初始化命令为：
+本项目使用 Alembic 管理版本化迁移，命令入口见 `README.md` 的“数据库迁移”段落。`app/db.py` 顶层 ORM 是单一事实源；`Base.metadata.create_all()` 仅在测试 fixture 或本地 seed 阶段作为兜底，绝不替代生产迁移链路。
 
-```bash
-python init_db.py
-```
-
-当前表：
-
-- `products`：商品当前快照，`source + external_product_id` 唯一。
-- `product_price_history`：价格变化历史。
-- `crawl_jobs`：采集任务状态、游标、重试和错误信息。
-
-后续接入真实环境前，再引入 Alembic 管理版本化迁移；第一周不为迁移工具增加额外复杂度。
+当前 Alembic head：`0015_replenishment_evaluations`。

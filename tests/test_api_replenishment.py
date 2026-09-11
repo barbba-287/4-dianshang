@@ -193,3 +193,26 @@ def test_replenishment_api_requires_idempotency(client):
     )
     assert missing.status_code == 422
     assert missing.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+def test_replenishment_evaluation_records_observation_window(client):
+    client, _workspace_id, warehouse_id, sku_id = client
+    suggested = client.post(
+        "/api/replenishment/suggestions/generate",
+        json={"warehouse_id": warehouse_id, "sku_id": sku_id, "coverage_days": 7, "as_of_date": "2026-09-10"},
+        headers={"Idempotency-Key": "eval-gen-001"},
+    )
+    assert suggested.status_code == 201, suggested.text
+    suggestion_id = suggested.json()["id"]
+    evaluated = client.post(
+        f"/api/analytics/replenishment-evaluation?suggestion_id={suggestion_id}&window_start=2026-09-11&window_end=2026-09-17",
+    )
+    assert evaluated.status_code == 201, evaluated.text
+    body = evaluated.json()
+    assert body["evaluation_status"] in {"evaluated", "insufficient"}
+    assert body["suggestion_id"] == suggestion_id
+    listing = client.get(f"/api/analytics/replenishment-evaluation?suggestion_id={suggestion_id}")
+    assert listing.status_code == 200
+    assert any(item["id"] == body["id"] for item in listing.json()["items"])
+    inventory = client.get("/api/inventory")
+    assert inventory.status_code == 200
+

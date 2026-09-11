@@ -108,6 +108,8 @@ from app.schemas import (
     ReplenishmentDecisionRequest,
     ReplenishmentSuggestionResponse,
     ReplenishmentSuggestionPage,
+    ReplenishmentEvaluationPage,
+    ReplenishmentEvaluationResponse,
     PurchaseRequestCreate,
     PurchaseRequestDraftCreate,
     PurchaseRequestDraftUpdate,
@@ -1006,6 +1008,7 @@ def _warehouse_error(exc: ValueError) -> HTTPException:
         "INBOUND_LINES_MISMATCH": "实收明细与入库单不匹配",
         "DAMAGED_QTY_INVALID": "破损数量不能大于实收数量",
         "INBOUND_ALREADY_RECEIVED": "入库单已提交收货",
+        "IDEMPOTENCY_KEY_REQUIRED": "必须提供 Idempotency-Key",
         "INVALID_INBOUND_STATE": "当前入库单状态不允许此操作",
     }
     return HTTPException(status_code=status, detail={"code": code, "message": messages.get(code, "仓储操作失败")})
@@ -1126,6 +1129,9 @@ def list_inbounds(
 @app.post("/api/inbounds/{inbound_id}/receive", response_model=InboundResponse)
 def receive_inbound(inbound_id: int, payload: InboundReceive, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, permission="inbound.receive")
+    key = request.headers.get("Idempotency-Key")
+    if not key or not key.strip():
+        raise _warehouse_error(ValueError("IDEMPOTENCY_KEY_REQUIRED"))
     from app.repository import _inbound_response_data, receive_inbound as receive_inbound_record
     try:
         existing = db.scalar(select(InboundOrder).where(InboundOrder.id == inbound_id, InboundOrder.workspace_id == principal.workspace_id))
@@ -1136,7 +1142,7 @@ def receive_inbound(inbound_id: int, payload: InboundReceive, request: Request, 
             db,
             inbound_id=inbound_id,
             lines=[item.model_dump() for item in payload.lines],
-            idempotency_key=request.headers.get("Idempotency-Key"),
+            idempotency_key=key,
             payload_hash=sha256(payload.model_dump_json().encode()).hexdigest(),
             workspace_id=principal.workspace_id,
         )
@@ -1392,7 +1398,10 @@ def _replenishment_error(exc: ValueError) -> HTTPException:
     code = str(exc)
     if str(exc) == "IDEMPOTENCY_KEY_REQUIRED":
         return HTTPException(status_code=422, detail={"code": str(exc), "message": "必须提供 Idempotency-Key"})
-    status = 404 if code.endswith("NOT_FOUND") else 409 if code in {"OPEN_SUGGESTION_EXISTS", "IDEMPOTENCY_KEY_REUSE", "SUGGESTION_VERSION_CONFLICT", "INVALID_SUGGESTION_STATE", "SUGGESTION_NOT_READY", "MIXED_WAREHOUSE", "SUGGESTION_ALREADY_SUBMITTED", "SUGGESTION_ALREADY_IN_PURCHASE_REQUEST", "INVALID_PURCHASE_REQUEST_STATE", "PURCHASE_REQUEST_VERSION_CONFLICT", "SUGGESTION_STALE"} else 422
+    special = {"OPEN_SUGGESTION_EXISTS", "IDEMPOTENCY_KEY_REUSE", "SUGGESTION_VERSION_CONFLICT", "INVALID_SUGGESTION_STATE", "SUGGESTION_NOT_READY", "MIXED_WAREHOUSE", "SUGGESTION_ALREADY_SUBMITTED", "SUGGESTION_ALREADY_IN_PURCHASE_REQUEST", "INVALID_PURCHASE_REQUEST_STATE", "PURCHASE_REQUEST_VERSION_CONFLICT", "SUGGESTION_STALE"}
+    status = 404 if code.endswith("NOT_FOUND") else 409 if code in special else 422
+    if code in {"INVALID_EVALUATION_WINDOW", "EVALUATION_WINDOW_BEFORE_SUGGESTION", "SUGGESTION_DATA_INCOMPLETE"}:
+        status = 422
     return HTTPException(status_code=status, detail={"code": code, "message": "补货决策操作失败"})
 
 
@@ -1415,7 +1424,61 @@ def _purchase_request_response(db: Session, request_record):
     })
 
 
-@app.get("/api/replenishment/suggestions", response_model=ReplenishmentSuggestionPage)
+@app.get("/api/analytics/replenishment-evaluation", response_model=ReplenishmentEvaluationPage)
+def list_replenishment_evaluations_api(
+    request: Request,
+    suggestion_id: int | None = Query(default=None, gt=0),
+    warehouse_id: int | None = Query(default=None, gt=0),
+    sku_id: int | None = Query(default=None, gt=0),
+    status: str | None = Query(default=None, max_length=16),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    principal = require_principal(request, permission="replenishment.read")
+    if warehouse_id is not None:
+        require_warehouse_access(principal, warehouse_id, db=db)
+    from app.replenishment import list_replenishment_evaluations
+    rows, total = list_replenishment_evaluations(
+        db, workspace_id=principal.workspace_id, suggestion_id=suggestion_id,
+        warehouse_id=warehouse_id, sku_id=sku_id, status=status,
+        limit=page_size, offset=(page - 1) * page_size,
+    )
+    return ReplenishmentEvaluationPage(
+        items=[ReplenishmentEvaluationResponse.model_validate(item) for item in rows],
+        page=page, page_size=page_size, total=total,
+    )
+
+
+@app.post("/api/analytics/replenishment-evaluation", response_model=ReplenishmentEvaluationResponse, status_code=201)
+def evaluate_replenishment_api(
+    suggestion_id: int = Query(..., gt=0),
+    window_start: date = Query(...),
+    window_end: date = Query(...),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    principal = require_principal(request, permission="replenishment.read")
+    from app.replenishment import evaluate_replenishment
+    from app.db import ReplenishmentSuggestion
+    try:
+        suggestion = db.scalar(select(ReplenishmentSuggestion).where(
+            ReplenishmentSuggestion.id == suggestion_id,
+            ReplenishmentSuggestion.workspace_id == principal.workspace_id,
+        ))
+        if suggestion is None:
+            raise ValueError("SUGGESTION_NOT_FOUND")
+        require_warehouse_access(principal, suggestion.warehouse_id, db=db)
+        result = evaluate_replenishment(
+            db, workspace_id=principal.workspace_id, suggestion_id=suggestion_id,
+            window_start=window_start, window_end=window_end,
+        )
+        return ReplenishmentEvaluationResponse.model_validate(result)
+    except ValueError as exc:
+        raise _replenishment_error(exc) from exc
+
+
+
 def list_replenishment_suggestions(request: Request, warehouse_id: int | None = Query(default=None, gt=0), sku_id: int | None = Query(default=None, gt=0), status: str | None = Query(default=None, max_length=16), page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)):
     principal = require_principal(request, permission="replenishment.read")
     if warehouse_id is not None: require_warehouse_access(principal, warehouse_id, db=db)
@@ -1755,7 +1818,6 @@ def external_inventory_ingest(payload: ExternalInventoryIngestRequest, request: 
     try:
         records = load_records(payload.content, platform=payload.platform, source_mode=payload.source_mode)
         account_ref, store_ref, _warehouse_ref = validate_inventory_batch_scope(records)
-        run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=payload.platform, sync_type="inventory", account_ref=account_ref, store_ref=store_ref, source_mode=payload.source_mode)
         run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=payload.platform, sync_type="inventory", account_ref=account_ref, store_ref=store_ref, source_mode=payload.source_mode)
         result = ingest_inventory(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
         complete_sync_run(db, run, result)

@@ -114,6 +114,18 @@ def _create_inbound(client, warehouse_id, sku_id, reference_no="IN-001", expecte
     return response.json()
 
 
+def test_receive_requires_idempotency_key(client):
+    sku = _create_sku(client, "TEA-NO-KEY")
+    warehouse = _create_warehouse(client, "OWN-NO-KEY")
+    inbound = _create_inbound(client, warehouse["id"], sku["id"], "IN-NO-KEY", 2)
+    response = client.post(
+        f"/api/inbounds/{inbound['id']}/receive",
+        json={"lines": [{"sku_id": sku["id"], "received_qty": 2, "damaged_qty": 0}]},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+
+
 def test_inbound_receive_confirm_updates_inventory_once(client):
     sku = client.post(
         "/api/skus",
@@ -153,6 +165,7 @@ def test_inbound_receive_confirm_updates_inventory_once(client):
     received = client.post(
         f"/api/inbounds/{inbound_id}/receive",
         json={"lines": [{"sku_id": sku_id, "received_qty": 98, "damaged_qty": 3}]},
+        headers={"Idempotency-Key": "receive-001"},
     )
     assert received.status_code == 200, received.text
     received_body = received.json()
@@ -230,6 +243,7 @@ def test_inbound_validates_damaged_quantity(client):
     response = client.post(
         f"/api/inbounds/{inbound['id']}/receive",
         json={"lines": [{"sku_id": sku["id"], "received_qty": 1, "damaged_qty": 2}]},
+        headers={"Idempotency-Key": "receive-invalid-001"},
     )
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "DAMAGED_QTY_INVALID"
@@ -300,6 +314,7 @@ def test_receive_idempotency_and_line_validation(client):
     mismatch = client.post(
         f"/api/inbounds/{missing_line['id']}/receive",
         json={"lines": [{"sku_id": 9999, "received_qty": 1, "damaged_qty": 0}]},
+        headers={"Idempotency-Key": "receive-mismatch-001"},
     )
     assert mismatch.status_code == 422
     assert mismatch.json()["detail"]["code"] == "INBOUND_LINES_MISMATCH"
@@ -307,6 +322,7 @@ def test_receive_idempotency_and_line_validation(client):
     not_found = client.post(
         "/api/inbounds/9999/receive",
         json={"lines": [{"sku_id": sku["id"], "received_qty": 1, "damaged_qty": 0}]},
+        headers={"Idempotency-Key": "receive-not-found-001"},
     )
     assert not_found.status_code == 404
     assert not_found.json()["detail"]["code"] == "INBOUND_NOT_FOUND"
@@ -322,6 +338,7 @@ def test_inventory_filters_pagination_and_confirmed_fields(client):
     client.post(
         f"/api/inbounds/{first['id']}/receive",
         json={"lines": [{"sku_id": sku_one["id"], "received_qty": 5, "damaged_qty": 1}]},
+        headers={"Idempotency-Key": "receive-filter-001"},
     )
     confirmed = client.post(f"/api/inbounds/{first['id']}/confirm", json={})
     assert confirmed.status_code == 200
@@ -331,6 +348,7 @@ def test_inventory_filters_pagination_and_confirmed_fields(client):
     client.post(
         f"/api/inbounds/{second['id']}/receive",
         json={"lines": [{"sku_id": sku_two["id"], "received_qty": 3, "damaged_qty": 0}]},
+        headers={"Idempotency-Key": "receive-filter-002"},
     )
     client.post(f"/api/inbounds/{second['id']}/confirm", json={})
 
@@ -361,6 +379,7 @@ def test_confirm_rolls_back_inventory_when_write_fails(client, monkeypatch):
     received = client.post(
         path,
         json={"lines": [{"sku_id": sku["id"], "received_qty": 4, "damaged_qty": 1}]},
+        headers={"Idempotency-Key": "receive-rollback-001"},
     )
     assert received.status_code == 200
 

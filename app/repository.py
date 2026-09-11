@@ -632,6 +632,8 @@ def receive_inbound(
     payload_hash: str | None = None,
     workspace_id: int | None = None,
 ) -> tuple[InboundOrder, list[InboundLine]]:
+    if not idempotency_key or not idempotency_key.strip():
+        raise ValueError("IDEMPOTENCY_KEY_REQUIRED")
     result = get_inbound(db, inbound_id=inbound_id, workspace_id=workspace_id)
     if result is None:
         raise ValueError("INBOUND_NOT_FOUND")

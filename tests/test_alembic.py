@@ -80,6 +80,14 @@ def test_alembic_upgrade_head_creates_all_tables(tmp_path):
         "inventory_policies",
     }
     assert expected_rbac_tables.issubset(tables), f"missing: {expected_rbac_tables - tables}"
+    expected_eval_tables = {
+        "replenishment_suggestions",
+        "purchase_requests",
+        "purchase_request_lines",
+        "purchase_request_actions",
+        "replenishment_evaluations",
+    }
+    assert expected_eval_tables.issubset(tables), f"missing: {expected_eval_tables - tables}"
     assert "workspace_id" in {column["name"] for column in inspector.get_columns("warehouses")}
 
 
@@ -91,7 +99,7 @@ def test_alembic_current_shows_head(tmp_path):
 
     current = _run_alembic(["current"], database_url=db_url)
     assert current.returncode == 0
-    assert "0014_purchase_request_drafts" in current.stdout
+    assert "0015_replenishment_evaluations" in current.stdout
     assert "head" in current.stdout
 
 

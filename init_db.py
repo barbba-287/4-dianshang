@@ -73,6 +73,7 @@ _REQUIRED_TABLES = {
     "purchase_requests",
     "purchase_request_lines",
     "purchase_request_actions",
+    "replenishment_evaluations",
 }
 _REQUIRED_CRAWL_COLUMNS = {
     "type",

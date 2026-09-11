@@ -743,6 +743,38 @@ class ReplenishmentSuggestion(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ReplenishmentEvaluation(Base):
+    __tablename__ = "replenishment_evaluations"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "suggestion_id", "window_start", "window_end", "formula_version", "source_snapshot_hash",
+            name="uq_replenishment_evaluation_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    suggestion_id: Mapped[int] = mapped_column(ForeignKey("replenishment_suggestions.id"), nullable=False, index=True)
+    sku_id: Mapped[int] = mapped_column(ForeignKey("product_skus.id"), nullable=False, index=True)
+    warehouse_id: Mapped[int] = mapped_column(ForeignKey("warehouses.id"), nullable=False, index=True)
+    formula_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    suggested_qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    window_start: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    window_end: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    actual_sales_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stockout_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    post_replenishment_coverage_days: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    absolute_error: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evaluation_status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    data_completeness: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    source_snapshot_hash: Mapped[str] = mapped_column(String(72), nullable=False, index=True)
+    source_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    source_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="mock")
+    simulated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ReplenishmentSuggestionAction(Base):
     __tablename__ = "replenishment_suggestion_actions"
     __table_args__ = (
@@ -871,6 +903,7 @@ def backfill_legacy_workspace(db, workspace_id: int) -> int:
         ReplenishmentSuggestionAction,
         PurchaseRequest,
         PurchaseRequestLine,
+        ReplenishmentEvaluation,
     )
     changed = 0
     for model in models:
@@ -917,7 +950,7 @@ def init_db() -> None:
             "external_accounts", "external_product_mappings", "external_orders",
             "external_order_lines", "daily_sku_sales", "replenishment_suggestions",
             "replenishment_suggestion_actions", "purchase_requests",
-            "purchase_request_lines", "purchase_request_actions", "workspaces",
+            "purchase_request_lines", "purchase_request_actions", "replenishment_evaluations", "workspaces",
             "user_accounts", "workspace_memberships", "warehouse_access",
             "auth_sessions",
         }
