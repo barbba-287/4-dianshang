@@ -1453,6 +1453,42 @@ def list_replenishment_evaluations_api(
     )
 
 
+@app.get("/api/analytics/sales")
+def analytics_sales(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    principal = require_principal(request, permission="analytics.read")
+    from app.analytics import build_sales_summary
+    return build_sales_summary(db, workspace_id=principal.workspace_id)
+
+
+@app.get("/api/analytics/inventory-health")
+def analytics_inventory_health(
+    request: Request,
+    coverage_days: int = Query(default=14),
+    warehouse_id: int | None = Query(default=None, gt=0),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    principal = require_principal(request, permission="analytics.read")
+    if warehouse_id is not None:
+        require_warehouse_access(principal, warehouse_id, db=db)
+    from app.analytics import build_inventory_health
+    body = build_inventory_health(
+        db,
+        workspace_id=principal.workspace_id,
+        coverage_days=coverage_days,
+        warehouse_id=warehouse_id,
+        limit=page_size,
+        offset=(page - 1) * page_size,
+    )
+    body["page"] = page
+    body["page_size"] = page_size
+    return body
+
+
 @app.get("/api/analytics/product-quadrant", response_model=ProductQuadrantResponse)
 def product_quadrant(
     request: Request,

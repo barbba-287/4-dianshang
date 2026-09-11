@@ -231,3 +231,59 @@ def _aggregate(rows: list[DailySkuSale], window_days: int, complete: bool) -> di
         "data_completeness": "complete" if complete else "insufficient",
         "quality_reason": None if complete else "INCOMPLETE_COVERAGE",
     }
+
+
+def build_sales_summary(db: Session, *, workspace_id: int, as_of: date | None = None) -> dict:
+    from app.dashboard import build_sales_summary as _build
+    return _build(db, workspace_id=workspace_id, as_of=as_of)
+
+
+def build_inventory_health(
+    db: Session,
+    *,
+    workspace_id: int,
+    coverage_days: int = 14,
+    as_of: date | None = None,
+    warehouse_id: int | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict:
+    from app.dashboard import build_sku_health
+    rows = build_sku_health(
+        db,
+        workspace_id=workspace_id,
+        coverage_days=coverage_days,
+        as_of=as_of,
+        warehouse_ids=None if warehouse_id is None else (warehouse_id,),
+    )
+    total = len(rows)
+    page_rows = rows[offset : offset + limit]
+    summary = {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "coverage_days": coverage_days,
+        "by_status": {},
+        "unsupported_metrics": ["inventory-health 仅使用 InventoryBalance.on_hand_qty 和 DailySkuSale 完整覆盖日，缺数据归 data_insufficient/no_sales/insufficient，不补零"],
+    }
+    for row in rows:
+        status = row.get("status") or "unknown"
+        summary["by_status"][status] = summary["by_status"].get(status, 0) + 1
+    return {"summary": summary, "items": page_rows}
+
+
+def build_inventory_chart(db: Session, *, workspace_id: int, warehouse_id: int | None = None, limit: int = 10) -> dict:
+    from app.dashboard import _inventory_chart as _chart
+    return _chart(db, workspace_id=workspace_id, warehouse_id=warehouse_id, limit=limit)
+
+
+def build_sales_trend(
+    db: Session,
+    *,
+    workspace_id: int,
+    as_of: date,
+    days: int,
+    sku_id: int | None = None,
+) -> dict:
+    from app.dashboard import _sales_trend as _trend
+    return _trend(db, workspace_id=workspace_id, as_of=as_of, days=days, sku_id=sku_id)
