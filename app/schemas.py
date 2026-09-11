@@ -669,6 +669,63 @@ class ReplenishmentSuggestionResponse(BaseModel):
     updated_at: datetime
 
 
+class ProductQuadrantWindows(BaseModel):
+    short: dict
+    long: dict
+    baseline: dict
+    days: dict
+    as_of: date
+    business_timezone: str = "UTC"
+
+
+class ProductQuadrantItem(BaseModel):
+    sku_id: int
+    sku_code: str
+    product_id: int
+    product_title: str | None
+    category: str | None
+    platform: str | None
+    on_hand_qty: int
+    days_of_inventory: float | None
+    growth_rate: float | None
+    growth_numerator: int | None
+    growth_denominator: int | None
+    quadrant: str
+    data_completeness: str
+    reason: str | None
+    windows: ProductQuadrantWindows
+
+
+class ProductQuadrantSummary(BaseModel):
+    focal_supplement: int = 0
+    healthy: int = 0
+    watch: int = 0
+    slow_risk: int = 0
+    insufficient: int = 0
+    total_scored: int = 0
+
+
+class ProductQuadrantResponse(BaseModel):
+    as_of: date
+    business_timezone: str
+    growth_window: int
+    baseline_window: int
+    days_window: int
+    growth_high: float
+    days_low: float
+    summary: ProductQuadrantSummary
+    items: list[ProductQuadrantItem]
+    unsupported_metrics: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class ProductQuadrantPage(BaseModel):
+    items: list[ProductQuadrantItem]
+    page: int
+    page_size: int
+    total: int
+
+
 class ReplenishmentEvaluationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

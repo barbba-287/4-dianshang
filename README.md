@@ -25,7 +25,7 @@
 | 运营驾驶舱与补货闭环 | 单仓 SKU 健康、确定性补货建议、确认/修改/忽略、内部采购申请幂等提交；采购提交不自动入库 |
 | 淘宝只读 Adapter | 只读协议、脱敏 fixture、能力查询和离线 preview；真实网络默认关闭，不提供下单/付款/退款/改价/库存写回 |
 | 离线多平台同步编排 | JSON/CSV/mock 订单+库存 bundle、ExternalSyncRun 成功/失败、账户/店铺一致性校验和幂等回放 |
-| 测试基线 | 当前全量回归 `156 passed`；当前 Alembic head `0014_purchase_request_drafts`（MySQL 迁移未在本次环境验证） |
+| 测试基线 | 当前全量回归 `165 passed`；当前 Alembic head `0015_replenishment_evaluations`（MySQL 迁移未在本次环境验证） |
 | 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：已确认内部库存、入库状态/数量、销量摘要、SKU 健康、补货建议、失败任务、口径限制和模拟数据提示 |
 
 当前版本已完成员工账户、基础 workspace/RBAC、统一外部事实层、补货决策闭环和离线多平台同步编排。外部订单、销量、库存快照和采购申请均按 workspace 隔离；采购申请提交不会直接修改内部库存。仓库列表、入库、库存和新事实层接口均从当前 session 的 workspace 获取边界。
@@ -307,6 +307,8 @@ python -m app.cli seed-demo --workspace demo-shop
 | GET | `/api/dashboard/summary` | 运营概览聚合（已确认库存、入库状态/数量、失败任务和能力边界说明） |
 | GET | `/dashboard` | 运营看板页面（仅管理员/运营） |
 | GET | `/customer-service` | 客服知识页面（按角色显示可用导航） |
+| GET | `/api/analytics/replenishment-evaluation` | 补货建议偏差评估（按窗口、状态过滤；当前为规则建议评估，不宣称 AI 准确率） |
+| GET | `/api/analytics/product-quadrant` | 商品表现四象限（销量增长率 × 库存覆盖天数；只读 BI 指标，缺失数据归 `insufficient`） |
 
 ### 外部连接器与离线同步演示
 
@@ -473,10 +475,11 @@ python -m app.cli external-preview --platform taobao --mode json --file examples
 
 - 统一外部事实层：`0010_external_sales_facts`
 - 补货决策闭环：`0011_replenishment_loop`
+- 补货建议偏差评估快照：`0015_replenishment_evaluations`（按 workspace、suggestion、window、公式版本和快照哈希去重；只读、缺数据返回 insufficient，不写库存）
 - 淘宝只读 Adapter、能力查询和 fixture preview：真实网络默认关闭
 - 离线多平台同步编排：订单+库存 fixture bundle、ExternalSyncRun、失败收尾和幂等回放
-- 当前回归：`156 passed`
-- 当前 Alembic head：`0014_purchase_request_drafts`（MySQL 迁移未在本次环境验证）
+- 当前回归：`160 passed`
+- 当前 Alembic head：`0015_replenishment_evaluations`（MySQL 迁移未在本次环境验证）
 
 后续工作优先级：
 

@@ -110,6 +110,9 @@ from app.schemas import (
     ReplenishmentSuggestionPage,
     ReplenishmentEvaluationPage,
     ReplenishmentEvaluationResponse,
+    ProductQuadrantItem,
+    ProductQuadrantPage,
+    ProductQuadrantResponse,
     PurchaseRequestCreate,
     PurchaseRequestDraftCreate,
     PurchaseRequestDraftUpdate,
@@ -1448,6 +1451,39 @@ def list_replenishment_evaluations_api(
         items=[ReplenishmentEvaluationResponse.model_validate(item) for item in rows],
         page=page, page_size=page_size, total=total,
     )
+
+
+@app.get("/api/analytics/product-quadrant", response_model=ProductQuadrantResponse)
+def product_quadrant(
+    request: Request,
+    as_of: date | None = Query(default=None),
+    growth_window: int = Query(default=7),
+    baseline_window: int = Query(default=14),
+    days_window: int = Query(default=14),
+    warehouse_id: int | None = Query(default=None, gt=0),
+    growth_high: float | None = Query(default=None),
+    days_low: float | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    principal = require_principal(request, permission="analytics.read")
+    if warehouse_id is not None:
+        require_warehouse_access(principal, warehouse_id, db=db)
+    from app.analytics import build_product_quadrant
+    try:
+        summary = build_product_quadrant(
+            db, workspace_id=principal.workspace_id, as_of=as_of,
+            growth_window=growth_window, baseline_window=baseline_window,
+            days_window=days_window, warehouse_id=warehouse_id,
+            growth_high=growth_high, days_low=days_low,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        status = 422 if code.endswith("WINDOW") or code.endswith("RANGE") else 404
+        raise HTTPException(status_code=status, detail={"code": code, "message": "商品四象限参数无效"})
+    items = summary.pop("items")
+    return ProductQuadrantResponse(items=[ProductQuadrantItem.model_validate(item) for item in items[:page_size]], **summary, page=page, page_size=page_size, total=len(items))
 
 
 @app.post("/api/analytics/replenishment-evaluation", response_model=ReplenishmentEvaluationResponse, status_code=201)
