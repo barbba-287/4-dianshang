@@ -64,6 +64,19 @@ def test_home_contains_product_and_warehouse_workflow(client):
     assert 'id="receive-inbound"' not in html
     assert 'id="logout"' in html
     assert 'class="sidebar"></aside>' not in html
+    assert 'href="/assistant"' in html
+    assert 'details class="nav-group"' in html
+    assert 'summary class="nav-group-toggle"' in html
+    assert 'class="nav-icon"' in html
+    assert 'class="nav-text"' in html
+    assert 'class="nav-text"' in html
+    assert 'id="nav-group-' in html
+    for marker in ('product-materials-panel','warehouse-step-base-data','warehouse-step-expected-inbound','warehouse-step-confirmation','warehouse-step-inventory','purchase-workflow'):
+        assert marker in html
+    assert 'status=modified' in html
+    assert '/api/purchase-requests?page_size=100' in html
+    assert '/api/purchase-requests?page_size=100' in html
+    assert '已提交，待人工处理' in html
     assert '<title>运营工作台</title>' in html
     assert '<h1>运营工作台</h1>' in html
     assert '返回工作台' not in html
@@ -76,8 +89,8 @@ def test_navigation_is_filtered_by_employee_role():
     import app.main as main_mod
 
     cases = {
-        "admin": {"/dashboard", "/ops", "/warehouse", "/admin/users", "/customer-service"},
-        "operations": {"/dashboard", "/ops", "/warehouse", "/customer-service"},
+        "admin": {"/dashboard", "/ops", "/assistant", "/warehouse", "/admin/users", "/customer-service"},
+        "operations": {"/dashboard", "/ops", "/assistant", "/warehouse", "/customer-service"},
         "warehouse": {"/warehouse"},
         "customer_service": {"/customer-service"},
         "readonly": {"/customer-service"},
@@ -85,13 +98,14 @@ def test_navigation_is_filtered_by_employee_role():
     labels = {
         "/dashboard": "运营驾驶舱",
         "/ops": "运营工作台",
+        "/assistant": "AI 运营助手",
         "/warehouse": "仓库收货",
         "/admin/users": "成员权限",
         "/customer-service": "客服知识",
     }
     for role, visible_paths in cases.items():
         principal = Principal(subject=role, tenant_id="test", roles=(role,), auth_type="session")
-        html = main_mod._visible_navigation(principal, "/ops")
+        html = main_mod._visible_navigation(principal, "/dashboard")
         for path, label in labels.items():
             if path in visible_paths:
                 assert f'href="{path}"' in html
@@ -100,3 +114,18 @@ def test_navigation_is_filtered_by_employee_role():
                 if path == "/ops":
                     continue
                 assert f'href="{path}"' not in html
+
+
+def test_navigation_contains_real_page_anchors():
+    from app.employee_auth import Principal
+    import app.main as main_mod
+
+    principal = Principal(subject="ops", tenant_id="test", roles=("operations",), auth_type="session")
+    dashboard = main_mod._visible_navigation(principal, "/dashboard")
+    assert 'href="/dashboard#sales-trend-panel"' in dashboard
+    assert 'href="/dashboard#sku-health-panel"' in dashboard
+    assert 'href="/dashboard/sales"' not in dashboard
+    ops = main_mod._visible_navigation(principal, "/ops")
+    assert 'href="/ops#product-materials-panel"' in ops
+    assert 'href="/ops#warehouse-step-confirmation"' in ops
+    assert 'href="/ops/products"' not in ops

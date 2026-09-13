@@ -1,7 +1,7 @@
 """库存看板 API 合同测试。"""
 
 import importlib
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -35,17 +35,47 @@ def client(tmp_path, monkeypatch):
     bg_mod.reset_executor(); cfg.get_settings.cache_clear()
 
 
-def test_dashboard_summary_empty(client):
+def test_dashboard_uses_latest_sales_business_date(client):
+    import app.db as db_mod
+
+    cutoff = date(2026, 9, 7)
+    with db_mod.SessionLocal() as db:
+        warehouse = db_mod.Warehouse(workspace_id=1, code="W-DATE", name="日期仓", warehouse_type="own")
+        db.add(warehouse)
+        db.flush()
+        sku = db_mod.ProductSku(workspace_id=1, product_id=1, sku_code="DATE-SKU")
+        db.add(sku)
+        db.flush()
+        db.add(db_mod.InventoryBalance(workspace_id=1, warehouse_id=warehouse.id, sku_id=sku.id, on_hand_qty=28))
+        account = db_mod.ExternalAccount(workspace_id=1, platform="mock", account_ref="date-account", store_ref="date-store")
+        db.add(account)
+        db.flush()
+        for offset in range(14):
+            sales_date = cutoff - timedelta(days=13 - offset)
+            db.add(db_mod.DailySkuSale(
+                workspace_id=1, external_account_id=account.id, platform="mock",
+                account_ref="date-account", store_ref="date-store", external_sku="DATE-SKU",
+                internal_sku_id=sku.id, sales_date=sales_date, gross_qty=2,
+                cancelled_qty=0, refunded_qty=0, net_qty=2,
+                gross_amount=Decimal("20.00"), refund_amount=Decimal("0"),
+                net_amount=Decimal("20.00"), order_count=1, data_completeness="complete",
+            ))
+        db.commit()
+
     response = client.get("/api/dashboard/summary")
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["kpis"]["product_count"] == 1
-    assert body["kpis"]["on_hand_qty"] == 0
-    assert "gmv" in body["unsupported_metrics"]
-    assert body["recent_inbounds"] == []
+    assert body["sales_summary"]["as_of"] == cutoff.isoformat()
+    item = next(row for row in body["sku_health"] if row["sku_code"] == "DATE-SKU")
+    assert item["sales"]["14"]["daily_avg_qty"] == 2.0
+    assert item["days_of_inventory"] == 14.0
+
+    explicit = client.get("/api/dashboard/summary", params={"as_of": cutoff.isoformat()})
+    assert explicit.status_code == 200, explicit.text
+    assert explicit.json()["sales_summary"]["as_of"] == cutoff.isoformat()
 
 
-def test_dashboard_summary_includes_sync_health_and_workspace_scope(client):
+def test_dashboard_summary_empty(client):
     import json
     import app.db as db_mod
 
@@ -140,8 +170,47 @@ def test_dashboard_sync_health_latest_is_deduplicated(client):
     assert response.status_code == 200
     assert 'id="kpis"' in response.text
     assert 'api/dashboard/summary' in response.text
+    assert '/api/analytics/product-quadrant' in response.text
+    assert 'id="product-quadrant-panel"' in response.text
+    assert 'id="quadrant-chart"' in response.text
+    assert 'id="quadrant-summary"' in response.text
+    assert 'id="quadrant-insufficient"' in response.text
+    assert 'id="quadrant-category-tables"' in response.text
+    assert 'id="quadrant-table-focal_supplement"' in response.text
+    assert 'id="quadrant-table-healthy"' in response.text
+    assert 'id="quadrant-table-watch"' in response.text
+    assert 'id="quadrant-table-slow_risk"' in response.text
+    assert 'function quadrantIsInsufficient' in response.text
+    assert 'item.growth_rate!=null&&item.days_of_inventory!=null' not in response.text
+    assert 'quadrantIsInsufficient(item)' in response.text
+    assert 'growth_window:\'7\'' in response.text
+    assert 'baseline_window:\'14\'' in response.text
+    assert 'page_size:\'100\'' in response.text
+    assert '库存/可售天数按当前选择仓库范围统计，销量未按仓库过滤' in response.text
+    assert 'quadrantChart?.resize()' in response.text
     assert '<title>运营驾驶舱</title>' in response.text
     assert '<h1>运营驾驶舱</h1>' in response.text
+    for marker in ('sales-trend-panel','inventory-risk-panel','product-quadrant-panel','sync-health-panel','sku-health-panel','alerts-panel','recent-inbounds-panel','metric-definitions-panel'):
+        assert f'id="{marker}"' in response.text
     assert response.text.count('id="logout"') == 1
     assert 'id="logout-link"' not in response.text
     assert '商品与补货' not in response.text
+    assert 'id="sync-health-panel"' in response.text
+    assert '/api/external/sync/runs?limit=20' in response.text
+    assert '/api/external/sync/runs/${encodeURIComponent(runId)}/retry' in response.text
+    assert 'Idempotency-Key' in response.text
+    assert 'X-CSRF-Token' in response.text
+    assert 'retryable_resources' in response.text
+    assert 'orders_content' in response.text
+    assert 'inventory_content' in response.text
+
+
+def test_workspace_sidebar_is_fixed_and_scrollable(client):
+    response = client.get('/dashboard')
+    assert response.status_code == 200
+    css = client.get('/static/workspace-shell.css').text
+    assert 'position:fixed' in css
+    assert 'height:100vh' in css
+    assert 'overflow-y:auto' in css
+    assert 'margin-left:232px' in css
+    assert 'margin-left:76px' in css

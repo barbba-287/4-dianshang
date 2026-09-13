@@ -185,6 +185,41 @@ def test_purchase_draft_api_rejects_idempotency_reuse_and_stale_version(client):
     assert current.json()["note"] == "原始备注"
 
 
+def test_replenishment_suggestions_list_route_and_filter(client):
+    client, _workspace_id, warehouse_id, sku_id = client
+    generated = client.post(
+        "/api/replenishment/suggestions/generate",
+        json={"warehouse_id": warehouse_id, "sku_id": sku_id, "coverage_days": 14},
+        headers={"Idempotency-Key": "list-route-generate"},
+    )
+    assert generated.status_code == 201, generated.text
+    suggestion_id = generated.json()["id"]
+    confirmed = client.post(
+        f"/api/replenishment/suggestions/{suggestion_id}/decision",
+        json={"action": "confirm", "expected_version": 1},
+        headers={"Idempotency-Key": "list-route-decision"},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+    response = client.get(
+        "/api/replenishment/suggestions",
+        params={"status": "confirmed", "warehouse_id": warehouse_id, "page_size": 100},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["page"] == 1
+    assert body["page_size"] == 100
+    assert body["total"] == 1
+    assert [item["id"] for item in body["items"]] == [suggestion_id]
+
+
+def test_replenishment_suggestions_route_is_in_openapi(client):
+    client, _workspace_id, _warehouse_id, _sku_id = client
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/api/replenishment/suggestions" in paths
+    assert "get" in paths["/api/replenishment/suggestions"]
+
+
 def test_replenishment_api_requires_idempotency(client):
     client, _workspace_id, warehouse_id, sku_id = client
     missing = client.post(

@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.business_dates import resolve_sales_as_of
 from app.db import (
     CrawlJob,
     InboundLine,
@@ -49,7 +50,7 @@ def _sales_window(db: Session, *, workspace_id: int, start: date, end: date) -> 
 
 
 def build_sales_summary(db: Session, *, workspace_id: int, as_of: date | None = None) -> dict:
-    as_of = as_of or datetime.utcnow().date()
+    as_of = resolve_sales_as_of(db, workspace_id=workspace_id, explicit_as_of=as_of)
     return {
         "windows": {
             "7": _sales_window(db, workspace_id=workspace_id, start=as_of - timedelta(days=6), end=as_of),
@@ -72,7 +73,7 @@ def build_sku_health(
     """Build an explainable SKU health view from internal stock and external sales."""
     from app.db import DailySkuSale
 
-    as_of = as_of or datetime.utcnow().date()
+    as_of = resolve_sales_as_of(db, workspace_id=workspace_id, explicit_as_of=as_of)
     if coverage_days <= 0:
         raise ValueError("INVALID_COVERAGE_DAYS")
     sku_query = select(ProductSku).where(
@@ -247,12 +248,13 @@ def build_dashboard_summary(
     *,
     workspace_id: int,
     days: int = 7,
+    as_of: date | None = None,
     warehouse_id: int | None = None,
     sku_id: int | None = None,
     recent_limit: int = 10,
 ) -> dict:
     now = datetime.utcnow()
-    as_of = now.date()
+    as_of = resolve_sales_as_of(db, workspace_id=workspace_id, explicit_as_of=as_of)
     start = now - timedelta(days=days)
     warehouse_filter = [InboundOrder.workspace_id == workspace_id]
     if warehouse_id is not None:

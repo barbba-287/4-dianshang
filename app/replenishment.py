@@ -23,6 +23,7 @@ from app.db import (
     ReplenishmentEvaluation,
     Warehouse,
 )
+from app.business_dates import resolve_sales_as_of
 
 FORMULA_VERSION = "replenishment.v1"
 OPEN_SLOT = "open"
@@ -88,7 +89,7 @@ def calculate_replenishment(
 ) -> dict:
     if coverage_days not in (7, 14, 30):
         raise ValueError("INVALID_COVERAGE_DAYS")
-    as_of = as_of or datetime.utcnow().date()
+    as_of = resolve_sales_as_of(db, workspace_id=workspace_id, explicit_as_of=as_of)
     _require_warehouse(db, workspace_id=workspace_id, warehouse_id=warehouse_id)
     _require_sku(db, workspace_id=workspace_id, sku_id=sku_id)
     balance = db.scalar(select(InventoryBalance).where(

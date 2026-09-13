@@ -17,6 +17,7 @@ from app.db import (
     ProductSku,
     Warehouse,
 )
+from app.business_dates import resolve_sales_as_of
 
 QUADRANT_FOCAL_SUPPLEMENT = "focal_supplement"
 QUADRANT_HEALTHY = "healthy"
@@ -105,7 +106,7 @@ def build_product_quadrant(
         raise ValueError("INVALID_DAYS_WINDOW")
     if growth_window == baseline_window:
         raise ValueError("INVALID_GROWTH_WINDOW")
-    as_of = as_of or __import__("datetime").datetime.utcnow().date()
+    as_of = resolve_sales_as_of(db, workspace_id=workspace_id, explicit_as_of=as_of)
     thresholds = _resolve_thresholds(growth_high, days_low)
 
     sku_filters = [ProductSku.workspace_id == workspace_id, ProductSku.is_active.is_(True)]
@@ -147,9 +148,9 @@ def build_product_quadrant(
         baseline_rows = [row for row in rows if baseline_start <= row.sales_date <= baseline_end]
         days_rows = [row for row in rows if days_start <= row.sales_date <= as_of]
 
-        short_complete = len(short_rows) >= growth_window and all(row.data_completeness == "complete" for row in short_rows)
-        baseline_complete = len(baseline_rows) >= baseline_window and all(row.data_completeness == "complete" for row in baseline_rows)
-        days_complete = len(days_rows) >= days_window and all(row.data_completeness == "complete" for row in days_rows)
+        short_complete = len({row.sales_date for row in short_rows if row.data_completeness == "complete"}) == growth_window
+        baseline_complete = len({row.sales_date for row in baseline_rows if row.data_completeness == "complete"}) == baseline_window
+        days_complete = len({row.sales_date for row in days_rows if row.data_completeness == "complete"}) == days_window
 
         short_window = _aggregate(short_rows, growth_window, short_complete)
         baseline_window_dict = _aggregate(baseline_rows, baseline_window, baseline_complete)

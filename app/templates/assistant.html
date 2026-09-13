@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 运营助手</title>
+  <link rel="stylesheet" href="/static/workspace-shell.css">
+  <script src="/static/labels.js"></script>
+  <style>
+    .assistant-result { padding: 1rem; background: #fbfcfe; border: 1px solid var(--shell-line); border-radius: .5rem; }
+    .assistant-result table { min-width: 760px; }
+    .assistant-empty { padding: 1rem; color: var(--shell-muted); background: #fbfcfe; border: 1px dashed #cad6e5; border-radius: .5rem; }
+    .assistant-summary { display: flex; flex-wrap: wrap; gap: .6rem; margin: .7rem 0; }
+    .assistant-summary .card { min-width: 130px; }
+    .assistant-shortcuts { display: flex; flex-wrap: wrap; gap: .5rem; margin: .75rem 0; }
+    .assistant-shortcuts button { font-size: .82rem; }
+    .readonly-badge { display: inline-flex; padding: .25rem .55rem; border-radius: 999px; background: #eaf5ee; color: #2f6b4f; font-size: .75rem; }
+    .assistant-note { margin: .7rem 0; color: var(--shell-muted); font-size: .82rem; }
+    .assistant-table-wrap { overflow-x: auto; margin-top: .75rem; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar"></aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="muted">Workspace / <strong>AI 运营助手</strong></div>
+        <span class="readonly-badge">只读模式 · 不接知识库</span>
+      </header>
+      <div class="content">
+        <div class="page-heading">
+          <div>
+            <h1>AI 运营助手</h1>
+            <p class="muted">查询商品、库存健康、补货建议和同步状态；当前不执行任何业务写操作。</p>
+          </div>
+        </div>
+        <section class="panel">
+          <div class="assistant-shortcuts">
+            <button type="button" data-question="哪些 SKU 的库存健康需要关注？">库存健康</button>
+            <button type="button" data-question="当前有哪些补货建议？">补货建议</button>
+            <button type="button" data-question="最近同步状态怎么样？">同步状态</button>
+            <button type="button" data-question="查看商品和 SKU 信息">商品与 SKU</button>
+          </div>
+          <label class="field" for="assistant-message">问题</label>
+          <textarea id="assistant-message" maxlength="2000" rows="3" style="width:100%;padding:.7rem;border:1px solid #cbd7e5;border-radius:.45rem;font:inherit" placeholder="例如：哪些 SKU 的库存健康需要关注？"></textarea>
+          <div class="actions" style="margin-top:.7rem">
+            <button id="assistant-submit" type="button">查询</button>
+            <span id="assistant-status" class="status" role="status"></span>
+          </div>
+        </section>
+        <section class="panel">
+          <h2>查询结果</h2>
+          <div id="assistant-result" class="assistant-result" aria-live="polite">
+            <div class="assistant-empty">等待查询…</div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script>
+    const message = document.querySelector('#assistant-message');
+    const result = document.querySelector('#assistant-result');
+    const status = document.querySelector('#assistant-status');
+    const STATUS = {healthy:'健康', reorder:'建议补货', urgent:'紧急', data_insufficient:'数据不足', no_sales:'无销量', suggested:'待处理', modified:'已调整', confirmed:'已确认', ignored:'已忽略', submitted:'已提交', running:'运行中', succeeded:'成功', failed:'失败', partial:'部分成功', stalled:'停滞'};
+    const COMPLETE = {complete:'完整', insufficient:'数据不足', partial:'部分完整'};
+    const REASON = {LOW_STOCK:'库存偏低', STOCK_SUFFICIENT:'库存充足', INCOMPLETE_COVERAGE:'销量覆盖不完整', NO_SALES:'暂无销量'};
+    const SYNC_TYPE = {orders:'订单同步', inventory:'库存同步', events:'事件同步', fixture_bundle:'订单与库存同步'};
+    const PLATFORM = {taobao:'淘宝', jd:'京东', pdd:'拼多多', douyin:'抖音', amazon:'亚马逊'};
+    function csrfToken() {
+      const item = document.cookie.split('; ').find(value => value.startsWith('dianshang_csrf='));
+      return item ? decodeURIComponent(item.slice('dianshang_csrf='.length)) : '';
+    }
+    function label(value, mapping, fallback='其他') {
+      if (value == null || value === '') return '数据不足';
+      return mapping[value] || `${fallback}（${value}）`;
+    }
+    function display(value, fallback='数据不足') {
+      return value == null || value === '' ? fallback : String(value);
+    }
+    function empty(text) {
+      const el = document.createElement('div');
+      el.className = 'assistant-empty';
+      el.textContent = text;
+      return el;
+    }
+    function makeTable(headers, rows) {
+      const wrap = document.createElement('div');
+      wrap.className = 'assistant-table-wrap';
+      const table = document.createElement('table');
+      const head = table.createTHead().insertRow();
+      headers.forEach(text => { const th = document.createElement('th'); th.textContent = text; head.appendChild(th); });
+      const body = table.createTBody();
+      rows.forEach(row => {
+        const tr = body.insertRow();
+        row.forEach(value => { const td = tr.insertCell(); td.textContent = display(value); });
+      });
+      wrap.appendChild(table);
+      return wrap;
+    }
+    function addSummary(total) {
+      const wrap = document.createElement('div');
+      wrap.className = 'assistant-summary';
+      const card = document.createElement('div');
+      card.className = 'card';
+      const title = document.createElement('div'); title.className = 'card-label'; title.textContent = '结果数量';
+      const value = document.createElement('div'); value.className = 'card-value'; value.textContent = String(total ?? 0);
+      card.append(title, value); wrap.appendChild(card); result.appendChild(wrap);
+    }
+    function renderCatalog(data) {
+      const rows = (data.items || []).map(item => [item.product_title || '未命名商品', item.variant_label || '未设置规格', item.sku_code || '暂无 SKU', item.category || '未分类', item.current_price == null ? '数据不足' : `￥${Number(item.current_price).toFixed(2)}`]);
+      result.appendChild(rows.length ? makeTable(['商品','规格','SKU 编码','分类','售价'], rows) : empty('暂无商品或 SKU 记录'));
+    }
+    function renderInventory(data) {
+      const windowKey = String(data.coverage_days || 14);
+      const rows = (data.items || []).map(item => {
+        const sales = item.sales?.[windowKey] || {};
+        return [item.product_title || '未命名商品', item.variant_label || '未设置规格', item.sku_code, item.on_hand_qty, item.days_of_inventory, item.suggested_replenishment_qty, label(item.status, STATUS), label(item.data_completeness || sales.data_completeness, COMPLETE), label(item.reason, REASON, '未知原因')];
+      });
+      result.appendChild(rows.length ? makeTable(['商品','规格','SKU','库存','可售天数','建议补货','状态','数据完整度','原因'], rows) : empty('暂无 SKU 库存健康记录'));
+    }
+    function renderReplenishment(data) {
+      const rows = (data.items || []).map(item => [item.product_title || '未命名商品', item.variant_label || '未设置规格', item.sku_code || `SKU #${item.sku_id}`, item.warehouse_name || `仓库 #${item.warehouse_id}`, label(item.status, STATUS), item.decision_qty ?? item.suggested_qty, item.on_hand_qty, label(item.data_completeness, COMPLETE), label(item.reason, REASON, '未知原因')]);
+      result.appendChild(rows.length ? makeTable(['商品','规格','SKU','仓库','状态','建议数量','当前库存','数据完整度','原因'], rows) : empty('当前没有可展示的补货建议；这不代表所有 SKU 都无需补货。'));
+    }
+    function renderSync(data) {
+      const rows = (data.latest || []).map(item => [PLATFORM[item.platform] || item.platform || '未知平台', item.store_ref || '默认店铺', item.account_ref || '—', label(item.sync_type, SYNC_TYPE), label(item.status, STATUS), item.error_code || '无']);
+      result.appendChild(rows.length ? makeTable(['平台','店铺','账号','同步类型','状态','错误码'], rows) : empty('暂无同步运行记录'));
+    }
+    function renderAssistantResult(body) {
+      result.replaceChildren();
+      const answer = document.createElement('p'); answer.className = 'assistant-note'; answer.textContent = body.answer || body.error_code || '查询完成'; result.appendChild(answer);
+      if (!body.ok) { result.appendChild(empty(body.answer || '当前查询未完成')); return; }
+      const data = body.data || {}; addSummary(data.total ?? (data.items || []).length);
+      if (body.intent === 'catalog') renderCatalog(data); else if (body.intent === 'inventory_health') renderInventory(data); else if (body.intent === 'replenishment') renderReplenishment(data); else if (body.intent === 'sync_health') renderSync(data);
+      const note = document.createElement('p'); note.className = 'assistant-note'; note.textContent = (body.limitations || []).join('；'); result.appendChild(note);
+    }
+    document.querySelectorAll('[data-question]').forEach(button => button.onclick = () => { message.value = button.dataset.question; message.focus(); });
+    document.querySelector('#assistant-submit').onclick = async () => {
+      const text = message.value.trim();
+      if (!text) { status.className = 'status error'; status.textContent = '请输入查询问题'; return; }
+      const button = document.querySelector('#assistant-submit'); button.disabled = true; status.className = 'status'; status.textContent = '查询中…';
+      try {
+        const response = await fetch('/api/assistant/query', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken()}, body:JSON.stringify({message:text})});
+        const body = await response.json(); if (!response.ok) throw new Error(body.detail?.message || '查询失败');
+        renderAssistantResult(body); status.className = body.ok ? 'status success' : 'status warning'; status.textContent = body.answer || body.error_code || '查询完成';
+      } catch (error) { status.className = 'status error'; status.textContent = error.message || '查询失败'; renderAssistantResult({ok:false, answer:'服务暂时不可用，请稍后重试。'}); }
+      finally { button.disabled = false; }
+    };
+  </script>
+</body>
+</html>

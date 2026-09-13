@@ -25,8 +25,10 @@
 | 运营驾驶舱与补货闭环 | 单仓 SKU 健康、确定性补货建议、确认/修改/忽略、内部采购申请幂等提交；采购提交不自动入库 |
 | 淘宝只读 Adapter | 只读协议、脱敏 fixture、能力查询和离线 preview；真实网络默认关闭，不提供下单/付款/退款/改价/库存写回 |
 | 离线多平台同步编排 | JSON/CSV/mock 订单+库存 bundle、ExternalSyncRun 成功/失败、账户/店铺一致性校验和幂等回放 |
-| 测试基线 | 当前全量回归 `168 passed`；当前 Alembic head `0015_replenishment_evaluations`（MySQL 迁移未在本次环境验证） |
-| 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：已确认内部库存、入库状态/数量、销量摘要、SKU 健康、补货建议、失败任务、口径限制和模拟数据提示 |
+| 测试基线 | 当前全量回归 `176 passed`；当前 Alembic head `0015_replenishment_evaluations`（MySQL 迁移未在本次环境验证） |
+| 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：已确认内部库存、入库状态/数量、销量摘要、SKU 健康、补货建议、失败任务、同步健康、商品表现四象限、口径限制和模拟数据提示 |
+| AI 运营助手 | `/assistant` 与 `/api/assistant/query`：按当前 Workspace 查询商品/SKU、库存健康、补货建议和同步状态；只读结构化查询，不接知识库/RAG，不执行采购或库存写操作 |
+| 页面展示约定 | `/static/labels.js` 为工作台公共枚举中文映射；数据库/API 继续使用原始 code，页面显示中文标签；状态、完整度、原因、级别和同步类型不直接暴露英文枚举 |
 
 当前版本已完成员工账户、基础 workspace/RBAC、统一外部事实层、补货决策闭环和离线多平台同步编排。外部订单、销量、库存快照和采购申请均按 workspace 隔离；采购申请提交不会直接修改内部库存。仓库列表、入库、库存和新事实层接口均从当前 session 的 workspace 获取边界。
 

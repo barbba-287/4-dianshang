@@ -22,7 +22,7 @@ class ModelAdapter(Protocol):
 
 
 class MockAdapter:
-    _INTENTS = ((("库存", "存量", "inventory", "stock"), "get_inventory"), (("健康", "sku", "SKU", "可售天数"), "list_sku_health"), (("补货", "补多少", "replenishment", "restock"), "get_replenishment_evidence"))
+    _INTENTS = ((("补货", "补多少", "replenishment", "restock"), "get_replenishment_evidence"), (("健康", "库存健康", "sku", "SKU", "可售天数"), "list_sku_health"), (("库存", "存量", "inventory", "stock"), "get_inventory"))
 
     def decide(self, message: str, tools: Sequence[AgentTool], observations: Sequence[dict], *, input_hints: dict | None = None) -> ModelDecision:
         if observations:

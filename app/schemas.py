@@ -296,6 +296,21 @@ class AgentToolSpec(BaseModel):
     max_calls_per_minute: int
 
 
+class AssistantQueryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str = Field(min_length=1, max_length=2000)
+
+
+class AssistantQueryResponse(BaseModel):
+    ok: bool
+    intent: str
+    answer: str
+    data: dict | None = None
+    error_code: str | None = None
+    limitations: list[str] = Field(default_factory=list)
+    read_only: bool = True
+
+
 class AgentAssistantRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     input_hints: dict = Field(default_factory=dict)

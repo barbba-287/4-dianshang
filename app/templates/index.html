@@ -5,6 +5,7 @@
   <title>运营工作台</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/static/workspace-shell.css">
+<script src="/static/labels.js"></script>
   <style>
     #products { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .85rem; margin-top: 1rem; }
     .price { color: var(--danger); font-size: 1.2rem; font-weight: 700; } .step { margin-top: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: #fbfcfe; } .step h3 { margin-bottom: .55rem; font-size: .95rem; }
@@ -13,7 +14,7 @@
 <body>
   <div class="shell"><aside class="sidebar"></aside><main class="main"><header class="topbar"><div class="muted">Workspace / <strong>运营工作台</strong></div><div><button id="logout" type="button">退出登录</button></div></header><div class="content"><div class="page-heading"><div><h1>运营工作台</h1><p class="muted">商品资料、仓储入库与补货采购协同。</p></div><button id="crawl" type="button">采集样例商品</button></div><p id="message" class="status" role="status">点击按钮从本地 fixture 采集商品。</p>
 
-  <section aria-labelledby="products-heading">
+  <section id="product-materials-panel" aria-labelledby="products-heading">
     <h2 id="products-heading">商品资料</h2>
     <form id="search" class="row">
       <div class="field"><label for="keyword">商品名称</label><input id="keyword" placeholder="搜索商品名称"></div>
@@ -26,8 +27,7 @@
     <h2 id="warehouse-heading">仓储协同</h2>
     <p id="warehouse-message" class="status" role="status">创建仓库、SKU 和预计入库；仓库反馈后，在这里复核并确认入账。</p>
 
-    <div class="step">
-      <h3>1. 基础资料</h3>
+    <div class="step" id="warehouse-step-base-data">
       <div class="row">
         <div class="field"><label for="warehouse-code">仓库编码</label><input id="warehouse-code" placeholder="例如 OWN-01"></div>
         <div class="field"><label for="warehouse-name">仓库名称</label><input id="warehouse-name" placeholder="例如 自有小仓"></div>
@@ -43,8 +43,7 @@
       <p id="base-data-hint" class="muted">没有仓库或 SKU 时，请先在此处创建；商品采集完成后才能关联 SKU。</p>
     </div>
 
-    <div class="step">
-      <h3>2. 创建预计入库</h3>
+    <div class="step" id="warehouse-step-expected-inbound">
       <div class="row">
         <div class="field"><label for="warehouse-select">仓库</label><select id="warehouse-select"><option value="">暂无仓库</option></select></div>
         <div class="field"><label for="sku-select">SKU</label><select id="sku-select"><option value="">暂无 SKU</option></select></div>
@@ -54,8 +53,7 @@
       </div>
     </div>
 
-    <div class="step">
-      <h3>3. 运营确认入账</h3>
+    <div class="step" id="warehouse-step-confirmation">
       <div class="row">
         <div class="field"><label for="received-inbound-select">待运营确认的入库单</label><select id="received-inbound-select"><option value="">暂无待确认入库单</option></select></div>
         <button id="refresh-received-inbounds" class="secondary" type="button">刷新待确认列表</button>
@@ -66,8 +64,7 @@
       <div id="inbound-result" aria-live="polite"></div>
     </div>
 
-    <div class="step">
-      <h3>4. 当前库存</h3>
+    <div class="step" id="warehouse-step-inventory">
       <div class="row"><button id="refresh-inventory" class="secondary" type="button">刷新库存</button></div>
       <div class="table-wrap"><table><thead><tr><th>仓库</th><th>SKU</th><th>商品 ID</th><th>库存</th><th>更新时间</th></tr></thead><tbody id="inventory-items"></tbody></table></div>
     </div>
@@ -174,22 +171,33 @@
 
     async function loadPurchaseWorkflow() {
       setBusy(refreshPurchasesButton, true);
-      setMessage(purchaseMessage, '正在刷新补货建议与采购草稿…');
+      setMessage(purchaseMessage, '正在刷新补货建议与采购申请…');
       try {
-        const [suggestions, requests] = await Promise.all([
+        const [confirmed, modified, requests] = await Promise.all([
           api('/api/replenishment/suggestions?status=confirmed&page_size=100'),
+          api('/api/replenishment/suggestions?status=modified&page_size=100'),
           api('/api/purchase-requests?page_size=100')
         ]);
-        const drafts = new Map((requests.items || []).map(item => item.lines || []).flat().map(line => [line.suggestion_id, requests.items.find(item => item.lines.includes(line))]));
-        const items = suggestions.items || [];
-        purchaseItems.innerHTML = items.length ? items.map(item => {
-          const request = drafts.get(item.id);
-          const state = request ? `${request.status} #${request.id}` : '未创建草稿';
-          const action = request ? (request.status === 'draft' ? `<button data-purchase-action="submit" data-id="${request.id}" data-version="${request.version}">提交审批</button>` : '已提交审批') : `<button data-purchase-action="draft" data-id="${item.id}">生成草稿</button>`;
-          return `<tr><td>#${escapeHtml(item.id)}<br><span class="muted">${escapeHtml(item.data_completeness)} / ${escapeHtml(item.reason || '')}</span></td><td>仓库 #${escapeHtml(item.warehouse_id)} / SKU #${escapeHtml(item.sku_id)}</td><td>${escapeHtml(item.decision_qty ?? item.suggested_qty ?? '数据不足')}</td><td>${escapeHtml(state)}</td><td>${action}</td></tr>`;
-        }).join('') : '<tr><td colspan="5" class="muted">暂无已确认补货建议</td></tr>';
-        setMessage(purchaseMessage, `已刷新 ${items.length} 条补货建议`, 'success');
-      } catch (error) { setMessage(purchaseMessage, `采购草稿加载失败：${error.message || '网络错误'}`, 'error'); }
+        const suggestions = [...(confirmed.items || []), ...(modified.items || [])];
+        const suggestionById = new Map(suggestions.map(item => [item.id, item]));
+        const requestBySuggestion = new Map();
+        (requests.items || []).forEach(request => (request.lines || []).forEach(line => requestBySuggestion.set(line.suggestion_id, request)));
+        const statusLabel = value => value === 'draft' ? '草稿，待人工复核' : value === 'submitted' ? '已提交，待人工处理' : dianshangLabel(value, DianShangLabels.status, '未知状态');
+        const rows = [];
+        suggestionById.forEach(item => {
+          const request = requestBySuggestion.get(item.id);
+          const state = request ? statusLabel(request.status) : '未创建草稿';
+          const action = request ? (request.status === 'draft' ? `<button data-purchase-action="submit" data-id="${request.id}" data-version="${request.version}">提交人工处理</button>` : '已提交，待人工处理') : `<button data-purchase-action="draft" data-id="${item.id}">生成草稿</button>`;
+          rows.push(`<tr><td>#${escapeHtml(item.id)}<br><span class="muted">${escapeHtml(dianshangLabel(item.data_completeness, DianShangLabels.completeness, '未知完整度'))} / ${escapeHtml(dianshangLabel(item.reason, DianShangLabels.reason, '未知原因'))}</span></td><td>仓库 #${escapeHtml(item.warehouse_id)} / SKU #${escapeHtml(item.sku_id)}</td><td>${escapeHtml(item.decision_qty ?? item.suggested_qty ?? '数据不足')}</td><td>${escapeHtml(state)}</td><td>${action}</td></tr>`);
+        });
+        (requests.items || []).filter(request => !(request.lines || []).some(line => suggestionById.has(line.suggestion_id))).forEach(request => {
+          const line = request.lines?.[0] || {};
+          const state = statusLabel(request.status);
+          rows.push(`<tr><td><strong>${escapeHtml(request.request_no || `采购申请 #${request.id}`)}</strong><br><span class="muted">采购申请</span></td><td>仓库 #${escapeHtml(request.warehouse_id)} / SKU #${escapeHtml(line.sku_id || '数据不足')}</td><td>${escapeHtml(line.requested_qty ?? '数据不足')}</td><td>${escapeHtml(state)}</td><td>${request.status === 'draft' ? `<button data-purchase-action="submit" data-id="${request.id}" data-version="${request.version}">提交人工处理</button>` : '已提交，待人工处理'}</td></tr>`);
+        });
+        purchaseItems.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="5" class="muted">暂无可处理的补货建议或采购申请</td></tr>';
+        setMessage(purchaseMessage, `已刷新 ${rows.length} 条补货/采购记录`, 'success');
+      } catch (error) { setMessage(purchaseMessage, `采购申请加载失败：${error.message || '网络错误'}`, 'error'); }
       finally { setBusy(refreshPurchasesButton, false); }
     }
 
@@ -235,8 +243,8 @@
           await new Promise(resolve => setTimeout(resolve, 250));
           const statusBody = await api(`/api/crawl/${jobId}`);
           if (statusBody.status === 'succeeded') { setMessage(message, '采集完成', 'success'); await loadProducts(); return; }
-          if (['failed', 'cancelled'].includes(statusBody.status)) throw new Error(`${statusBody.error_message || `任务${statusBody.status}`} ${statusBody.error_code ? `[${statusBody.error_code}]` : ''}`);
-          setMessage(message, `正在采集（任务 #${jobId}，${statusBody.status}）…`);
+          if (['failed', 'cancelled'].includes(statusBody.status)) throw new Error(`${statusBody.error_message || `任务${statusBody.status}`} ${statusBody.error_code ? `[${dianshangLabel(statusBody.error_code, DianShangLabels.errorCode, '未知错误')}]` : ''}`);
+          setMessage(message, `正在采集（任务 #${jobId}，${statusLabel(statusBody.status)}）…`);
         }
         throw new Error('采集等待超时，请稍后查看任务状态');
       } catch (error) {

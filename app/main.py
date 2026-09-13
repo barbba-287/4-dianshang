@@ -9,6 +9,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import date
+from typing import Literal
 
 from hashlib import sha256
 import html
@@ -71,6 +72,8 @@ from app.schemas import (
     AgentAssistantRequest,
     AgentAssistantTrace,
     AgentAssistantResponse,
+    AssistantQueryRequest,
+    AssistantQueryResponse,
     CrawlJobDetailResponse,
     CrawlJobResponse,
     DocumentUploadResponse,
@@ -187,12 +190,33 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 _WORKSPACE_NAV_ITEMS = (
     ("/dashboard", "运营驾驶舱", "▦", (ROLE_ADMIN, ROLE_OPERATIONS), "inventory.read"),
     ("/ops", "运营工作台", "◫", (ROLE_ADMIN, ROLE_OPERATIONS), None),
+    ("/assistant", "AI 运营助手", "✦", (ROLE_ADMIN, ROLE_OPERATIONS), "analytics.read"),
     ("/warehouse", "仓库收货", "▤", (ROLE_ADMIN, ROLE_OPERATIONS, ROLE_WAREHOUSE), "inbound.read"),
     ("/admin/users", "成员权限", "♙", (ROLE_ADMIN,), None),
 )
 _SYSTEM_NAV_ITEMS = (
     ("/customer-service", "客服知识", "?", (ROLE_ADMIN, ROLE_OPERATIONS, ROLE_CUSTOMER_SERVICE, ROLE_READONLY), "knowledge.read"),
 )
+_PAGE_ANCHORS = {
+    "/dashboard": (
+        ("sales-trend-panel", "销量趋势"),
+        ("inventory-risk-panel", "库存风险"),
+        ("product-quadrant-panel", "商品表现四象限"),
+        ("sync-health-panel", "数据同步健康"),
+        ("sku-health-panel", "SKU 库存健康"),
+        ("alerts-panel", "异常收件箱"),
+        ("recent-inbounds-panel", "最近入库"),
+        ("metric-definitions-panel", "指标口径"),
+    ),
+    "/ops": (
+        ("product-materials-panel", "商品资料"),
+        ("warehouse-step-base-data", "基础资料"),
+        ("warehouse-step-expected-inbound", "创建预计入库"),
+        ("warehouse-step-confirmation", "运营确认入账"),
+        ("warehouse-step-inventory", "当前库存"),
+        ("purchase-workflow", "补货与采购"),
+    ),
+}
 
 
 def _visible_navigation(principal, active_path: str) -> str:
@@ -205,18 +229,31 @@ def _visible_navigation(principal, active_path: str) -> str:
         path, label, icon, roles, permission = item
         if not can_see(roles, permission):
             return ""
-        active = ' class="active" aria-current="page"' if path == active_path else ""
-        return f'<a href="{path}"{active}><span aria-hidden="true">{icon}</span><span>{label}</span></a>'
+        active = ' class="nav-page-link active" aria-current="page"' if path == active_path else ' class="nav-page-link"'
+        anchors = _PAGE_ANCHORS.get(path, ()) if path == active_path else ()
+        anchor_html = ''.join(f'<a class="nav-sub nav-anchor" href="{path}#{anchor_id}">{anchor_label}</a>' for anchor_id, anchor_label in anchors)
+        return f'<a href="{path}"{active} aria-label="{label}"><span class="nav-icon" aria-hidden="true">{icon}</span><span class="nav-text">{label}</span></a>{anchor_html}'
 
-    workspace = "".join(render_item(item) for item in _WORKSPACE_NAV_ITEMS)
-    system = "".join(render_item(item) for item in _SYSTEM_NAV_ITEMS)
-    system_section = f'<div class="nav-label">System</div><nav class="nav" aria-label="系统导航">{system}</nav>' if system else ""
-    return (
-        '<a class="brand" href="/ops"><span class="brand-mark">商</span>'
-        '<span class="brand-text">电商运营台</span></a>'
-        '<div class="nav-label">Workspace</div>'
-        f'<nav class="nav" aria-label="工作区导航">{workspace}</nav>{system_section}'
+    nav_by_path = {item[0]: item for item in _WORKSPACE_NAV_ITEMS}
+    groups = (
+        ("运营分析", "Workspace", tuple(nav_by_path[path] for path in ("/dashboard", "/ops", "/assistant") if path in nav_by_path)),
+        ("仓储履约", "Warehouse", tuple(nav_by_path[path] for path in ("/warehouse",) if path in nav_by_path)),
+        ("系统管理", "System", tuple(nav_by_path[path] for path in ("/admin/users",) if path in nav_by_path)),
+        ("客服知识", "Knowledge", _SYSTEM_NAV_ITEMS),
     )
+    rendered_groups = []
+    for group_label, group_id, items in groups:
+        links = "".join(render_item(item) for item in items)
+        if not links:
+            continue
+        is_open = any(item[0] == active_path for item in items)
+        open_attr = " open" if is_open else ""
+        rendered_groups.append(
+            f'<details class="nav-group" id="nav-group-{group_id.lower()}"{open_attr}>'
+            f'<summary class="nav-group-toggle">{group_label}</summary>'
+            f'<nav class="nav" aria-label="{group_label}导航">{links}</nav></details>'
+        )
+    return '<a class="brand" href="/ops"><span class="brand-mark">商</span><span class="brand-text">电商运营台</span></a>' + "".join(rendered_groups)
 
 
 def _render_workspace_page(template_name: str, principal, active_path: str) -> HTMLResponse:
@@ -272,7 +309,8 @@ async def request_context_middleware(request: Request, call_next):
         from app.security import demo_principal
 
         public_paths = {"/login", "/health", "/ready", "/docs", "/openapi.json", "/redoc"}
-        if settings.employee_auth_enabled and request.url.path not in public_paths:
+        is_public_path = request.url.path in public_paths or request.url.path.startswith("/static/")
+        if settings.employee_auth_enabled and not is_public_path:
             if session_principal is None:
                 return RedirectResponse(url=f"/login?next={request.url.path}", status_code=303)
             request.state.principal = session_principal
@@ -885,7 +923,19 @@ def get_runtime_settings(request: Request, db: Session = Depends(get_db)) -> Set
     )
 
 
-# ---------- S5 受控 Agent ----------
+@app.post("/api/assistant/query", response_model=AssistantQueryResponse)
+def assistant_query(payload: AssistantQueryRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="analytics.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    from app.assistant import query_assistant
+    return query_assistant(db, workspace_id=principal.workspace_id, message=payload.message)
+
+
+@app.get("/assistant", response_class=HTMLResponse)
+def assistant_page(request: Request) -> HTMLResponse:
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    return _render_workspace_page("assistant.html", principal, "/assistant")
+
+
 
 
 def _register_agent_tools() -> None:
@@ -1272,6 +1322,7 @@ def crawl_fixture(request: Request, db: Session = Depends(get_db)) -> CrawlJob:
 def dashboard_summary(
     request: Request,
     days: int = Query(default=7, ge=1, le=90),
+    as_of: date | None = Query(default=None),
     warehouse_id: int | None = Query(default=None, gt=0),
     sku_id: int | None = Query(default=None, gt=0),
     recent_limit: int = Query(default=10, ge=1, le=100),
@@ -1286,7 +1337,7 @@ def dashboard_summary(
         if sku is None:
             raise HTTPException(status_code=404, detail={"code": "SKU_NOT_FOUND", "message": "SKU 不存在"})
     from app.dashboard import build_dashboard_summary
-    return build_dashboard_summary(db, workspace_id=principal.workspace_id, days=days, warehouse_id=warehouse_id, sku_id=sku_id, recent_limit=recent_limit)
+    return build_dashboard_summary(db, workspace_id=principal.workspace_id, days=days, as_of=as_of, warehouse_id=warehouse_id, sku_id=sku_id, recent_limit=recent_limit)
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -1456,17 +1507,19 @@ def list_replenishment_evaluations_api(
 @app.get("/api/analytics/sales")
 def analytics_sales(
     request: Request,
+    as_of: date | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     principal = require_principal(request, permission="analytics.read")
     from app.analytics import build_sales_summary
-    return build_sales_summary(db, workspace_id=principal.workspace_id)
+    return build_sales_summary(db, workspace_id=principal.workspace_id, as_of=as_of)
 
 
 @app.get("/api/analytics/inventory-health")
 def analytics_inventory_health(
     request: Request,
-    coverage_days: int = Query(default=14),
+    coverage_days: Literal[7, 14, 30] = Query(default=14),
+    as_of: date | None = Query(default=None),
     warehouse_id: int | None = Query(default=None, gt=0),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
@@ -1480,6 +1533,7 @@ def analytics_inventory_health(
         db,
         workspace_id=principal.workspace_id,
         coverage_days=coverage_days,
+        as_of=as_of,
         warehouse_id=warehouse_id,
         limit=page_size,
         offset=(page - 1) * page_size,
@@ -1551,6 +1605,7 @@ def evaluate_replenishment_api(
 
 
 
+@app.get("/api/replenishment/suggestions", response_model=ReplenishmentSuggestionPage)
 def list_replenishment_suggestions(request: Request, warehouse_id: int | None = Query(default=None, gt=0), sku_id: int | None = Query(default=None, gt=0), status: str | None = Query(default=None, max_length=16), page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)):
     principal = require_principal(request, permission="replenishment.read")
     if warehouse_id is not None: require_warehouse_access(principal, warehouse_id, db=db)
