@@ -21,18 +21,84 @@
 | S7 安全硬化 | 上传签名/路径/SHA 校验、Agent 配额、审计摘要脱敏、CSRF 双提交、可选 API Key |
 | 员工账户与角色工作台 | session 登录、workspace 成员、运营/仓库/客服/只读角色、仓库授权、停用/启用、密码重置、管理员页面和角色权限页 |
 | 仓储协同 MVP | SKU、自有/第三方仓库、预计入库、仓库实收、差异确认、库存流水与余额；`/ops` 负责创建/复核/确认，`/warehouse` 负责实收反馈 |
-| 统一外部事实层 | 外部账户、SKU 映射、订单/订单明细、每日 SKU 销量、7/14/30 日窗口和 workspace 幂等隔离 |
+| 统一外部事实层 | 外部账户、SKU 映射、订单/订单明细、每日 SKU 销量、7/14/30 日窗口和 workspace 幂等隔离；外部库存与内部库存台账分离 |
 | 运营驾驶舱与补货闭环 | 单仓 SKU 健康、确定性补货建议、确认/修改/忽略、内部采购申请幂等提交；采购提交不自动入库 |
 | 淘宝只读 Adapter | 只读协议、脱敏 fixture、能力查询和离线 preview；真实网络默认关闭，不提供下单/付款/退款/改价/库存写回 |
-| 离线多平台同步编排 | JSON/CSV/mock 订单+库存 bundle、ExternalSyncRun 成功/失败、账户/店铺一致性校验和幂等回放 |
-| 测试基线 | 当前全量回归 `176 passed`；当前 Alembic head `0015_replenishment_evaluations`（MySQL 迁移未在本次环境验证） |
-| 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：已确认内部库存、入库状态/数量、销量摘要、SKU 健康、补货建议、失败任务、同步健康、商品表现四象限、口径限制和模拟数据提示 |
-| AI 运营助手 | `/assistant` 与 `/api/assistant/query`：按当前 Workspace 查询商品/SKU、库存健康、补货建议和同步状态；只读结构化查询，不接知识库/RAG，不执行采购或库存写操作 |
-| 页面展示约定 | `/static/labels.js` 为工作台公共枚举中文映射；数据库/API 继续使用原始 code，页面显示中文标签；状态、完整度、原因、级别和同步类型不直接暴露英文枚举 |
+| Shopify Dev Store 只读 Canary | 官方 Admin GraphQL 只读接入商品、订单、库存；已验证真实商品/订单/库存结构，订单与库存可同步到外部事实层；不执行 Shopify mutation |
+| 离线多平台同步编排 | JSON/CSV/mock 订单+库存 bundle、ExternalSyncRun 成功/失败、账户/店铺一致性校验和幂等回放；Shopify live 资源级 partial/重试链路已接入 |
+| 迁移与回归 | 当前 Alembic head `0016_content_production`；全量回归结果为 `197 passed, 3 failed`，失败项见文末回归基线；MySQL 迁移未在本次环境验证 |
+| 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：内部库存、外部 Shopify 库存观察、入库状态/数量、销量摘要、SKU 健康、补货建议、同步健康、商品表现四象限和口径限制 |
+| AI 运营助手 | `/assistant` 与 `/api/assistant/query`：按当前 Workspace 查询商品/SKU、库存健康、销售波动、广告 ROI、库存预警、商品机会、补货建议和同步状态；只读，不执行高影响写操作 |
+| 页面展示约定 | `/static/labels.js` 为工作台公共枚举中文映射；数据库/API 继续使用原始 code，页面显示中文标签；状态、完整度、原因、级别和分析字段不直接暴露英文枚举 |
 
-当前版本已完成员工账户、基础 workspace/RBAC、统一外部事实层、补货决策闭环和离线多平台同步编排。外部订单、销量、库存快照和采购申请均按 workspace 隔离；采购申请提交不会直接修改内部库存。仓库列表、入库、库存和新事实层接口均从当前 session 的 workspace 获取边界。
+当前版本已完成员工账户、基础 workspace/RBAC、统一外部事实层、Shopify Dev Store 真实只读 Canary、补货决策闭环、驾驶舱、中文化运营助手和离线/真实资源级同步编排。Shopify 当前已验证 17 个商品、3 个订单、28 条库存位置记录，并可同步为 `ExternalOrder`/`DailySkuSale` 与 `ExternalInventorySnapshot`。外部订单、销量、库存快照和采购申请均按 workspace 隔离；外部库存观察不会直接修改内部库存余额或流水，采购申请提交不会直接修改内部库存。
 
-## 员工登录与角色工作台
+> 当前 Shopify 数据是官方 Dev Store 测试数据结构验证，不等于真实商家生产经营数据；Token 仅从本地 `.env` 读取，当前为单工作区 Canary，不宣称已完成多租户 OAuth/secret vault。
+
+## 项目执行状态（2026-09-21）
+
+### 本轮已完成
+
+- Shopify Dev Store Admin GraphQL 只读 Canary：真实验证 17 个商品、3 个订单、28 条库存位置记录；
+- Shopify 订单写入外部订单事实并重建每日销量，库存写入 `ExternalInventorySnapshot`；
+- Shopify 多 location 库存批量同步、`quantities[name=available]` 映射、幂等和资源级同步状态；
+- `/dashboard`、`/ops` 展示 Shopify 外部库存观察，并明确不覆盖内部库存台账；
+- `/assistant` 的销售波动、广告 ROI、库存预警、商品机会入口复用同一平台 Skill，表格字段中文化；
+- 销量窗口和商品四象限支持部分历史覆盖，显示可用指标并保留 `partial` 数据完整度，不把缺失日期补成 0；
+- Shopify Canary Runbook 和本地执行计划已同步当前真实证据。
+
+### 当前仍需收口
+
+- 当前全量回归为 `197 passed, 3 failed`（`python -m pytest -q -p no:cacheprovider`；失败项见文末回归基线，修复后需重新执行）；
+- `app/assistant.py`、`app/business_dates.py` 和新增文档仍需纳入发布清单后，才能宣称干净 clone 可复现；
+- 当前 Shopify 是单工作区、本地 `.env` 凭证的 Dev Store Canary，不是多租户 OAuth/secret vault；
+- 不包含 Shopify mutation、商品发布、库存写回、物流、税务、跨境结算或真实生产经营收益；
+- 广告 ROI 没有真实广告事实表，正确结果是 `unknown`，不是虚构 ROI。
+
+
+当前真实验证结果（2026-09-19～2026-09-21）：
+
+```text
+商品：17 条
+订单：3 条
+库存位置记录：28 条
+有正库存记录：22 条
+可售数量：676（最近一次同步快照汇总）
+```
+
+页面：
+
+```text
+http://127.0.0.1:8000/shopify
+```
+
+同步：
+
+```text
+POST /api/external/shopify/sync?resources=orders,inventory
+```
+
+数据流：
+
+```text
+Shopify Admin GraphQL（只读）
+  → ShopifyReadOnlyAdapter
+  → ExternalSyncRun
+  → ExternalOrder / ExternalOrderLine / DailySkuSale
+  → ExternalInventorySnapshot
+  → Dashboard / Skill / MCP
+```
+
+当前明确不做：
+
+- Shopify mutation、改价、发货、退款、订单修改或库存写回；
+- 商品自动发布和多租户 OAuth 凭证管理；
+- 将 Shopify 外部库存观察值直接写入 `InventoryBalance` 或 `InventoryTransaction`；
+- 将 Dev Store 测试数据描述为生产经营收益。
+
+详细步骤见 [`docs/shopify-canary-runbook.md`](docs/shopify-canary-runbook.md)。
+
+## 员工账户与角色工作台
 
 员工认证默认开启（`EMPLOYEE_AUTH_ENABLED=true`）。首次部署不会自动创建生产账户，请先在目标数据库执行一次：
 
@@ -95,7 +161,7 @@ DATABASE_URL=mysql+pymysql://dianshang:dianshang@localhost:3306/dianshang?charse
 
 ## 数据库迁移（Alembic，S6）
 
-S6 将 Alembic 作为当前 schema 管理规范：`0001_baseline.py` 定义基础表，`0003_inventory_mvp.py` 增加仓储协同与库存表，`0004_inbound_idempotency.py` 补齐入库幂等字段，`0005_external_sync.py` 增加外部库存快照、事件 Inbox 和对账结果表；`0006`/`0007` 完成员工 RBAC 与 workspace 隔离，`0008` 增加库存告警，`0009` 增加同步健康，`0010_external_sales_facts.py` 增加外部账户、映射、订单和每日销量，`0011_replenishment_loop.py` 增加补货建议和内部采购申请，`0012`/`0013` 补齐同步补偿及外部快照来源范围，`0014_purchase_request_drafts.py` 增加采购草稿编辑、提交和 action 审计。`init_db.py` 负责识别数据库状态并执行对应动作；`Base.metadata.create_all` 仅保留给测试 fixture 或演示兜底，不作为生产迁移路径。当前迁移头为 `0014_purchase_request_drafts`。
+S6 将 Alembic 作为当前 schema 管理规范：`0001_baseline.py` 定义基础表，`0003_inventory_mvp.py` 增加仓储协同与库存表，`0004_inbound_idempotency.py` 补齐入库幂等字段，`0005_external_sync.py` 增加外部库存快照、事件 Inbox 和对账结果表；`0006`/`0007` 完成员工 RBAC 与 workspace 隔离，`0008` 增加库存告警，`0009` 增加同步健康，`0010_external_sales_facts.py` 增加外部账户、映射、订单和每日销量，`0011_replenishment_loop.py` 增加补货建议和内部采购申请，`0012`/`0013` 补齐同步补偿及外部快照来源范围，`0014_purchase_request_drafts.py` 增加采购草稿编辑、提交和 action 审计，`0015_replenishment_evaluations.py` 增加补货评估快照，`0016_content_production.py` 增加内容生产控制平面。`init_db.py` 负责识别数据库状态并执行对应动作；`Base.metadata.create_all` 仅保留给测试 fixture 或演示兜底，不作为生产迁移路径。当前迁移头为 `0016_content_production`。
 
 ```bash
 # 新库：创建全部表并写入 alembic_version
@@ -438,7 +504,7 @@ Alembic 已是当前生产 schema 管理路径；`Base.metadata.create_all` 仅�
 
 ## 外部平台与运营增效规划
 
-当前已完成平台无关的离线事实层和同步编排：JSON/CSV/mock 订单+库存 bundle 写入外部事实、每日销量和同步运行记录；运行可收尾为 `succeeded`、`failed` 或资源级 `partial`，失败资源可通过人工补偿 API 重试，重复回放按平台/账户/店铺/来源和事实幂等。Dashboard 已展示同步健康、失败和待补偿摘要。淘宝只读 Adapter 已提供能力查询和 fixture preview，但 `TAOBAO_ADAPTER_ENABLED=false` 时不访问网络。
+当前已完成平台无关的离线事实层和同步编排，并完成 Shopify Dev Store 真实只读 Canary：JSON/CSV/mock 订单+库存 bundle 与 Shopify live 资源都可写入外部事实、每日销量和同步运行记录；运行可收尾为 `succeeded`、`failed` 或资源级 `partial`，失败资源可通过补偿 API 重试，重复回放按平台/账户/店铺/来源和事实幂等。Dashboard、运营工作台和助手已展示当前 Workspace 的同步与外部库存事实。淘宝只读 Adapter 仍默认关闭真实网络；Shopify live 仅限本地 `.env` 配置的单工作区 Dev Store。
 
 淘宝、京东、拼多多、抖音电商和 Amazon/FBA 后续都只申请官方只读权限；真实 Adapter 需要独立认证、签名、限流、分页、重试、错误码和字段映射。坚决不实现自动下单、付款、退款、取消订单、改价或库存写回。
 
@@ -455,11 +521,12 @@ python -m app.cli external-preview --platform taobao --mode json --file examples
 
 后续增效模块按以下顺序推进：
 
-1. 外部库存快照与事件对账：平台可售/锁定/在途、店铺/仓库、外部 SKU（国内平台）或 ASIN/seller SKU/marketplace/FBA 字段（Amazon）单独保存，不直接伪装为本系统库存流水。
-2. Dashboard 与告警：库存水位、入库趋势、平台与内部库存差异、同步失败和低库存告警；没有真实埋点时只展示演示数据或目标指标。
-3. Playwright RPA 巡检：仅访问本人或明确授权页面，复用人工登录态，保存截图和原始快照；遇到验证码/MFA/页面异常时提示人工介入，不绕过平台限制。
-4. 飞书/钉钉 Bridge：先发送库存差异和入库审核通知，再实现验签、时间戳校验、事件幂等、用户映射和仓库权限复核后的人工审批回调。
-5. 运营分析 Agent/Dify：读取商品、库存、对账和售后资料，输出库存风险、入库差异和运营简报；不直接确认入库、不调整库存、不执行平台交易动作。
+1. 重新执行最终工作区全量回归，统一迁移 head、测试数量和发布文件清单；
+2. 补充外部库存快照与事件对账：平台可售/锁定/在途、店铺/仓库、外部 SKU 单独保存，不直接伪装为本系统库存流水；
+3. 补充 `docs/metrics.md`，固定销量窗口、部分覆盖、四象限和外部库存观察的指标口径；
+4. Playwright RPA 巡检：仅访问本人或明确授权页面，复用人工登录态，遇到验证码/MFA/页面异常时人工介入；
+5. 飞书/钉钉 Bridge：先实现库存差异和入库审核通知，再实现验签、事件幂等、用户映射和权限复核；
+6. 运营分析 Agent/Dify：继续读取商品、库存、对账和售后资料，不直接确认入库、不调整库存、不执行平台交易动作。
 
 这条路线将项目从“被动 CRUD + 客服问答”扩展为“外部信息感知 → 自动对账 → 异常告警 → AI 建议 → 人工审批 → 内部台账”，但不会把未经授权的真实接入或目标指标写成已完成能力。
 
@@ -477,20 +544,21 @@ python -m app.cli external-preview --platform taobao --mode json --file examples
 
 ### 当前阶段完成状态
 
-- 统一外部事实层：`0010_external_sales_facts`
-- 补货决策闭环：`0011_replenishment_loop`
-- 补货建议偏差评估快照：`0015_replenishment_evaluations`（按 workspace、suggestion、window、公式版本和快照哈希去重；只读、缺数据返回 insufficient，不写库存）
-- 淘宝只读 Adapter、能力查询和 fixture preview：真实网络默认关闭
-- 离线多平台同步编排：订单+库存 fixture bundle、ExternalSyncRun、失败收尾和幂等回放
-- 当前回归：`160 passed`
-- 当前 Alembic head：`0015_replenishment_evaluations`（MySQL 迁移未在本次环境验证）
+- 统一外部事实层：`0010_external_sales_facts`；Shopify Dev Store 订单/库存真实只读 Canary 已接入；
+- 补货决策闭环：`0011_replenishment_loop`；
+- 补货建议偏差评估快照：`0015_replenishment_evaluations`；
+- 内容生产控制平面：`0016_content_production`，包含内容 revision、审核、导出和媒体资产；
+- 淘宝只读 Adapter、能力查询和 fixture preview：真实网络默认关闭；
+- 离线与 Shopify live 资源级同步编排：ExternalSyncRun、失败收尾、幂等回放和多 location 库存；
+- 当前全量回归：`197 passed, 3 failed`（`python -m pytest -q -p no:cacheprovider`；失败项见回归基线，修复后需重新执行）；
+- 当前 Alembic head：`0016_content_production`（MySQL 迁移未在本次环境验证）。
 
 后续工作优先级：
 
-1. 离线同步健康摘要、失败补偿和运行监控；
-2. 取得平台官方只读授权后，再实现真实 transport Canary；
-3. 活动销量预测和固定评测；
-4. 统一客服领域模型与真实渠道接入。
+1. 发布文件清单、干净工作区复现和全量回归收口；
+2. 统一指标契约、部分覆盖语义和外部库存对账；
+3. 取得国内平台官方只读授权后，再实现真实 transport Canary；
+4. 通知 outbound、PIM-lite 或活动销量预测择一继续，不并行扩张高风险领域。
 
 ```bash
 # 一键演示（需先启动 uvicorn）
@@ -500,13 +568,20 @@ python scripts/demo.py
 python -m pytest -q
 ```
 
-当前回归基线（本次工作区验证）：
+当前回归基线说明：
 
 ```text
-156 passed
+全量回归：197 passed, 3 failed
+命令：PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
 ```
 
-以当前工作区实际 `python -m pytest -q` 结果为准；测试包含外部订单/销量、淘宝只读 Adapter/API、离线同步编排和补货决策闭环。
+本次全量回归未通过，失败项为：
+
+- `tests/test_api_product_quadrant.py::test_product_quadrant_marks_insufficient_when_window_missing`
+- `tests/test_api_replenishment.py::test_replenishment_evaluation_records_observation_window`
+- `tests/test_connectors.py::test_json_envelope_normalizes_defaults_and_amazon_fields`
+
+修复失败项后需重新执行全量回归。
 
 
 ## S7 当前进度
@@ -547,6 +622,10 @@ python -m pytest -q
 - [第一周验收记录](docs/week1-acceptance.md)
 - [第二周验收记录](docs/week2-acceptance.md)（S1 / S2 / S3 / S4 / S5 / S6 切片总结）
 - [电商 AI 执行计划](电商ai.md)
+- [竞品公开类目回放采集说明](docs/catalog-replay.md)
+- [Shopify Dev Store 只读 Canary Runbook](docs/shopify-canary-runbook.md)
+- [MCP 工具说明](docs/mcp-tools.md)
+- [电商 Skill 分析说明](docs/skills-ecommerce-analysis.md)
 
 ## Playwright 浏览器安装（国内网络）
 
