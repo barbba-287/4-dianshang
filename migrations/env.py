@@ -54,6 +54,10 @@ from app.db import (  # noqa: F401  触发模型注册
     PurchaseRequest,
     PurchaseRequestLine,
     ReplenishmentEvaluation,
+    ProductContentRevision,
+    ProductContentAction,
+    ProductContentExport,
+    ProductMediaAsset,
 )
 
 

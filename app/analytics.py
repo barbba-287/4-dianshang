@@ -19,6 +19,14 @@ from app.db import (
 )
 from app.business_dates import resolve_sales_as_of
 
+
+def _quality_from_completeness(values: list[str]) -> str:
+    if not values or all(value == "insufficient" for value in values):
+        return "insufficient"
+    if all(value == "complete" for value in values):
+        return "complete"
+    return "partial"
+
 QUADRANT_FOCAL_SUPPLEMENT = "focal_supplement"
 QUADRANT_HEALTHY = "healthy"
 QUADRANT_WATCH = "watch"
@@ -45,6 +53,17 @@ def _resolve_thresholds(growth_high: float | None, days_low: float | None) -> Qu
     return thresholds
 
 
+def _complete_sales_dates(rows: list[DailySkuSale]) -> set[date]:
+    rows_by_date: dict[date, list[DailySkuSale]] = defaultdict(list)
+    for row in rows:
+        rows_by_date[row.sales_date].append(row)
+    return {
+        sales_date
+        for sales_date, day_rows in rows_by_date.items()
+        if all(row.data_completeness == "complete" for row in day_rows)
+    }
+
+
 def _sales_window(db: Session, *, workspace_id: int, internal_sku_id: int | None, start: date, end: date) -> dict:
     filters = [
         DailySkuSale.workspace_id == workspace_id,
@@ -54,9 +73,12 @@ def _sales_window(db: Session, *, workspace_id: int, internal_sku_id: int | None
     if internal_sku_id is not None:
         filters.append(DailySkuSale.internal_sku_id == internal_sku_id)
     rows = db.scalars(select(DailySkuSale).where(*filters)).all()
+    complete_dates = _complete_sales_dates(rows)
+    complete_rows = [row for row in rows if row.sales_date in complete_dates]
     total_net = sum(row.net_qty for row in rows)
+    complete_net = sum(row.net_qty for row in complete_rows)
     days = (end - start).days + 1
-    complete_days = {row.sales_date for row in rows if row.data_completeness == "complete"}
+    complete_days = complete_dates
     complete = len(complete_days) == days and days > 0
     return {
         "from": start.isoformat(),
@@ -65,15 +87,17 @@ def _sales_window(db: Session, *, workspace_id: int, internal_sku_id: int | None
         "effective_sale_days": len(complete_days),
         "missing_days": max(0, days - len(complete_days)),
         "net_qty": total_net,
-        "daily_avg_qty": float(Decimal(total_net) / Decimal(len(complete_days))) if complete and complete_days else None,
-        "data_completeness": "complete" if complete else "insufficient",
+        "daily_avg_qty": float(Decimal(complete_net) / Decimal(len(complete_days))) if complete and complete_days else None,
+        "data_completeness": "complete" if complete else "partial" if complete_days else "insufficient",
         "quality_reason": None if complete else "INCOMPLETE_COVERAGE",
     }
 
 
 def _classify(growth_rate: float | None, days_value: float | None, thresholds: QuadrantThresholds) -> tuple[str, str | None, str]:
-    if growth_rate is None or days_value is None:
+    if days_value is None:
         return QUADRANT_INSUFFICIENT, "INCOMPLETE_COVERAGE", "insufficient"
+    if growth_rate is None:
+        return QUADRANT_WATCH, "GROWTH_DATA_INSUFFICIENT", "partial"
     high_growth = growth_rate >= thresholds.growth_high
     low_inventory = days_value < thresholds.days_low
     if high_growth and low_inventory:
@@ -148,9 +172,9 @@ def build_product_quadrant(
         baseline_rows = [row for row in rows if baseline_start <= row.sales_date <= baseline_end]
         days_rows = [row for row in rows if days_start <= row.sales_date <= as_of]
 
-        short_complete = len({row.sales_date for row in short_rows if row.data_completeness == "complete"}) == growth_window
-        baseline_complete = len({row.sales_date for row in baseline_rows if row.data_completeness == "complete"}) == baseline_window
-        days_complete = len({row.sales_date for row in days_rows if row.data_completeness == "complete"}) == days_window
+        short_complete = len(_complete_sales_dates(short_rows)) == growth_window
+        baseline_complete = len(_complete_sales_dates(baseline_rows)) == baseline_window
+        days_complete = len(_complete_sales_dates(days_rows)) == days_window
 
         short_window = _aggregate(short_rows, growth_window, short_complete)
         baseline_window_dict = _aggregate(baseline_rows, baseline_window, baseline_complete)
@@ -164,8 +188,12 @@ def build_product_quadrant(
             numerator = short_window["net_qty"] if short_complete else None
             denominator = baseline_window_dict["net_qty"] if baseline_complete else None
             growth_rate = None
-        days_of_inventory = (on_hand_by_sku.get(sku.id, 0) / days_window_dict["daily_avg_qty"]) if days_complete and days_window_dict["daily_avg_qty"] else None
+        days_of_inventory = (on_hand_by_sku.get(sku.id, 0) / days_window_dict["daily_avg_qty"]) if days_window_dict["daily_avg_qty"] else None
         quadrant, reason, completeness = _classify(growth_rate, days_of_inventory, thresholds)
+        if completeness == "insufficient" and days_window_dict["daily_avg_qty"] is not None:
+            # Growth needs two complete comparison windows, but inventory
+            # coverage can still be plotted when its observed history exists.
+            completeness = "partial"
         product = products.get(sku.product_id)
         if not short_complete and not baseline_complete:
             unsupported.append("growth_data_insufficient")
@@ -218,9 +246,12 @@ def build_product_quadrant(
 
 
 def _aggregate(rows: list[DailySkuSale], window_days: int, complete: bool) -> dict:
+    complete_dates = _complete_sales_dates(rows)
+    complete_rows = [row for row in rows if row.sales_date in complete_dates]
     net_qty = sum(row.net_qty for row in rows)
-    complete_days = len({row.sales_date for row in rows if row.data_completeness == "complete"})
-    daily_avg_qty = float(Decimal(net_qty) / Decimal(complete_days)) if complete and complete_days else None
+    complete_net_qty = sum(row.net_qty for row in complete_rows)
+    complete_days = len(complete_dates)
+    daily_avg_qty = float(Decimal(complete_net_qty) / Decimal(complete_days)) if complete_days else None
     return {
         "from": (min((row.sales_date for row in rows), default=None).isoformat() if rows else None),
         "to": (max((row.sales_date for row in rows), default=None).isoformat() if rows else None),
@@ -229,7 +260,7 @@ def _aggregate(rows: list[DailySkuSale], window_days: int, complete: bool) -> di
         "missing_days": max(0, window_days - complete_days),
         "net_qty": net_qty,
         "daily_avg_qty": daily_avg_qty,
-        "data_completeness": "complete" if complete else "insufficient",
+        "data_completeness": "complete" if complete else "partial" if complete_days else "insufficient",
         "quality_reason": None if complete else "INCOMPLETE_COVERAGE",
     }
 
@@ -270,7 +301,8 @@ def build_inventory_health(
     for row in rows:
         status = row.get("status") or "unknown"
         summary["by_status"][status] = summary["by_status"].get(status, 0) + 1
-    return {"summary": summary, "items": page_rows}
+    quality = _quality_from_completeness([item.get("sales", {}).get(str(coverage_days), {}).get("data_completeness", "unknown") for item in page_rows]) if page_rows else "insufficient"
+    return {"summary": summary, "items": page_rows, "page": 1 + offset // max(limit, 1), "page_size": limit, "meta": {"workspace_id": workspace_id, "as_of": (as_of or resolve_sales_as_of(db, workspace_id=workspace_id)).isoformat(), "timezone": "UTC", "source": "InventoryBalance+DailySkuSale", "data_completeness": quality, "metric_version": "1", "metrics": [{"metric": "inventory_health", "value": len(page_rows), "numerator": len(page_rows), "denominator": total or None, "workspace_id": workspace_id, "warehouse_id": warehouse_id, "as_of": (as_of or resolve_sales_as_of(db, workspace_id=workspace_id)).isoformat(), "timezone": "UTC", "source": "InventoryBalance+DailySkuSale", "data_completeness": quality, "metric_version": "1", "reason": None if quality == "complete" else "INCOMPLETE_COVERAGE"}]}}
 
 
 def build_inventory_chart(db: Session, *, workspace_id: int, warehouse_id: int | None = None, limit: int = 10) -> dict:

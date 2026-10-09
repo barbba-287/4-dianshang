@@ -74,6 +74,16 @@ _REQUIRED_TABLES = {
     "purchase_request_lines",
     "purchase_request_actions",
     "replenishment_evaluations",
+    "service_tickets",
+    "ticket_events",
+    "ticket_assignments",
+    "ticket_links",
+}
+_REQUIRED_TABLE_COLUMNS = {
+    "service_tickets": {
+        "id", "workspace_id", "ticket_no", "subject", "issue_type",
+        "description", "sku_ref", "status", "priority", "created_at", "updated_at",
+    },
 }
 _REQUIRED_CRAWL_COLUMNS = {
     "type",
@@ -133,13 +143,27 @@ def main() -> None:
         command.upgrade(cfg, "head")
     elif state == "legacy":
         # 旧库已经有 week1 表，不能执行 0001 的全量建表 migration。
-        # 先把它标记在 baseline，再运行后续 repair migration，补齐 S1
-        # 字段和 S2-S5 表；不能直接 stamp head，否则后续迁移会被跳过。
+        # 先把它标记在 baseline，再运行后续 repair migration，补齐旧结构；
+        # 不能直接 stamp head，否则后续迁移会被跳过。
         print("legacy 库：标记 0001 baseline 后执行后续迁移...")
         command.stamp(cfg, "0001_baseline")
         command.upgrade(cfg, "head")
     else:
-        print("已迁移库：执行 alembic upgrade head（幂等）...")
+        inspector = inspect(engine)
+        missing_tables = _REQUIRED_TABLES - set(tables)
+        missing_columns = {
+            table: required - {column["name"] for column in inspector.get_columns(table)}
+            for table, required in _REQUIRED_TABLE_COLUMNS.items()
+            if table in tables
+        }
+        missing_columns = {table: columns for table, columns in missing_columns.items() if columns}
+        if missing_tables or missing_columns:
+            print(
+                "已迁移库 schema 不完整：执行 alembic upgrade head "
+                f"（缺表 {sorted(missing_tables)}，缺列 {missing_columns}）..."
+            )
+        else:
+            print("已迁移库：执行 alembic upgrade head（幂等）...")
         command.upgrade(cfg, "head")
 
     # 显示当前版本

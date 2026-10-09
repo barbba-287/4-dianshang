@@ -28,10 +28,11 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         "inventory.read", "knowledge.read", "knowledge.write", "inventory.write",
         "replenishment.read", "replenishment.write", "replenishment.confirm",
         "replenishment.ignore", "purchasing.submit", "purchase.read", "analytics.read",
+        "content.read", "content.write", "content.review", "content.export",
     }),
     ROLE_WAREHOUSE: frozenset({"inbound.read", "inbound.receive", "inventory.read"}),
-    ROLE_CUSTOMER_SERVICE: frozenset({"catalog.read", "inbound.read", "inventory.read", "knowledge.read", "analytics.read"}),
-    ROLE_READONLY: frozenset({"catalog.read", "inbound.read", "inventory.read", "knowledge.read", "analytics.read"}),
+    ROLE_CUSTOMER_SERVICE: frozenset({"catalog.read", "inbound.read", "inventory.read", "knowledge.read", "knowledge.write", "analytics.read", "content.read"}),
+    ROLE_READONLY: frozenset({"catalog.read", "inbound.read", "inventory.read", "knowledge.read", "analytics.read", "content.read"}),
 }
 
 ROLE_LABELS = {

@@ -181,7 +181,9 @@ def test_dashboard_sync_health_latest_is_deduplicated(client):
     assert 'id="quadrant-table-watch"' in response.text
     assert 'id="quadrant-table-slow_risk"' in response.text
     assert 'function quadrantIsInsufficient' in response.text
-    assert 'item.growth_rate!=null&&item.days_of_inventory!=null' not in response.text
+    assert "function quadrantIsInsufficient(item){return item.quadrant==='insufficient';}" in response.text
+    assert 'function quadrantCanPlot' in response.text
+    assert "const points=items.filter(quadrantCanPlot)" in response.text
     assert 'quadrantIsInsufficient(item)' in response.text
     assert 'growth_window:\'7\'' in response.text
     assert 'baseline_window:\'14\'' in response.text

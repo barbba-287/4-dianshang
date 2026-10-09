@@ -1,0 +1,1493 @@
+{
+  "generated_by": "scripts/inventory_architecture.py",
+  "routes": [
+    {
+      "line": 287,
+      "declaration": "@app.middleware(\"http\")"
+    },
+    {
+      "line": 354,
+      "declaration": "@app.exception_handler(RequestValidationError)"
+    },
+    {
+      "line": 359,
+      "declaration": "@app.get(\"/ready\")"
+    },
+    {
+      "line": 385,
+      "declaration": "@app.get(\"/health\")"
+    },
+    {
+      "line": 390,
+      "declaration": "@app.get(\"/\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 403,
+      "declaration": "@app.get(\"/login\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 414,
+      "declaration": "@app.post(\"/login\")"
+    },
+    {
+      "line": 475,
+      "declaration": "@app.post(\"/logout\")"
+    },
+    {
+      "line": 491,
+      "declaration": "@app.get(\"/me\")"
+    },
+    {
+      "line": 497,
+      "declaration": "@app.get(\"/content\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 503,
+      "declaration": "@app.get(\"/shopify\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 509,
+      "declaration": "@app.get(\"/ops\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 515,
+      "declaration": "@app.get(\"/warehouse\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 521,
+      "declaration": "@app.get(\"/customer-service\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 530,
+      "declaration": "@app.get(\"/api/admin/users\", response_model=list[AdminUserResponse])"
+    },
+    {
+      "line": 537,
+      "declaration": "@app.post(\"/api/admin/users\", response_model=AdminUserResponse, status_code=201)"
+    },
+    {
+      "line": 547,
+      "declaration": "@app.post(\"/api/admin/users/{user_id}/warehouses/{warehouse_id}\", status_code=204)"
+    },
+    {
+      "line": 557,
+      "declaration": "@app.delete(\"/api/admin/users/{user_id}/warehouses/{warehouse_id}\", status_code=204)"
+    },
+    {
+      "line": 566,
+      "declaration": "@app.get(\"/api/admin/warehouses\", response_model=list[WarehouseResponse])"
+    },
+    {
+      "line": 573,
+      "declaration": "@app.post(\"/api/admin/warehouses/{warehouse_id}/bind\", response_model=WarehouseResponse)"
+    },
+    {
+      "line": 585,
+      "declaration": "@app.get(\"/api/roles\")"
+    },
+    {
+      "line": 602,
+      "declaration": "@app.get(\"/roles\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 613,
+      "declaration": "@app.get(\"/admin/users\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 619,
+      "declaration": "@app.post(\"/api/admin/users/{user_id}/deactivate\", status_code=204)"
+    },
+    {
+      "line": 633,
+      "declaration": "@app.patch(\"/api/admin/users/{user_id}\", response_model=AdminUserResponse)"
+    },
+    {
+      "line": 645,
+      "declaration": "@app.post(\"/api/admin/users/{user_id}/activate\", status_code=204)"
+    },
+    {
+      "line": 655,
+      "declaration": "@app.post(\"/api/admin/users/{user_id}/reset-password\", status_code=204)"
+    },
+    {
+      "line": 666,
+      "declaration": "@app.post(\"/api/crawl\", response_model=CrawlJobDetailResponse, status_code=202)"
+    },
+    {
+      "line": 681,
+      "declaration": "@app.get(\"/api/crawl/jobs\", response_model=list[CrawlJobDetailResponse])"
+    },
+    {
+      "line": 690,
+      "declaration": "@app.get(\"/api/crawl/{job_id}\", response_model=CrawlJobDetailResponse)"
+    },
+    {
+      "line": 699,
+      "declaration": "@app.post(\"/api/crawl/{job_id}/cancel\", response_model=CrawlJobDetailResponse)"
+    },
+    {
+      "line": 711,
+      "declaration": "@app.post("
+    },
+    {
+      "line": 822,
+      "declaration": "@app.get("
+    },
+    {
+      "line": 861,
+      "declaration": "@app.post(\"/api/rag/query\", response_model=RagQueryResponse)"
+    },
+    {
+      "line": 928,
+      "declaration": "@app.get(\"/api/settings\", response_model=SettingsResponse)"
+    },
+    {
+      "line": 953,
+      "declaration": "@app.post(\"/api/assistant/query\", response_model=AssistantQueryResponse)"
+    },
+    {
+      "line": 960,
+      "declaration": "@app.get(\"/assistant\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 1002,
+      "declaration": "@app.get(\"/api/agent/tools\", response_model=list[AgentToolSpec])"
+    },
+    {
+      "line": 1023,
+      "declaration": "@app.post(\"/api/agent/invoke\", response_model=AgentActionResponse)"
+    },
+    {
+      "line": 1050,
+      "declaration": "@app.post(\"/api/agent/assistant\", response_model=AgentAssistantResponse)"
+    },
+    {
+      "line": 1097,
+      "declaration": "@app.post(\"/api/skus\", response_model=ProductSkuResponse, status_code=201)"
+    },
+    {
+      "line": 1107,
+      "declaration": "@app.get(\"/api/skus\", response_model=list[ProductSkuResponse])"
+    },
+    {
+      "line": 1114,
+      "declaration": "@app.post(\"/api/warehouses\", response_model=WarehouseResponse, status_code=201)"
+    },
+    {
+      "line": 1124,
+      "declaration": "@app.get(\"/api/warehouses\", response_model=list[WarehouseResponse])"
+    },
+    {
+      "line": 1139,
+      "declaration": "@app.post(\"/api/inbounds\", response_model=InboundResponse, status_code=201)"
+    },
+    {
+      "line": 1153,
+      "declaration": "@app.get(\"/api/inbounds/{inbound_id}\", response_model=InboundResponse)"
+    },
+    {
+      "line": 1164,
+      "declaration": "@app.get(\"/api/inbounds\", response_model=InboundListPage)"
+    },
+    {
+      "line": 1209,
+      "declaration": "@app.post(\"/api/inbounds/{inbound_id}/receive\", response_model=InboundResponse)"
+    },
+    {
+      "line": 1234,
+      "declaration": "@app.post(\"/api/inbounds/{inbound_id}/confirm\", response_model=InboundResponse)"
+    },
+    {
+      "line": 1255,
+      "declaration": "@app.get(\"/api/inventory\", response_model=InventoryPage)"
+    },
+    {
+      "line": 1274,
+      "declaration": "@app.get(\"/api/inventory/policies\", response_model=list[InventoryPolicyResponse])"
+    },
+    {
+      "line": 1285,
+      "declaration": "@app.put(\"/api/inventory/policies\", response_model=InventoryPolicyResponse)"
+    },
+    {
+      "line": 1298,
+      "declaration": "@app.post(\"/api/inventory/alerts/refresh\", response_model=list[AlertResponse])"
+    },
+    {
+      "line": 1307,
+      "declaration": "@app.get(\"/api/inventory/alerts\", response_model=list[AlertResponse])"
+    },
+    {
+      "line": 1316,
+      "declaration": "@app.post(\"/api/inventory/alerts/{alert_id}/ack\", response_model=AlertResponse)"
+    },
+    {
+      "line": 1326,
+      "declaration": "@app.post(\"/api/crawl/fixture\", response_model=CrawlJobResponse, status_code=201)"
+    },
+    {
+      "line": 1348,
+      "declaration": "@app.get(\"/api/dashboard/summary\", response_model=DashboardSummaryResponse)"
+    },
+    {
+      "line": 1370,
+      "declaration": "@app.get(\"/dashboard\", response_class=HTMLResponse)"
+    },
+    {
+      "line": 1379,
+      "declaration": "@app.get(\"/api/external/shopify/capabilities\")"
+    },
+    {
+      "line": 1386,
+      "declaration": "@app.post(\"/api/external/shopify/preview\", response_model=ShopifyPreviewResponse)"
+    },
+    {
+      "line": 1403,
+      "declaration": "@app.post(\"/api/external/shopify/sync\")"
+    },
+    {
+      "line": 1509,
+      "declaration": "@app.post(\"/api/external/orders/ingest\", response_model=ExternalOrderIngestResponse)"
+    },
+    {
+      "line": 1542,
+      "declaration": "@app.get(\"/api/external/accounts\", response_model=list[ExternalAccountResponse])"
+    },
+    {
+      "line": 1549,
+      "declaration": "@app.get(\"/api/external/product-mappings\", response_model=list[ExternalProductMappingResponse])"
+    },
+    {
+      "line": 1559,
+      "declaration": "@app.put(\"/api/external/product-mappings\", response_model=ExternalProductMappingResponse)"
+    },
+    {
+      "line": 1571,
+      "declaration": "@app.get(\"/api/external/sales/daily\", response_model=DailySkuSalePage)"
+    },
+    {
+      "line": 1623,
+      "declaration": "@app.get(\"/api/analytics/replenishment-evaluation\", response_model=ReplenishmentEvaluationPage)"
+    },
+    {
+      "line": 1651,
+      "declaration": "@app.get(\"/api/analytics/replenishment-decisions\")"
+    },
+    {
+      "line": 1663,
+      "declaration": "@app.get(\"/api/analytics/sales\")"
+    },
+    {
+      "line": 1674,
+      "declaration": "@app.get(\"/api/analytics/inventory-health\")"
+    },
+    {
+      "line": 1702,
+      "declaration": "@app.get(\"/api/analytics/product-quadrant\", response_model=ProductQuadrantResponse)"
+    },
+    {
+      "line": 1737,
+      "declaration": "@app.post(\"/api/analytics/replenishment-evaluation\", response_model=ReplenishmentEvaluationResponse, status_code=201)"
+    },
+    {
+      "line": 1766,
+      "declaration": "@app.get(\"/api/replenishment/suggestions\", response_model=ReplenishmentSuggestionPage)"
+    },
+    {
+      "line": 1776,
+      "declaration": "@app.post(\"/api/replenishment/suggestions/generate\", response_model=ReplenishmentSuggestionResponse, status_code=201)"
+    },
+    {
+      "line": 1788,
+      "declaration": "@app.post(\"/api/replenishment/suggestions/{suggestion_id}/decision\", response_model=ReplenishmentSuggestionResponse)"
+    },
+    {
+      "line": 1802,
+      "declaration": "@app.post(\"/api/purchase-requests/drafts\", response_model=PurchaseRequestResponse, status_code=201)"
+    },
+    {
+      "line": 1819,
+      "declaration": "@app.patch(\"/api/purchase-requests/{request_id}\", response_model=PurchaseRequestResponse)"
+    },
+    {
+      "line": 1841,
+      "declaration": "@app.post(\"/api/purchase-requests/{request_id}/submit\", response_model=PurchaseRequestResponse)"
+    },
+    {
+      "line": 1860,
+      "declaration": "@app.post(\"/api/purchase-requests\", response_model=PurchaseRequestResponse, status_code=201)"
+    },
+    {
+      "line": 1877,
+      "declaration": "@app.get(\"/api/purchase-requests/{request_id}\", response_model=PurchaseRequestResponse)"
+    },
+    {
+      "line": 1887,
+      "declaration": "@app.get(\"/api/purchase-requests\", response_model=PurchaseRequestPage)"
+    },
+    {
+      "line": 1903,
+      "declaration": "@app.post(\"/api/external/sync/fixture\", response_model=FixtureSyncResponse)"
+    },
+    {
+      "line": 1922,
+      "declaration": "@app.get(\"/api/external/sync/runs/{run_id}\", response_model=ExternalSyncRunResponse)"
+    },
+    {
+      "line": 1952,
+      "declaration": "@app.post(\"/api/external/sync/runs/{run_id}/retry\", response_model=ExternalSyncRunResponse)"
+    },
+    {
+      "line": 2011,
+      "declaration": "@app.get(\"/api/external/sync/runs\", response_model=list[ExternalSyncRunResponse])"
+    },
+    {
+      "line": 2023,
+      "declaration": "@app.get(\"/api/external/snapshots/freshness\")"
+    },
+    {
+      "line": 2030,
+      "declaration": "@app.post(\"/api/external/alerts/refresh\", response_model=list[AlertResponse])"
+    },
+    {
+      "line": 2037,
+      "declaration": "@app.get(\"/api/external/connectors\")"
+    },
+    {
+      "line": 2044,
+      "declaration": "@app.get(\"/api/external/taobao/capabilities\", response_model=TaobaoCapabilitiesResponse)"
+    },
+    {
+      "line": 2056,
+      "declaration": "@app.post(\"/api/external/taobao/preview\", response_model=TaobaoPreviewResponse)"
+    },
+    {
+      "line": 2077,
+      "declaration": "@app.post(\"/api/external/inventory/preview\", response_model=ExternalInventoryPreviewResponse)"
+    },
+    {
+      "line": 2097,
+      "declaration": "@app.post(\"/api/external/inventory/ingest\", response_model=ExternalInventoryIngestResponse)"
+    },
+    {
+      "line": 2132,
+      "declaration": "@app.post(\"/api/external/events/ingest\", response_model=ExternalEventIngestResponse)"
+    },
+    {
+      "line": 2155,
+      "declaration": "@app.get(\"/api/external/reconciliation/{snapshot_id}\")"
+    },
+    {
+      "line": 2167,
+      "declaration": "@app.get(\"/api/content/workflows\")"
+    },
+    {
+      "line": 2175,
+      "declaration": "@app.get(\"/api/content/workflows/{workflow_key}\")"
+    },
+    {
+      "line": 2188,
+      "declaration": "@app.post(\"/api/content/runs\", response_model=ContentJobResponse, status_code=202)"
+    },
+    {
+      "line": 2231,
+      "declaration": "@app.get(\"/api/content/jobs/{job_id}\")"
+    },
+    {
+      "line": 2241,
+      "declaration": "@app.get(\"/api/content/runs\")"
+    },
+    {
+      "line": 2255,
+      "declaration": "@app.get(\"/api/content/runs/{job_id}\")"
+    },
+    {
+      "line": 2268,
+      "declaration": "@app.get(\"/api/products/{product_id}/media\", response_model=list[ContentAssetResponse])"
+    },
+    {
+      "line": 2276,
+      "declaration": "@app.post(\"/api/products/{product_id}/media\", response_model=ContentAssetResponse, status_code=201)"
+    },
+    {
+      "line": 2309,
+      "declaration": "@app.get(\"/api/content/assets/{asset_id}\")"
+    },
+    {
+      "line": 2325,
+      "declaration": "@app.post(\"/api/content/revisions/{revision_id}/review\")"
+    },
+    {
+      "line": 2357,
+      "declaration": "@app.post(\"/api/content/revisions/{revision_id}/export\", response_model=ContentExportResponse, status_code=202)"
+    },
+    {
+      "line": 2385,
+      "declaration": "@app.get(\"/api/content/exports/{export_id}\", response_model=ContentExportResponse)"
+    },
+    {
+      "line": 2394,
+      "declaration": "@app.get(\"/api/products\", response_model=ProductPage)"
+    },
+    {
+      "line": 2420,
+      "declaration": "@app.get(\"/api/products/{product_id}\", response_model=ProductResponse)"
+    },
+    {
+      "line": 2429,
+      "declaration": "@app.get(\"/api/products/{product_id}/price-history\", response_model=list[PriceHistoryResponse])"
+    }
+  ],
+  "orm_models": [
+    {
+      "line": 29,
+      "class": "class Workspace(Base):"
+    },
+    {
+      "line": 43,
+      "class": "class UserAccount(Base):"
+    },
+    {
+      "line": 59,
+      "class": "class WorkspaceMembership(Base):"
+    },
+    {
+      "line": 76,
+      "class": "class WarehouseAccess(Base):"
+    },
+    {
+      "line": 90,
+      "class": "class AuthSession(Base):"
+    },
+    {
+      "line": 108,
+      "class": "class Product(Base):"
+    },
+    {
+      "line": 139,
+      "class": "class ProductPriceHistory(Base):"
+    },
+    {
+      "line": 153,
+      "class": "class CrawlJob(Base):"
+    },
+    {
+      "line": 196,
+      "class": "class Document(Base):"
+    },
+    {
+      "line": 213,
+      "class": "class DocumentVersion(Base):"
+    },
+    {
+      "line": 237,
+      "class": "class DocumentChunk(Base):"
+    },
+    {
+      "line": 257,
+      "class": "class DocumentProductLink(Base):"
+    },
+    {
+      "line": 275,
+      "class": "class ProductSku(Base):"
+    },
+    {
+      "line": 297,
+      "class": "class Warehouse(Base):"
+    },
+    {
+      "line": 319,
+      "class": "class InboundOrder(Base):"
+    },
+    {
+      "line": 346,
+      "class": "class InboundLine(Base):"
+    },
+    {
+      "line": 366,
+      "class": "class InventoryTransaction(Base):"
+    },
+    {
+      "line": 389,
+      "class": "class ExternalSyncRun(Base):"
+    },
+    {
+      "line": 426,
+      "class": "class ExternalInventorySnapshot(Base):"
+    },
+    {
+      "line": 461,
+      "class": "class ExternalEventInbox(Base):"
+    },
+    {
+      "line": 491,
+      "class": "class ReconciliationResult(Base):"
+    },
+    {
+      "line": 515,
+      "class": "class InventoryPolicy(Base):"
+    },
+    {
+      "line": 533,
+      "class": "class InventoryAlert(Base):"
+    },
+    {
+      "line": 557,
+      "class": "class InventoryBalance(Base):"
+    },
+    {
+      "line": 577,
+      "class": "class ExternalAccount(Base):"
+    },
+    {
+      "line": 601,
+      "class": "class ExternalProductMapping(Base):"
+    },
+    {
+      "line": 621,
+      "class": "class ExternalOrder(Base):"
+    },
+    {
+      "line": 662,
+      "class": "class ExternalOrderLine(Base):"
+    },
+    {
+      "line": 685,
+      "class": "class DailySkuSale(Base):"
+    },
+    {
+      "line": 714,
+      "class": "class ReplenishmentSuggestion(Base):"
+    },
+    {
+      "line": 754,
+      "class": "class ReplenishmentEvaluation(Base):"
+    },
+    {
+      "line": 786,
+      "class": "class ReplenishmentSuggestionAction(Base):"
+    },
+    {
+      "line": 807,
+      "class": "class PurchaseRequest(Base):"
+    },
+    {
+      "line": 832,
+      "class": "class PurchaseRequestAction(Base):"
+    },
+    {
+      "line": 854,
+      "class": "class PurchaseRequestLine(Base):"
+    },
+    {
+      "line": 870,
+      "class": "class ProductContentRevision(Base):"
+    },
+    {
+      "line": 910,
+      "class": "class ProductContentAction(Base):"
+    },
+    {
+      "line": 931,
+      "class": "class ProductContentExport(Base):"
+    },
+    {
+      "line": 956,
+      "class": "class ProductMediaAsset(Base):"
+    }
+  ],
+  "app_imports": [
+    {
+      "file": "app/__init__.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/account_admin.py",
+      "tracked": true,
+      "local_imports": [
+        "app/db.py",
+        "app/employee_auth.py"
+      ]
+    },
+    {
+      "file": "app/agent/__init__.py",
+      "tracked": true,
+      "local_imports": [
+        "app/agent/__init__.py",
+        "app/agent/audit.py",
+        "app/agent/registry.py"
+      ]
+    },
+    {
+      "file": "app/agent/adapters.py",
+      "tracked": true,
+      "local_imports": [
+        "app/agent/registry.py"
+      ]
+    },
+    {
+      "file": "app/agent/audit.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/agent/core.py",
+      "tracked": true,
+      "local_imports": [
+        "app/agent/adapters.py",
+        "app/agent/orchestrator.py",
+        "app/agent/registry.py"
+      ]
+    },
+    {
+      "file": "app/agent/impl.py",
+      "tracked": true,
+      "local_imports": [
+        "app/agent/registry.py",
+        "app/db.py",
+        "app/schemas.py"
+      ]
+    },
+    {
+      "file": "app/agent/orchestrator.py",
+      "tracked": true,
+      "local_imports": [
+        "app/agent/audit.py",
+        "app/agent/registry.py"
+      ]
+    },
+    {
+      "file": "app/agent/registry.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/agent/skills.py",
+      "tracked": true,
+      "local_imports": [
+        "app/agent/registry.py",
+        "app/dashboard.py",
+        "app/db.py",
+        "app/replenishment.py",
+        "app/repository.py"
+      ]
+    },
+    {
+      "file": "app/alerts.py",
+      "tracked": true,
+      "local_imports": [
+        "app/db.py",
+        "app/external_sync.py"
+      ]
+    },
+    {
+      "file": "app/analytics.py",
+      "tracked": true,
+      "local_imports": [
+        "app/business_dates.py",
+        "app/dashboard.py",
+        "app/db.py"
+      ]
+    },
+    {
+      "file": "app/assistant.py",
+      "tracked": false,
+      "local_imports": [
+        "app/dashboard.py",
+        "app/db.py",
+        "app/replenishment.py",
+        "app/schemas.py",
+        "app/skills_ecommerce.py",
+        "app/skills_ecommerce_platform.py"
+      ]
+    },
+    {
+      "file": "app/background.py",
+      "tracked": true,
+      "local_imports": [
+        "app/config.py",
+        "app/content_production.py",
+        "app/crawler.py",
+        "app/db.py",
+        "app/importers/__init__.py",
+        "app/jobs.py",
+        "app/rag/__init__.py",
+        "app/rag_runtime.py",
+        "app/repository.py",
+        "app/storage.py",
+        "app/upload_security.py",
+        "app/versioning.py"
+      ]
+    },
+    {
+      "file": "app/business_dates.py",
+      "tracked": false,
+      "local_imports": [
+        "app/db.py"
+      ]
+    },
+    {
+      "file": "app/catalog_live.py",
+      "tracked": false,
+      "local_imports": [
+        "app/config.py",
+        "app/crawler.py",
+        "app/schemas.py"
+      ]
+    },
+    {
+      "file": "app/catalog_replay.py",
+      "tracked": false,
+      "local_imports": [
+        "app/config.py",
+        "app/crawler.py",
+        "app/schemas.py"
+      ]
+    },
+    {
+      "file": "app/cli.py",
+      "tracked": true,
+      "local_imports": [
+        "app/background.py",
+        "app/catalog_live.py",
+        "app/catalog_replay.py",
+        "app/config.py",
+        "app/connectors.py",
+        "app/db.py",
+        "app/demo_seed.py",
+        "app/employee_auth.py",
+        "app/external_sync.py",
+        "app/importers/__init__.py",
+        "app/main.py",
+        "app/rag_runtime.py",
+        "app/repository.py",
+        "app/storage.py",
+        "app/versioning.py"
+      ]
+    },
+    {
+      "file": "app/config.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/connectors.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/content_production.py",
+      "tracked": false,
+      "local_imports": [
+        "app/config.py",
+        "app/db.py",
+        "app/quality_gate.py",
+        "app/storage.py",
+        "app/upload_security.py"
+      ]
+    },
+    {
+      "file": "app/crawler.py",
+      "tracked": true,
+      "local_imports": [
+        "app/config.py",
+        "app/schemas.py"
+      ]
+    },
+    {
+      "file": "app/dashboard.py",
+      "tracked": true,
+      "local_imports": [
+        "app/business_dates.py",
+        "app/config.py",
+        "app/db.py",
+        "app/external_sync.py"
+      ]
+    },
+    {
+      "file": "app/db.py",
+      "tracked": true,
+      "local_imports": [
+        "app/config.py"
+      ]
+    },
+    {
+      "file": "app/demo_seed.py",
+      "tracked": true,
+      "local_imports": [
+        "app/alerts.py",
+        "app/db.py",
+        "app/employee_auth.py",
+        "app/replenishment.py",
+        "app/repository.py",
+        "app/schemas.py"
+      ]
+    },
+    {
+      "file": "app/employee_auth.py",
+      "tracked": true,
+      "local_imports": [
+        "app/config.py",
+        "app/db.py"
+      ]
+    },
+    {
+      "file": "app/external_orders.py",
+      "tracked": true,
+      "local_imports": [
+        "app/connectors.py",
+        "app/db.py"
+      ]
+    },
+    {
+      "file": "app/external_sync.py",
+      "tracked": true,
+      "local_imports": [
+        "app/connectors.py",
+        "app/db.py"
+      ]
+    },
+    {
+      "file": "app/importers/__init__.py",
+      "tracked": true,
+      "local_imports": [
+        "app/importers/base.py",
+        "app/importers/docx.py",
+        "app/importers/pdf.py"
+      ]
+    },
+    {
+      "file": "app/importers/base.py",
+      "tracked": true,
+      "local_imports": [
+        "app/importers/docx.py",
+        "app/importers/pdf.py"
+      ]
+    },
+    {
+      "file": "app/importers/docx.py",
+      "tracked": true,
+      "local_imports": [
+        "app/importers/base.py"
+      ]
+    },
+    {
+      "file": "app/importers/pdf.py",
+      "tracked": true,
+      "local_imports": [
+        "app/importers/base.py"
+      ]
+    },
+    {
+      "file": "app/jobs.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/main.py",
+      "tracked": true,
+      "local_imports": [
+        "app/account_admin.py",
+        "app/agent/adapters.py",
+        "app/agent/core.py",
+        "app/agent/impl.py",
+        "app/agent/orchestrator.py",
+        "app/agent/registry.py",
+        "app/agent/skills.py",
+        "app/alerts.py",
+        "app/analytics.py",
+        "app/assistant.py",
+        "app/background.py",
+        "app/config.py",
+        "app/connectors.py",
+        "app/content_production.py",
+        "app/crawler.py",
+        "app/dashboard.py",
+        "app/db.py",
+        "app/employee_auth.py",
+        "app/external_orders.py",
+        "app/external_sync.py",
+        "app/importers/__init__.py",
+        "app/jobs.py",
+        "app/platform_adapters/base.py",
+        "app/platform_adapters/shopify.py",
+        "app/platform_adapters/taobao.py",
+        "app/platform_sync.py",
+        "app/rag_runtime.py",
+        "app/replenishment.py",
+        "app/repository.py",
+        "app/schemas.py",
+        "app/security.py",
+        "app/storage.py",
+        "app/upload_security.py",
+        "app/versioning.py",
+        "app/visual_workflows.py",
+        "app/workflow_schema.py"
+      ]
+    },
+    {
+      "file": "app/mcp_server.py",
+      "tracked": false,
+      "local_imports": [
+        "app/skills_ecommerce.py",
+        "app/skills_ecommerce_fixture.py"
+      ]
+    },
+    {
+      "file": "app/mcp_server_official.py",
+      "tracked": false,
+      "local_imports": [
+        "app/skills_ecommerce.py",
+        "app/skills_ecommerce_fixture.py",
+        "app/skills_ecommerce_platform.py"
+      ]
+    },
+    {
+      "file": "app/platform_adapters/__init__.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/platform_adapters/base.py",
+      "tracked": true,
+      "local_imports": [
+        "app/connectors.py"
+      ]
+    },
+    {
+      "file": "app/platform_adapters/shopify.py",
+      "tracked": false,
+      "local_imports": [
+        "app/platform_adapters/base.py"
+      ]
+    },
+    {
+      "file": "app/platform_adapters/taobao.py",
+      "tracked": true,
+      "local_imports": [
+        "app/connectors.py",
+        "app/platform_adapters/base.py"
+      ]
+    },
+    {
+      "file": "app/platform_sync.py",
+      "tracked": true,
+      "local_imports": [
+        "app/connectors.py",
+        "app/external_orders.py",
+        "app/external_sync.py",
+        "app/platform_adapters/base.py"
+      ]
+    },
+    {
+      "file": "app/quality_gate.py",
+      "tracked": false,
+      "local_imports": [
+        "app/workflow_schema.py"
+      ]
+    },
+    {
+      "file": "app/rag/__init__.py",
+      "tracked": true,
+      "local_imports": [
+        "app/rag/answerer.py",
+        "app/rag/embedder.py",
+        "app/rag/retriever.py",
+        "app/rag/vector_store.py"
+      ]
+    },
+    {
+      "file": "app/rag/answerer.py",
+      "tracked": true,
+      "local_imports": [
+        "app/rag/retriever.py"
+      ]
+    },
+    {
+      "file": "app/rag/embedder.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/rag/retriever.py",
+      "tracked": true,
+      "local_imports": [
+        "app/config.py",
+        "app/rag/embedder.py",
+        "app/rag/vector_store.py"
+      ]
+    },
+    {
+      "file": "app/rag/vector_store.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/rag_runtime.py",
+      "tracked": true,
+      "local_imports": [
+        "app/config.py",
+        "app/rag/__init__.py"
+      ]
+    },
+    {
+      "file": "app/replenishment.py",
+      "tracked": true,
+      "local_imports": [
+        "app/business_dates.py",
+        "app/db.py"
+      ]
+    },
+    {
+      "file": "app/repository.py",
+      "tracked": true,
+      "local_imports": [
+        "app/db.py",
+        "app/jobs.py",
+        "app/schemas.py"
+      ]
+    },
+    {
+      "file": "app/schemas.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/schemas.recovered.py",
+      "tracked": false,
+      "local_imports": []
+    },
+    {
+      "file": "app/security.py",
+      "tracked": true,
+      "local_imports": [
+        "app/config.py",
+        "app/db.py"
+      ]
+    },
+    {
+      "file": "app/skills_ecommerce.py",
+      "tracked": false,
+      "local_imports": [
+        "app/db.py"
+      ]
+    },
+    {
+      "file": "app/skills_ecommerce_fixture.py",
+      "tracked": false,
+      "local_imports": [
+        "app/skills_ecommerce.py"
+      ]
+    },
+    {
+      "file": "app/skills_ecommerce_platform.py",
+      "tracked": false,
+      "local_imports": [
+        "app/db.py"
+      ]
+    },
+    {
+      "file": "app/storage.py",
+      "tracked": true,
+      "local_imports": [
+        "app/config.py",
+        "app/upload_security.py"
+      ]
+    },
+    {
+      "file": "app/upload_security.py",
+      "tracked": true,
+      "local_imports": [
+        "app/importers/base.py"
+      ]
+    },
+    {
+      "file": "app/versioning.py",
+      "tracked": true,
+      "local_imports": []
+    },
+    {
+      "file": "app/visual_workflows.py",
+      "tracked": false,
+      "local_imports": [
+        "app/workflow_schema.py"
+      ]
+    },
+    {
+      "file": "app/workflow_schema.py",
+      "tracked": false,
+      "local_imports": []
+    }
+  ],
+  "untracked_classification": [
+    {
+      "file": "CLAUDE.md",
+      "kind": "personal_or_recovery"
+    },
+    {
+      "file": "app/assistant.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/business_dates.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/catalog_live.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/catalog_replay.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/content_production.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/mcp_server.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/mcp_server_official.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/platform_adapters/shopify.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/quality_gate.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/schemas.recovered.py",
+      "kind": "personal_or_recovery"
+    },
+    {
+      "file": "app/skills_ecommerce.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/skills_ecommerce_fixture.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/skills_ecommerce_platform.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/templates/content.html",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/templates/shopify.html",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/visual_workflows.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "app/workflow_schema.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/adr-index.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/architecture-inventory.json",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/architecture-inventory.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/catalog-live.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/catalog-replay.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/domain-boundaries.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/engineering-roadmap.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/interview-demo-script.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/mcp-platform-integration.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/mcp-server-runbook.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/mcp-tools.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/metrics.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/p0-0-release-review.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/product-architecture.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/shopify-canary-runbook.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "docs/skills-ecommerce-analysis.md",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "migrations/versions/0016_content_production.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "scripts/inventory_architecture.py",
+      "kind": "review_required"
+    },
+    {
+      "file": "tests/fixtures/catalog_replay/blocked.html",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/fixtures/catalog_replay/empty.html",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/fixtures/catalog_replay/invalid-price.html",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/fixtures/catalog_replay/manifest.json",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/fixtures/catalog_replay/page-1.html",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/fixtures/catalog_replay/page-2.html",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/test_catalog_live.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/test_catalog_replay.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/test_ecommerce_analysis.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/test_mcp_official.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/test_mcp_server.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "tests/test_quality_gate.py",
+      "kind": "candidate_or_technical"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/FDE\\346\\210\\220\\351\\225\\277\\346\\214\\207\\345\\215\\227.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/README.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-agent-readonly-boundary.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-alert-refresh-observability.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-analytics-contract-drift.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-auth-mode-conflict.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-concurrency-uniqueness.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-document-index-idempotency.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-document-upload-safety.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-evaluation-permission-contract.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-external-ingest-permission.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-external-inventory-boundary.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-inbound-ledger-idempotency.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-job-cancellation-contract.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-job-lease-recovery.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-job-payload-cursor.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-legacy-migration-repair.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-order-replay-idempotency.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-rag-index-readiness.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-release-reproducibility.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-replenishment-idempotency.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-sync-contract-observability.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-sync-partial-compensation.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/ecommerce-workspace-rbac-csrf-isolation.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/medical-rag-cache-vector-consistency.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/medical-rag-chunking-limit-semantics.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/medical-rag-database-and-sync-patterns.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/medical-rag-doc-sync-idempotency.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/medical-rag-embedding-provider-switch.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/medical-rag-vector-rebuild-performance.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\227\\256\\351\\242\\230\\350\\247\\243\\345\\206\\263\\350\\265\\204\\344\\272\\247\\345\\272\\223/medical-rag-webhook-security-and-observability.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/test1.py\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/test2.py\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/test3.py\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/\\345\\237\\272\\347\\241\\200\\347\\237\\245\\350\\257\\206\\351\\235\\242\\350\\257\\225\\351\\227\\256\\347\\255\\224.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/\\346\\250\\241\\346\\213\\237\\351\\235\\242\\350\\257\\225\\351\\227\\256\\347\\255\\224.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/\\346\\271\\226\\345\\215\\227\\350\\201\\232\\346\\231\\237_AI\\346\\231\\272\\350\\203\\275\\344\\275\\223\\345\\267\\245\\347\\250\\213\\345\\270\\210_\\344\\270\\223\\351\\241\\271\\345\\207\\206\\345\\244\\207.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/\\347\\224\\265\\345\\225\\206AI\\351\\241\\271\\347\\233\\256\\351\\235\\242\\350\\257\\225\\345\\207\\206\\345\\244\\207.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/\\351\\235\\242\\350\\257\\225\\345\\207\\206\\345\\244\\207_\\347\\256\\227\\346\\263\\225\\351\\242\\230.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/\\351\\235\\242\\350\\257\\225\\345\\207\\206\\345\\244\\207_\\347\\263\\273\\347\\273\\237\\350\\256\\276\\350\\256\\241.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/\\351\\235\\242\\350\\257\\225\\345\\207\\206\\345\\244\\207_\\351\\241\\271\\347\\233\\256\\346\\267\\261\\346\\214\\226.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/\\351\\235\\242\\350\\257\\225\\345\\244\\215\\344\\271\\240_RAG\\351\\241\\271\\347\\233\\256.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/\\351\\235\\242\\350\\257\\225\\345\\244\\215\\344\\271\\240_\\346\\250\\241\\345\\236\\213\\345\\276\\256\\350\\260\\203.md\"",
+      "kind": "review_required"
+    },
+    {
+      "file": "\"\\351\\235\\242\\350\\257\\225/\\351\\235\\242\\350\\257\\225\\345\\244\\215\\344\\271\\240\\347\\254\\224\\350\\256\\260.md\"",
+      "kind": "review_required"
+    }
+  ]
+}

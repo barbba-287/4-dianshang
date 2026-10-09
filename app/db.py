@@ -152,6 +152,12 @@ class ProductPriceHistory(Base):
 
 class CrawlJob(Base):
     __tablename__ = "crawl_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "type", "idempotency_key",
+            name="uq_crawl_job_workspace_type_key",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     workspace_id: Mapped[int | None] = mapped_column(
@@ -163,6 +169,8 @@ class CrawlJob(Base):
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
     payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    payload_hash: Mapped[str | None] = mapped_column(String(72), nullable=True, index=True)
     retry_count: Mapped[int] = mapped_column(default=0)
     max_retries: Mapped[int] = mapped_column(default=2)
     attempt: Mapped[int] = mapped_column(default=0)
@@ -859,7 +867,178 @@ class PurchaseRequestLine(Base):
     requested_qty: Mapped[int] = mapped_column(Integer)
     source_suggestion_version: Mapped[int] = mapped_column(Integer)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+class ProductContentRevision(Base):
+    __tablename__ = "product_content_revisions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "product_id", "revision_no", name="uq_content_revision_scope_no"),
+        UniqueConstraint("workspace_id", "idempotency_key", name="uq_content_revision_workspace_key"),
+    )
 
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False, index=True)
+    sku_id: Mapped[int | None] = mapped_column(ForeignKey("product_skus.id"), nullable=True, index=True)
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="generating", index=True)
+    channel: Mapped[str] = mapped_column(String(32), default="generic")
+    content_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    source_snapshot_hash: Mapped[str] = mapped_column(String(72), index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(72), nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(String(64), default="mock")
+    provider_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_mode: Mapped[str] = mapped_column(String(16), default="mock")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    prompt_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    quality_status: Mapped[str] = mapped_column(String(16), default="unknown")
+    quality_issues_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    payload_hash: Mapped[str] = mapped_column(String(72), nullable=False)
+    generation_job_id: Mapped[int | None] = mapped_column(ForeignKey("crawl_jobs.id"), nullable=True, index=True)
+    parent_revision_id: Mapped[int | None] = mapped_column(ForeignKey("product_content_revisions.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProductContentAction(Base):
+    __tablename__ = "product_content_actions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "revision_id", "action_type", "idempotency_key", name="uq_content_action_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("product_content_revisions.id"), nullable=False, index=True)
+    action_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    from_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    to_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    payload_hash: Mapped[str] = mapped_column(String(72), nullable=False)
+    actor: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ProductContentExport(Base):
+    __tablename__ = "product_content_exports"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "idempotency_key", name="uq_content_export_workspace_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    revision_id: Mapped[int] = mapped_column(ForeignKey("product_content_revisions.id"), nullable=False, index=True)
+    format: Mapped[str] = mapped_column(String(16), default="json")
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    artifact_uri: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    artifact_sha256: Mapped[str | None] = mapped_column(String(72), nullable=True)
+    artifact_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    manifest_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    payload_hash: Mapped[str] = mapped_column(String(72), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ProductMediaAsset(Base):
+    __tablename__ = "product_media_assets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False, index=True)
+    revision_id: Mapped[int | None] = mapped_column(ForeignKey("product_content_revisions.id"), nullable=True, index=True)
+    role: Mapped[str] = mapped_column(String(32), default="source", index=True)
+    storage_uri: Mapped[str] = mapped_column(String(512), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider: Mapped[str] = mapped_column(String(64), default="upload")
+    provider_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_mode: Mapped[str] = mapped_column(String(16), default="upload")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=False)
+    prompt_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    params_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+class ServiceTicket(Base):
+    __tablename__ = "service_tickets"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "ticket_no", name="uq_service_ticket_workspace_no"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    ticket_no: Mapped[str] = mapped_column(String(64), index=True)
+    subject: Mapped[str] = mapped_column(String(255))
+    issue_type: Mapped[str] = mapped_column(String(32), default="other", index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sku_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="open", index=True)
+    priority: Mapped[str] = mapped_column(String(16), default="normal", index=True)
+    channel: Mapped[str] = mapped_column(String(32), default="manual")
+    customer_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_order_ref: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    source_mode: Mapped[str] = mapped_column(String(16), default="manual")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str] = mapped_column(String(128))
+    assigned_to: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class TicketEvent(Base):
+    __tablename__ = "ticket_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("service_tickets.id"), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    body: Mapped[str] = mapped_column(Text)
+    author: Mapped[str] = mapped_column(String(128))
+    visibility: Mapped[str] = mapped_column(String(16), default="internal")
+    source_mode: Mapped[str] = mapped_column(String(16), default="manual")
+    simulated: Mapped[bool] = mapped_column(Boolean, default=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class TicketAssignment(Base):
+    __tablename__ = "ticket_assignments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("service_tickets.id"), nullable=False, index=True)
+    assignee: Mapped[str] = mapped_column(String(128))
+    actor: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class TicketLink(Base):
+    __tablename__ = "ticket_links"
+    __table_args__ = (UniqueConstraint("workspace_id", "ticket_id", "entity_type", "entity_id", name="uq_ticket_link_identity"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    ticket_id: Mapped[int] = mapped_column(ForeignKey("service_tickets.id"), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(32))
+    entity_id: Mapped[int | str] = mapped_column(String(255))
+    relation: Mapped[str] = mapped_column(String(32), default="related")
 
 
 def backfill_legacy_workspace(db, workspace_id: int) -> int:
@@ -904,6 +1083,9 @@ def backfill_legacy_workspace(db, workspace_id: int) -> int:
         PurchaseRequest,
         PurchaseRequestLine,
         ReplenishmentEvaluation,
+        ProductContentRevision,
+        ProductContentAction,
+        ProductContentExport,
     )
     changed = 0
     for model in models:
@@ -953,8 +1135,21 @@ def init_db() -> None:
             "purchase_request_lines", "purchase_request_actions", "replenishment_evaluations", "workspaces",
             "user_accounts", "workspace_memberships", "warehouse_access",
             "auth_sessions",
+            "product_content_revisions", "product_content_actions", "product_content_exports", "product_media_assets",
+            "service_tickets", "ticket_events", "ticket_assignments", "ticket_links",
         }
-        if required_current.issubset(product_columns) and required_tables.issubset(tables):
+        service_ticket_columns = {
+            column["name"] for column in inspector.get_columns("service_tickets")
+        } if "service_tickets" in tables else set()
+        required_service_ticket_columns = {
+            "id", "workspace_id", "ticket_no", "subject", "issue_type",
+            "description", "sku_ref", "status", "priority", "created_at", "updated_at",
+        }
+        if (
+            required_current.issubset(product_columns)
+            and required_tables.issubset(tables)
+            and required_service_ticket_columns.issubset(service_ticket_columns)
+        ):
             from alembic import command
             from alembic.config import Config
 

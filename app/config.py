@@ -46,8 +46,30 @@ class Settings(BaseSettings):
     taobao_access_token_ref: str = ""
     taobao_request_timeout_seconds: int = 15
     taobao_max_page_size: int = 100
+    taobao_catalog_live_enabled: bool = False
+    taobao_catalog_live_min_delay_seconds: float = 3.0
+    taobao_catalog_live_page_timeout_seconds: int = 20
+    taobao_catalog_live_total_timeout_seconds: int = 90
 
-    # S7 API 安全（默认关闭以保留本地演示兼容）
+    # AIGC 商品页素材生产；真实 Provider 默认关闭，测试/演示可用 mock
+    aigc_image_provider: str = "mock"
+    aigc_image_model: str = "wan2.7-image"
+    aigc_api_key: str = ""
+    aigc_workspace: str = ""
+    aigc_image_timeout_seconds: int = 120
+    aigc_max_candidates: int = 4
+    aigc_max_upload_bytes: int = 10 * 1024 * 1024
+
+    # Shopify Admin GraphQL read-only Dev Store Canary; disabled by default
+    shopify_live_enabled: bool = False
+    shopify_store_domain: str = ""
+    shopify_access_token: str = ""
+    shopify_api_version: str = "2026-07"
+    shopify_request_timeout_seconds: int = 20
+    shopify_max_retries: int = 2
+    shopify_max_page_size: int = 50
+    shopify_max_pages: int = 100
+
     api_auth_enabled: bool = False
     api_key: str = ""
     api_tenant_id: str = "default"

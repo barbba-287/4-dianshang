@@ -201,6 +201,8 @@ def enqueue_job(
     max_retries: int | None = None,
     worker_id: str | None = None,
     workspace_id: int | None = None,
+    idempotency_key: str | None = None,
+    payload_hash: str | None = None,
 ) -> CrawlJob:
     """插入一条 queued 任务并返回。
 
@@ -217,6 +219,8 @@ def enqueue_job(
         status=JobStatus.QUEUED.value,
         max_retries=max_retries if max_retries is not None else 2,
         run_id=uuid4().hex,
+        idempotency_key=idempotency_key,
+        payload_hash=payload_hash,
     )
     if payload:
         job.cursor = _json.dumps(payload, ensure_ascii=False)

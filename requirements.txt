@@ -30,3 +30,6 @@ alembic>=1.13,<2
 pytest>=8.0,<9
 httpx>=0.27,<1             # FastAPI TestClient 依赖
 reportlab>=4.0,<5          # 仅测试用于生成最小可复现 PDF
+openpyxl>=3.1,<4             # 格式化运营 Excel 导出
+# 阿里云百炼万相 2.7 Provider；真实调用默认关闭，Key 只从本地 .env 读取
+dashscope>=1.27,<2

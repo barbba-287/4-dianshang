@@ -5,14 +5,35 @@
   <title>运营工作台</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/static/workspace-shell.css">
-<script src="/static/labels.js"></script>
+<script src="/static/labels.js?v=20260915-2"></script>
   <style>
+    #operations-today-panel { margin: 1rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: #fffdf5; }
+    #operations-today-panel .todo-header { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.7rem; align-items:flex-start; }
+    #operations-today-panel .todo-summary { display:flex; flex-wrap:wrap; gap:.45rem; margin:.75rem 0; }
+    #operations-today-panel .todo-list { display:grid; gap:.5rem; }
+    #operations-today-panel .todo-toolbar { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; margin:.7rem 0; }
+    #operations-today-panel .todo-toolbar button { min-height:2rem; padding:.4rem .6rem; }
+    #operations-today-panel .todo-select { flex:0 0 auto; margin-right:.45rem; }
+    #operations-today-panel .todo-item { display:flex; justify-content:space-between; gap:1rem; padding:.7rem; border:1px solid var(--line); border-radius:.45rem; background:#fff; }
+    #operations-today-panel .todo-item-main { min-width:0; }
+    #operations-today-panel .todo-item-title { font-weight:650; }
+    #operations-today-panel .todo-item-meta { margin-top:.25rem; font-size:.78rem; color:var(--muted); overflow-wrap:anywhere; }
+    #operations-today-panel .todo-item a { flex:0 0 auto; align-self:center; }
+    @media(max-width:600px){#operations-today-panel .todo-item{display:block}#operations-today-panel .todo-item a{display:inline-block;margin-top:.5rem}}
     #products { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .85rem; margin-top: 1rem; }
     .price { color: var(--danger); font-size: 1.2rem; font-weight: 700; } .step { margin-top: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: #fbfcfe; } .step h3 { margin-bottom: .55rem; font-size: .95rem; }
   </style>
 </head>
 <body>
   <div class="shell"><aside class="sidebar"></aside><main class="main"><header class="topbar"><div class="muted">Workspace / <strong>运营工作台</strong></div><div><button id="logout" type="button">退出登录</button></div></header><div class="content"><div class="page-heading"><div><h1>运营工作台</h1><p class="muted">商品资料、仓储入库与补货采购协同。</p></div><button id="crawl" type="button">采集样例商品</button></div><p id="message" class="status" role="status">点击按钮从本地 fixture 采集商品。</p>
+
+  <section id="operations-today-panel" aria-labelledby="operations-today-heading">
+    <div class="todo-header"><div><h2 id="operations-today-heading">今日待办</h2><p id="operations-today-meta" class="muted">正在读取当前 Workspace 的待办…</p></div><button id="refresh-operations-today" class="secondary" type="button">刷新待办</button></div>
+    <div id="operations-today-summary" class="todo-summary" aria-label="今日待办分类"></div>
+    <div class="todo-toolbar" aria-label="待办批量操作"><label><input id="operations-today-select-all" type="checkbox"> 全选当前列表</label><button id="operations-today-clear-selection" class="secondary" type="button">清除选择</button><button id="operations-today-export-selected" class="secondary" type="button">导出 Excel（已选）</button><button id="operations-today-export-all" class="secondary" type="button">导出 Excel（全部）</button><span id="operations-today-selection-count" class="muted">未选择</span></div>
+    <p id="operations-today-message" class="status" role="status"></p>
+    <div id="operations-today-list" class="todo-list" aria-live="polite"></div>
+  </section>
 
   <section id="product-materials-panel" aria-labelledby="products-heading">
     <h2 id="products-heading">商品资料</h2>
@@ -21,6 +42,12 @@
       <button type="submit">搜索</button>
     </form>
     <div id="products" aria-live="polite"></div>
+  </section>
+
+  <section id="external-facts-panel" aria-labelledby="external-facts-heading">
+    <h2 id="external-facts-heading">跨境平台事实</h2>
+    <p id="external-facts-message" class="status" role="status">正在读取 Shopify 外部库存观察…</p>
+    <div class="table-wrap"><table><thead><tr><th>平台</th><th>来源</th><th>库存位置</th><th>库存快照</th><th>可售数量</th><th>有库存商品</th><th>说明</th></tr></thead><tbody id="external-facts-items"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody></table></div>
   </section>
 
   <section id="warehouse" aria-labelledby="warehouse-heading">
@@ -80,6 +107,17 @@
   <script>
     const products = document.querySelector('#products');
     const message = document.querySelector('#message');
+    const operationsTodayMeta = document.querySelector('#operations-today-meta');
+    const operationsTodayMessage = document.querySelector('#operations-today-message');
+    const operationsTodaySummary = document.querySelector('#operations-today-summary');
+    const operationsTodayList = document.querySelector('#operations-today-list');
+    const refreshOperationsTodayButton = document.querySelector('#refresh-operations-today');
+    const operationsTodaySelectAll = document.querySelector('#operations-today-select-all');
+    const operationsTodayClearSelection = document.querySelector('#operations-today-clear-selection');
+    const operationsTodayExportSelected = document.querySelector('#operations-today-export-selected');
+    const operationsTodayExportAll = document.querySelector('#operations-today-export-all');
+    const operationsTodaySelectionCount = document.querySelector('#operations-today-selection-count');
+    let operationsTodayBody = null;
     const crawlButton = document.querySelector('#crawl');
     const warehouseMessage = document.querySelector('#warehouse-message');
     const warehouseSelect = document.querySelector('#warehouse-select');
@@ -148,11 +186,114 @@
       element.className = `status${kind ? ` ${kind}` : ''}`;
     }
 
+    function statusLabel(value) {
+      return value === 'draft'
+        ? '草稿，待人工复核'
+        : value === 'submitted'
+          ? '已提交，待人工处理'
+          : dianshangLabel(value, DianShangLabels.status, '未知状态');
+    }
+
     function setBusy(button, busy) {
       button.disabled = busy;
       if (busy) button.dataset.originalText = button.textContent;
       if (!busy && button.dataset.originalText) button.textContent = button.dataset.originalText;
       if (busy) button.textContent = '处理中…';
+    }
+
+    const todoLabels = {
+      inventory_alert: '库存告警', replenishment_review: '补货待确认', purchase_draft: '采购草稿',
+      sync_failure: '同步异常', content_review: '内容审核', inbound_confirmation: '入库确认'
+    };
+    const todoPriorityLabels = {critical: '紧急', high: '高', medium: '中', low: '低'};
+
+    function todoPriorityTag(priority) {
+      const cls = priority === 'critical' ? 'error' : priority === 'high' ? 'warn' : '';
+      return `<span class="tag ${cls}">${escapeHtml(todoPriorityLabels[priority] || priority || '未知优先级')}</span>`;
+    }
+
+    function selectedTodoIds() {
+      return [...document.querySelectorAll('input[data-todo-select]:checked')].map(input => input.value);
+    }
+
+    function updateTodoSelectionCount() {
+      const selected = selectedTodoIds();
+      const total = operationsTodayBody?.items?.length || 0;
+      operationsTodaySelectionCount.textContent = selected.length ? `已选择 ${selected.length}/${total}` : '未选择';
+      operationsTodaySelectAll.checked = total > 0 && selected.length === total;
+      operationsTodaySelectAll.indeterminate = selected.length > 0 && selected.length < total;
+      operationsTodayExportSelected.disabled = selected.length === 0;
+    }
+
+    async function downloadOperationsExcel(ids = null) {
+      const params = new URLSearchParams({limit: '200'});
+      if (ids?.length) params.set('todo_ids', ids.join(','));
+      const buttons = ids?.length ? [operationsTodayExportSelected] : [operationsTodayExportAll];
+      buttons.forEach(button => setBusy(button, true));
+      setMessage(operationsTodayMessage, '正在生成 Excel…');
+      try {
+        const response = await fetch(`/api/operations/today/export.xlsx?${params.toString()}`, {credentials: 'same-origin'});
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        if (!response.ok || !contentType.includes('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')) {
+          const responseText = await response.text();
+          let detail = responseText;
+          try {
+            const payload = JSON.parse(responseText);
+            detail = payload.detail?.message || payload.detail || payload.message || responseText;
+          } catch (_) {}
+          throw new Error(typeof detail === 'string' ? detail : `导出请求失败（HTTP ${response.status}）`);
+        }
+        const blob = await response.blob();
+        if (!blob.size) throw new Error('导出文件为空，请重试');
+        const disposition = response.headers.get('content-disposition') || '';
+        const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+        const plainFilename = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+        const filename = encodedFilename ? decodeURIComponent(encodedFilename) : (plainFilename || '今日待办清单.xlsx');
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = filename.endsWith('.xlsx') ? filename : 'operations-today.xlsx';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+        const rowCount = response.headers.get('x-export-row-count');
+        const hash = response.headers.get('x-export-sha256');
+        const countText = rowCount == null ? (ids?.length ?? operationsTodayBody?.items?.length ?? 0) : Number(rowCount);
+        setMessage(operationsTodayMessage, `Excel 已下载（${countText} 条${hash ? `，SHA-256 ${hash.slice(0, 12)}…` : ''}）；仅导出，不改变业务状态。`, 'success');
+      } catch (error) {
+        setMessage(operationsTodayMessage, `Excel 导出失败：${error.message || '网络错误，请重试'}`, 'error');
+      } finally {
+        buttons.forEach(button => setBusy(button, false));
+      }
+    }
+
+    function renderOperationsToday(data) {
+      operationsTodayBody = data;
+      const summary = data.summary || {};
+      const counts = summary.by_type || {};
+      operationsTodaySummary.innerHTML = Object.entries(counts).map(([type, count]) => `<span class="tag">${escapeHtml(todoLabels[type] || type)}：${escapeHtml(count)}</span>`).join('') || '<span class="muted">暂无待办</span>';
+      const evidence = data.simulated ? '演示数据 · 虚构商家 · 非真实业务' : `来源：${data.source_mode || '当前 Workspace'} · 证据级别 ${data.evidence_level || '未知'}`;
+      operationsTodayMeta.textContent = `${evidence} · 截止 ${data.as_of ? new Date(data.as_of).toLocaleString('zh-CN') : '未知'} · ${summary.total || 0} 项待办`;
+      const items = data.items || [];
+      operationsTodayList.innerHTML = items.length ? items.map(item => `<article class="todo-item"><div class="todo-item-main"><div class="todo-item-title"><input class="todo-select" data-todo-select type="checkbox" value="${escapeHtml(item.todo_id)}" aria-label="选择 ${escapeHtml(item.title)}">${todoPriorityTag(item.priority)}　${escapeHtml(item.title)}</div><div class="todo-item-meta">${escapeHtml(todoLabels[item.type] || item.type)} · ${escapeHtml(item.reason)}${item.warehouse_id ? ` · 仓库 #${escapeHtml(item.warehouse_id)}` : ''}</div></div>${item.target_path ? `<a class="secondary" href="${escapeHtml(item.target_path)}">去处理</a>` : '<span class="muted">待补充入口</span>'}</article>`).join('') : '<div class="empty">当前没有待处理事项。客服工单等尚未接入的领域不会被伪造为 0。</div>';
+      document.querySelectorAll('input[data-todo-select]').forEach(input => input.addEventListener('change', updateTodoSelectionCount));
+      updateTodoSelectionCount();
+      const limitations = data.meta?.limitations || [];
+      setMessage(operationsTodayMessage, limitations[0] || '待办由现有业务事实只读聚合，处理动作仍由原领域页面执行。');
+    }
+
+    async function loadOperationsToday() {
+      setBusy(refreshOperationsTodayButton, true);
+      setMessage(operationsTodayMessage, '正在读取今日待办…');
+      try {
+        renderOperationsToday(await api('/api/operations/today?limit=100'));
+      } catch (error) {
+        operationsTodaySummary.innerHTML = '';
+        operationsTodayList.innerHTML = '<div class="empty">今日待办暂时无法加载，其他工作台功能仍可继续使用。</div>';
+        setMessage(operationsTodayMessage, `待办加载失败：${error.message || '网络错误'}`, 'error');
+        operationsTodayMeta.textContent = '加载失败';
+      } finally { setBusy(refreshOperationsTodayButton, false); }
     }
 
     function render(data) {
@@ -182,7 +323,6 @@
         const suggestionById = new Map(suggestions.map(item => [item.id, item]));
         const requestBySuggestion = new Map();
         (requests.items || []).forEach(request => (request.lines || []).forEach(line => requestBySuggestion.set(line.suggestion_id, request)));
-        const statusLabel = value => value === 'draft' ? '草稿，待人工复核' : value === 'submitted' ? '已提交，待人工处理' : dianshangLabel(value, DianShangLabels.status, '未知状态');
         const rows = [];
         suggestionById.forEach(item => {
           const request = requestBySuggestion.get(item.id);
@@ -303,6 +443,24 @@
       finally { setBusy(refreshInventoryButton, false); }
     }
 
+    async function loadExternalFacts() {
+      const target = document.querySelector('#external-facts-items');
+      const messageTarget = document.querySelector('#external-facts-message');
+      try {
+        const response = await api('/api/dashboard/summary?days=14&recent_limit=1');
+        const item = response.external_facts?.shopify_inventory;
+        if (!item || !item.snapshot_count) {
+          target.innerHTML = '<tr><td colspan="7" class="muted">暂无 Shopify 外部库存快照，请先在 Shopify 页面点击“同步到外部事实层”。</td></tr>';
+          messageTarget.textContent = '当前 Workspace 尚未写入 Shopify 外部库存事实。';
+          return;
+        }
+        target.innerHTML = `<tr><td>Shopify</td><td>${escapeHtml(item.source_mode || '未知')}</td><td>${escapeHtml(item.location_count)}</td><td>${escapeHtml(item.snapshot_count)}</td><td>${escapeHtml(item.available_qty)}</td><td>${escapeHtml(item.positive_item_count)}</td><td>${escapeHtml(item.note)}</td></tr>`;
+        messageTarget.textContent = `已读取 Shopify 真实外部库存：${item.snapshot_count} 条快照，${item.location_count} 个位置；不覆盖内部库存台账。`;
+      } catch (error) {
+        target.innerHTML = `<tr><td colspan="7" class="error">跨境事实加载失败：${escapeHtml(error.message || '网络错误')}</td></tr>`;
+      }
+    }
+
     async function loadWarehouseData() {
       try {
         const [warehouses, skus] = await Promise.all([api('/api/warehouses'), api('/api/skus')]);
@@ -362,6 +520,11 @@
     skuProductSelect.onchange = updateControls;
     refreshInventoryButton.onclick = loadInventory;
     refreshPurchasesButton.onclick = loadPurchaseWorkflow;
+    refreshOperationsTodayButton.onclick = loadOperationsToday;
+    operationsTodaySelectAll.onchange = () => { document.querySelectorAll('input[data-todo-select]').forEach(input => { input.checked = operationsTodaySelectAll.checked; }); updateTodoSelectionCount(); };
+    operationsTodayClearSelection.onclick = () => { document.querySelectorAll('input[data-todo-select]').forEach(input => { input.checked = false; }); updateTodoSelectionCount(); };
+    operationsTodayExportSelected.onclick = () => downloadOperationsExcel(selectedTodoIds());
+    operationsTodayExportAll.onclick = () => downloadOperationsExcel();
     document.querySelector('#search').onsubmit = event => { event.preventDefault(); loadProducts(); };
     crawlButton.onclick = crawl;
     document.querySelector('#logout').onclick = async () => {
@@ -369,6 +532,8 @@
       catch (error) { setMessage(message, `退出失败：${error.message || '网络错误'}`, 'error'); }
     };
 
+    loadOperationsToday();
+    loadExternalFacts();
     loadProducts();
     loadWarehouseData();
     loadPendingConfirmations();

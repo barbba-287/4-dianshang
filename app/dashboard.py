@@ -20,7 +20,34 @@ from app.db import (
     Product,
     ProductSku,
     Warehouse,
+    ExternalInventorySnapshot,
 )
+
+
+def _quality_from_completeness(values: list[str]) -> str:
+    """Collapse row-level completeness without treating missing data as zero."""
+    if not values or all(value == "insufficient" for value in values):
+        return "insufficient"
+    if all(value == "complete" for value in values):
+        return "complete"
+    return "partial"
+
+
+def _metric_meta(*, metric: str, workspace_id: int, as_of: date | str | None, value=None, source: str, data_completeness: str, reason: str | None = None, numerator=None, denominator=None, **scope) -> dict:
+    return {
+        "metric": metric,
+        "value": value,
+        "numerator": numerator,
+        "denominator": denominator,
+        "workspace_id": workspace_id,
+        "as_of": as_of,
+        "timezone": "UTC",
+        "source": source,
+        "data_completeness": data_completeness,
+        "metric_version": "1",
+        "reason": reason,
+        **scope,
+    }
 
 
 def _sales_window(db: Session, *, workspace_id: int, start: date, end: date) -> dict:
@@ -35,15 +62,24 @@ def _sales_window(db: Session, *, workspace_id: int, start: date, end: date) -> 
     total_refund = sum(row.refunded_qty for row in rows)
     days = (end - start).days + 1
     observed_days = len({row.sales_date for row in rows})
-    complete_days = {row.sales_date for row in rows if row.data_completeness == "complete"}
-    complete = len(complete_days) >= days if rows else False
+    rows_by_date: dict[date, list[DailySkuSale]] = {}
+    for row in rows:
+        rows_by_date.setdefault(row.sales_date, []).append(row)
+    complete_days = {
+        sales_date
+        for sales_date, day_rows in rows_by_date.items()
+        if all(row.data_completeness == "complete" for row in day_rows)
+    }
+    complete_rows = [row for row in rows if row.sales_date in complete_days]
+    complete_net = sum(row.net_qty for row in complete_rows)
+    complete = len(complete_days) == days if rows else False
     return {
         "from": start.isoformat(), "to": end.isoformat(), "required_days": days,
         "observed_days": observed_days, "missing_days": max(0, days - len(complete_days)),
         "gross_qty": total_gross,
         "refunded_qty": total_refund, "net_qty": total_net,
         "effective_sale_days": len(complete_days),
-        "daily_avg_qty": float(Decimal(total_net) / len(complete_days)) if complete and complete_days else None,
+        "daily_avg_qty": float(Decimal(complete_net) / len(complete_days)) if complete and complete_days else None,
         "data_completeness": "complete" if complete else "insufficient",
         "quality_reason": None if complete else "INCOMPLETE_COVERAGE",
     }
@@ -51,14 +87,29 @@ def _sales_window(db: Session, *, workspace_id: int, start: date, end: date) -> 
 
 def build_sales_summary(db: Session, *, workspace_id: int, as_of: date | None = None) -> dict:
     as_of = resolve_sales_as_of(db, workspace_id=workspace_id, explicit_as_of=as_of)
+    windows = {
+        "7": _sales_window(db, workspace_id=workspace_id, start=as_of - timedelta(days=6), end=as_of),
+        "14": _sales_window(db, workspace_id=workspace_id, start=as_of - timedelta(days=13), end=as_of),
+        "30": _sales_window(db, workspace_id=workspace_id, start=as_of - timedelta(days=29), end=as_of),
+    }
+    quality = _quality_from_completeness([item["data_completeness"] for item in windows.values()])
     return {
-        "windows": {
-            "7": _sales_window(db, workspace_id=workspace_id, start=as_of - timedelta(days=6), end=as_of),
-            "14": _sales_window(db, workspace_id=workspace_id, start=as_of - timedelta(days=13), end=as_of),
-            "30": _sales_window(db, workspace_id=workspace_id, start=as_of - timedelta(days=29), end=as_of),
+        "windows": windows,
+        "as_of": as_of.isoformat(),
+        "meta": {
+            "workspace_id": workspace_id,
+            "as_of": as_of.isoformat(),
+            "timezone": "UTC",
+            "source": "DailySkuSale",
+            "data_completeness": quality,
+            "metric_version": "1",
+            "metrics": [
+                _metric_meta(metric=f"sales_{window}_day_net_qty", workspace_id=workspace_id, as_of=as_of.isoformat(), value=data["net_qty"], source="DailySkuSale", data_completeness=data["data_completeness"], reason=data["quality_reason"], numerator=data["net_qty"], denominator=data["effective_sale_days"] or None)
+                for window, data in windows.items()
+            ],
+            "limitations": ["销量按外部订单创建日统计；取消和退款修订创建日", "缺少完整覆盖日期时不把缺失日期当作零销量"],
         },
         "limitations": ["销量按外部订单创建日统计；取消和退款修订创建日", "缺少完整覆盖日期时不把缺失日期当作零销量"],
-        "as_of": as_of.isoformat(),
     }
 
 
@@ -119,15 +170,28 @@ def build_sku_health(
             window_start = as_of - timedelta(days=window - 1)
             matching = [row for row in rows if window_start <= row.sales_date <= as_of]
             observed_days = len({row.sales_date for row in matching})
-            complete_days = len({row.sales_date for row in matching if row.data_completeness == "complete"})
+            rows_by_day: dict[date, list[DailySkuSale]] = {}
+            for row in matching:
+                rows_by_day.setdefault(row.sales_date, []).append(row)
+            complete_dates = {
+                sales_date
+                for sales_date, day_rows in rows_by_day.items()
+                if all(row.data_completeness == "complete" for row in day_rows)
+            }
+            complete_days = len(complete_dates)
             net_qty = sum(row.net_qty for row in matching)
+            complete_net_qty = sum(row.net_qty for row in matching if row.sales_date in complete_dates)
             complete = complete_days == window
-            avg = (Decimal(net_qty) / complete_days) if complete and complete_days else None
+            # A sparse but bounded history is still useful for an operator:
+            # compute its average over observed complete days, while retaining
+            # the explicit completeness flag so the UI never presents it as a
+            # fully covered forecast window.
+            avg = (Decimal(complete_net_qty) / complete_days) if complete_days else None
             metrics[str(window)] = {
                 "sales_qty": net_qty,
                 "effective_sale_days": complete_days,
                 "daily_avg_qty": float(avg) if avg is not None else None,
-                "data_completeness": "complete" if complete else "insufficient",
+                "data_completeness": "complete" if complete else "partial" if complete_days else "insufficient",
                 "quality_reason": None if complete else "INCOMPLETE_COVERAGE",
                 "observed_days": observed_days,
             }
@@ -320,6 +384,23 @@ def build_dashboard_summary(
     alert_summary["unlinked"] = [item for item in alert_summary["recent"] if item.get("sku_id") not in sku_labels]
     from app.external_sync import snapshot_freshness
     freshness = snapshot_freshness(db, workspace_id=workspace_id)
+    shopify_snapshots = db.scalars(
+        select(ExternalInventorySnapshot).where(
+            ExternalInventorySnapshot.workspace_id == workspace_id,
+            ExternalInventorySnapshot.platform == "shopify",
+        ).order_by(ExternalInventorySnapshot.as_of.desc(), ExternalInventorySnapshot.id.desc())
+    ).all()
+    shopify_facts = {
+        "platform": "shopify",
+        "source_mode": "shopify_live" if any(not item.simulated for item in shopify_snapshots) else (shopify_snapshots[0].source_mode if shopify_snapshots else None),
+        "simulated": all(item.simulated for item in shopify_snapshots) if shopify_snapshots else None,
+        "snapshot_count": len(shopify_snapshots),
+        "available_qty": sum(item.available_qty for item in shopify_snapshots),
+        "positive_item_count": sum(1 for item in shopify_snapshots if item.available_qty > 0),
+        "location_count": len({item.warehouse_ref for item in shopify_snapshots if item.warehouse_ref}),
+        "latest_as_of": shopify_snapshots[0].as_of.isoformat() if shopify_snapshots else None,
+        "note": "Shopify 外部库存观察值；不计入内部库存台账",
+    }
     sync_health = build_sync_health_summary(
         db,
         workspace_id=workspace_id,
@@ -374,6 +455,7 @@ def build_dashboard_summary(
         "sales_trend": _sales_trend(db, workspace_id=workspace_id, as_of=as_of, days=min(max(days, 7), 30), sku_id=sku_id),
         "inventory_chart": _inventory_chart(db, workspace_id=workspace_id, warehouse_id=warehouse_id),
         "sku_health": sku_health,
+        "external_facts": {"shopify_inventory": shopify_facts},
         "unsupported_metrics": ["gmv", "inventory_turnover", "forecast", "dynamic_replenishment_qty"],
         "limitations": ["库存指标仅代表已确认的内部 on_hand；外部平台快照不在本汇总中跨来源相加", "入库数量按入库单创建时间统计", "销量按外部订单创建日统计，覆盖不完整时不计算日均"],
     }

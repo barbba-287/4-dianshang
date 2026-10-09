@@ -2,7 +2,7 @@
 window.DianShangLabels = Object.freeze({
   status: Object.freeze({healthy:'健康',reorder:'建议补货',urgent:'紧急',data_insufficient:'数据不足',no_sales:'无销量',suggested:'待处理',modified:'已调整',confirmed:'已确认',ignored:'已忽略',submitted:'已提交',draft:'草稿',running:'运行中',succeeded:'成功',failed:'失败',partial:'部分成功',stalled:'停滞',expected:'待收货',received:'已收货待确认',cancelled:'已取消',queued:'排队中',retry_wait:'等待重试'}),
   completeness: Object.freeze({complete:'完整',insufficient:'数据不足',partial:'部分完整'}),
-  reason: Object.freeze({LOW_STOCK:'库存偏低',STOCK_SUFFICIENT:'库存充足',INCOMPLETE_COVERAGE:'销量覆盖不完整',NO_SALES:'暂无销量'}),
+  reason:Object.freeze({LOW_STOCK:'库存偏低',STOCK_SUFFICIENT:'库存充足',INCOMPLETE_COVERAGE:'销量覆盖不完整',GROWTH_DATA_INSUFFICIENT:'增长对比数据不足',NO_SALES:'暂无销量'}),
   quadrant: Object.freeze({focal_supplement:'重点补货',healthy:'健康商品',watch:'观察商品',slow_risk:'滞销风险',insufficient:'数据不足'}),
   syncType: Object.freeze({orders:'订单同步',inventory:'库存同步',events:'事件同步',fixture_bundle:'订单与库存同步'}),
   resource: Object.freeze({orders:'订单',inventory:'库存'}),
@@ -19,5 +19,6 @@ window.DianShangLabels = Object.freeze({
 });
 window.dianshangLabel = function(value, group, fallback='其他') {
   if (value == null || value === '') return '数据不足';
-  return (window.DianShangLabels[group] && window.DianShangLabels[group][value]) || `${fallback}（${value}）`;
+  const labels = typeof group === 'string' ? window.DianShangLabels[group] : group;
+  return (labels && labels[value]) || `${fallback}（${value}）`;
 };

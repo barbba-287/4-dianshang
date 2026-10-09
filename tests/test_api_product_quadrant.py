@@ -101,14 +101,54 @@ def test_product_quadrant_classifies_focal_supplement(client):
     assert item["quadrant"] in {"focal_supplement", "healthy", "watch", "slow_risk"}
 
 
-def test_product_quadrant_marks_insufficient_when_window_missing(client):
+def test_product_quadrant_preserves_usable_days_when_growth_window_missing(client):
     c, db_mod, workspace_id, _wh, sku_ids = client
     _seed_sales(db_mod, workspace_id=workspace_id, sku_id=sku_ids[1], account_ref="partial", daily_qty=1, days=3, end=date.today())
     body = c.get("/api/analytics/product-quadrant").json()
     item = next(item for item in body["items"] if item["sku_id"] == sku_ids[1])
-    assert item["quadrant"] == "insufficient"
+    assert item["growth_rate"] is None
+    assert item["days_of_inventory"] is not None
+    assert item["quadrant"] == "watch"
+    assert item["data_completeness"] == "partial"
+    assert item["reason"] == "GROWTH_DATA_INSUFFICIENT"
+    assert body["summary"]["watch"] == 1
     assert "growth_data_insufficient" in body["unsupported_metrics"]
     assert "days_data_insufficient" in body["unsupported_metrics"]
+
+
+def test_product_quadrant_average_excludes_partial_sales_rows(client):
+    c, db_mod, workspace_id, _wh, sku_ids = client
+    cutoff = date.today()
+    _seed_sales(db_mod, workspace_id=workspace_id, sku_id=sku_ids[0], account_ref="complete-row", daily_qty=1, days=1, end=cutoff - timedelta(days=1))
+    with db_mod.SessionLocal() as db:
+        account = db_mod.ExternalAccount(workspace_id=workspace_id, platform="jd", account_ref="partial-row", store_ref="s")
+        db.add(account); db.flush()
+        db.add(db_mod.DailySkuSale(
+            workspace_id=workspace_id, external_account_id=account.id, platform="jd",
+            account_ref="partial-row", store_ref="s", external_sku="S-partial-row",
+            internal_sku_id=sku_ids[0], sales_date=cutoff, gross_qty=99,
+            cancelled_qty=0, refunded_qty=0, net_qty=99,
+            gross_amount=Decimal("990.00"), refund_amount=Decimal("0"),
+            net_amount=Decimal("990.00"), order_count=1, data_completeness="partial",
+        ))
+        db.commit()
+
+    response = c.get("/api/analytics/product-quadrant", params={"as_of": cutoff.isoformat()})
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["sku_id"] == sku_ids[0])
+    assert item["windows"]["days"]["net_qty"] == 100
+    assert item["windows"]["days"]["daily_avg_qty"] == 1.0
+    assert item["windows"]["days"]["data_completeness"] == "partial"
+    assert item["days_of_inventory"] == 20.0
+
+
+def test_product_quadrant_marks_insufficient_when_no_usable_days(client):
+    c, db_mod, workspace_id, _wh, sku_ids = client
+    body = c.get("/api/analytics/product-quadrant").json()
+    item = next(item for item in body["items"] if item["sku_id"] == sku_ids[1])
+    assert item["days_of_inventory"] is None
+    assert item["quadrant"] == "insufficient"
+    assert body["summary"]["insufficient"] >= 1
 
 
 def test_warehouse_id_outside_workspace_returns_404(client):

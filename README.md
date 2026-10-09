@@ -26,7 +26,7 @@
 | 淘宝只读 Adapter | 只读协议、脱敏 fixture、能力查询和离线 preview；真实网络默认关闭，不提供下单/付款/退款/改价/库存写回 |
 | Shopify Dev Store 只读 Canary | 官方 Admin GraphQL 只读接入商品、订单、库存；已验证真实商品/订单/库存结构，订单与库存可同步到外部事实层；不执行 Shopify mutation |
 | 离线多平台同步编排 | JSON/CSV/mock 订单+库存 bundle、ExternalSyncRun 成功/失败、账户/店铺一致性校验和幂等回放；Shopify live 资源级 partial/重试链路已接入 |
-| 迁移与回归 | 当前 Alembic head `0016_content_production`；全量回归结果为 `197 passed, 3 failed`，失败项见文末回归基线；MySQL 迁移未在本次环境验证 |
+| 迁移与回归 | 当前 Alembic head `0018_repair_service_ticket_schema`；P0-0 全量回归为 `205 passed`；MySQL 迁移和 offline SQL 未在本次环境验证 |
 | 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：内部库存、外部 Shopify 库存观察、入库状态/数量、销量摘要、SKU 健康、补货建议、同步健康、商品表现四象限和口径限制 |
 | AI 运营助手 | `/assistant` 与 `/api/assistant/query`：按当前 Workspace 查询商品/SKU、库存健康、销售波动、广告 ROI、库存预警、商品机会、补货建议和同步状态；只读，不执行高影响写操作 |
 | 页面展示约定 | `/static/labels.js` 为工作台公共枚举中文映射；数据库/API 继续使用原始 code，页面显示中文标签；状态、完整度、原因、级别和分析字段不直接暴露英文枚举 |
@@ -49,7 +49,7 @@
 
 ### 当前仍需收口
 
-- 当前全量回归为 `197 passed, 3 failed`（`python -m pytest -q -p no:cacheprovider`；失败项见文末回归基线，修复后需重新执行）；
+- P0-0 全量回归为 `205 passed`（`PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider`，2026-10-04）；
 - `app/assistant.py`、`app/business_dates.py` 和新增文档仍需纳入发布清单后，才能宣称干净 clone 可复现；
 - 当前 Shopify 是单工作区、本地 `.env` 凭证的 Dev Store Canary，不是多租户 OAuth/secret vault；
 - 不包含 Shopify mutation、商品发布、库存写回、物流、税务、跨境结算或真实生产经营收益；
@@ -112,7 +112,7 @@ python -m app.cli init-admin --login admin --display-name 管理员 --password "
 - `/warehouse`：仓库协作方查看授权仓库的预计入库单，提交实收总数和破损数量；不直接改库存。
 - `/admin/users`：管理员创建当前商家的管理员、运营、仓库、客服和只读账户，分配/撤销仓库授权，停用/启用账户和重置密码；管理员权限只作用于当前 Workspace，不能创建商家或管理其他 Workspace。
 - `/roles`：管理员查看固定角色及权限说明。
-- `/dashboard`：管理员/运营查看运营概览。
+- `/customer-service`：客服/运营查看人工工单、内部事件和知识建议；AI 建议需引用或拒答，不自动回复或关闭工单。
 
 工作台页面统一使用侧边栏导航，页面名称为“运营驾驶舱”“运营工作台”“仓库收货”“成员权限”和“客服知识”。退出登录统一放在页面右上角，并通过 `POST /logout` 和 CSRF 双提交完成会话撤销。侧边栏由服务端根据当前 session 的角色和权限裁剪：无权访问的功能不会显示，但后端路由鉴权仍然保留。成员权限页面提供成员身份、角色、状态和授权仓库的清晰列表，并支持响应式查看。
 
@@ -209,9 +209,17 @@ python -m app.cli query "green tea"
 python -m app.cli status
 ```
 
-## 假数据一键演示（推荐）
+### 待发清单 Proposal（人工履约）
+
+在 `/orders` 选择待发筛选后，可以导出 `待发清单 Proposal（人工履约）` Excel。文件包含说明、待发订单和商品明细三个工作表，明确标注“只读、需人工到平台履约、不代表已发货”。生成后可能过时，人工履约前必须回平台复核订单、取消/退款和 SKU 映射；导出不会改变订单、库存或平台状态。
+
+
+登录后打开 `/orders`，可按状态、待发视图、平台、关键词和日期查看外部订单事实，并展开订单行项目。`paid` 只表示外部平台已支付，页面将其标记为“待发（外部已支付）”，不代表已经发货；当前页面不执行面单、发货、付款、退款或平台订单写回。
+
 
 项目提供一个**完全虚构、仅限本地 SQLite** 的演示数据初始化命令，覆盖商品、SKU、两个仓库、已确认库存、30 天销量、低库存告警、补货建议和采购草稿。它不会访问淘宝/京东等真实平台，不需要真实账号或 Token，也不会执行下单、付款、退款、改价或平台库存写回。
+
+演示工作台的今日待办会从这些已有事实中只读聚合：库存告警、补货待确认、采购草稿、同步异常、内容审核和待确认入库。页面会明确显示“演示数据，非真实业务”，客服工单等尚未接入的事实不会被伪造为 0。该模式只能证明流程可运行和代码行为，不证明真实业务收益或客户愿意使用。
 
 ### 1. 配置演示模式
 
@@ -283,6 +291,18 @@ python -m uvicorn app.main:app --reload
 登录后可调用：
 
 ```bash
+# 今日待办聚合（只读；页面也会自动加载）
+curl http://127.0.0.1:8000/api/operations/today
+
+# 今日待办导出（登录后使用当前 session；仅导出，不改变状态）
+curl -OJ "http://127.0.0.1:8000/api/operations/today/export.xlsx?limit=100"
+# 兼容脚本仍可使用 CSV
+curl -OJ "http://127.0.0.1:8000/api/operations/today/export?limit=100"
+```
+
+Excel 导出会生成格式化工作簿：表头加粗、文字水平/垂直居中、单元格边框、自动换行、冻结首行、自动筛选和受限自适应列宽。长标题和原因会换行，不会无限撑宽表格。CSV 兼容接口仍保留。
+
+
 # 运营概览
 curl http://127.0.0.1:8000/api/dashboard/summary
 
@@ -550,8 +570,8 @@ python -m app.cli external-preview --platform taobao --mode json --file examples
 - 内容生产控制平面：`0016_content_production`，包含内容 revision、审核、导出和媒体资产；
 - 淘宝只读 Adapter、能力查询和 fixture preview：真实网络默认关闭；
 - 离线与 Shopify live 资源级同步编排：ExternalSyncRun、失败收尾、幂等回放和多 location 库存；
-- 当前全量回归：`197 passed, 3 failed`（`python -m pytest -q -p no:cacheprovider`；失败项见回归基线，修复后需重新执行）；
-- 当前 Alembic head：`0016_content_production`（MySQL 迁移未在本次环境验证）。
+- P0-0 全量回归：`205 passed`（`PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider`，2026-10-04）；
+- 当前 Alembic head：`0018_repair_service_ticket_schema`（MySQL 迁移未在本次环境验证）。
 
 后续工作优先级：
 
@@ -571,17 +591,15 @@ python -m pytest -q
 当前回归基线说明：
 
 ```text
-全量回归：197 passed, 3 failed
+全量回归：205 passed
 命令：PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
-```
+时间：2026-10-04
+环境：Windows 11，Python 3.14，SQLite 测试数据库
 
-本次全量回归未通过，失败项为：
+P0-0 定向回归：59 passed
+命令：PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests/test_alembic.py tests/test_admin_users.py tests/test_s7_security.py tests/test_s7_stability.py tests/test_external_orders.py tests/test_platform_sync.py tests/test_api_sync_compensation.py tests/test_api_inventory.py tests/test_jobs.py tests/test_replenishment.py
 
-- `tests/test_api_product_quadrant.py::test_product_quadrant_marks_insufficient_when_window_missing`
-- `tests/test_api_replenishment.py::test_replenishment_evaluation_records_observation_window`
-- `tests/test_connectors.py::test_json_envelope_normalizes_defaults_and_amazon_fields`
-
-修复失败项后需重新执行全量回归。
+迁移验证：当前唯一 head 为 `0018_repair_service_ticket_schema`；临时 SQLite 空库重复 `upgrade head`、旧工单结构修复及列表 API 回归已通过；MySQL 和 offline SQL 未在本次环境验证。
 
 
 ## S7 当前进度
@@ -626,6 +644,16 @@ python -m pytest -q
 - [Shopify Dev Store 只读 Canary Runbook](docs/shopify-canary-runbook.md)
 - [MCP 工具说明](docs/mcp-tools.md)
 - [电商 Skill 分析说明](docs/skills-ecommerce-analysis.md)
+- [指标契约](docs/metrics.md)
+- [P0-0 发布候选审查记录](docs/p0-0-release-review.md)
+- [V6.2 业务域扩展评估](docs/v6-business-domain-expansion.md)
+- [V6.2 无 API 运营能力扩展计划](docs/v6.2-no-api-operations.md)
+- [架构盘点说明](docs/architecture-inventory.md)
+- [架构盘点 JSON](docs/architecture-inventory.json)
+- [产品架构基线](docs/product-architecture.md)
+- [领域边界与事实登记](docs/domain-boundaries.md)
+- [工程长期路线](docs/engineering-roadmap.md)
+- [ADR 索引](docs/adr-index.md)
 
 ## Playwright 浏览器安装（国内网络）
 

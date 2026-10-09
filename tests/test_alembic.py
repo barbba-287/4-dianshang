@@ -99,11 +99,37 @@ def test_alembic_current_shows_head(tmp_path):
 
     current = _run_alembic(["current"], database_url=db_url)
     assert current.returncode == 0
-    assert "0015_replenishment_evaluations" in current.stdout
+    assert "0018_repair_service_ticket_schema" in current.stdout
     assert "head" in current.stdout
 
 
-def test_alembic_upgrade_is_idempotent(tmp_path):
+def test_alembic_upgrade_repairs_stamped_0017_ticket_table(tmp_path):
+    """A table stamped at 0017 is repaired without losing existing tickets."""
+    from sqlalchemy import create_engine
+
+    db_url = _new_temp_sqlite(tmp_path)
+    eng = create_engine(db_url)
+    with eng.begin() as conn:
+        conn.execute(text("CREATE TABLE service_tickets (id INTEGER PRIMARY KEY, workspace_id INTEGER NOT NULL, ticket_no VARCHAR(64) NOT NULL, subject VARCHAR(255) NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'open', priority VARCHAR(16) NOT NULL DEFAULT 'normal', channel VARCHAR(32) NOT NULL DEFAULT 'manual', customer_ref VARCHAR(255), external_order_ref VARCHAR(255), source_mode VARCHAR(16) NOT NULL DEFAULT 'manual', simulated BOOLEAN NOT NULL DEFAULT 0, created_by VARCHAR(128) NOT NULL, assigned_to VARCHAR(128), version INTEGER NOT NULL DEFAULT 1, created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL, closed_at DATETIME)"))
+        conn.execute(text("INSERT INTO service_tickets (id, workspace_id, ticket_no, subject, created_by, created_at, updated_at) VALUES (7, 1, 'T-0001-000007', '旧工单', 'legacy-agent', '2026-01-01 00:00:00', '2026-01-01 00:00:00')"))
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0017_service_tickets')"))
+
+    first = _run_alembic(["upgrade", "head"], database_url=db_url)
+    assert first.returncode == 0, first.stdout + first.stderr
+    inspector = inspect(eng)
+    columns = {column["name"] for column in inspector.get_columns("service_tickets")}
+    assert {"issue_type", "description", "sku_ref"}.issubset(columns)
+    indexes = {index["name"] for index in inspector.get_indexes("service_tickets")}
+    assert {"ix_service_tickets_issue_type", "ix_service_tickets_ticket_no"}.issubset(indexes)
+    with eng.connect() as conn:
+        row = conn.execute(text("SELECT subject, created_by, issue_type, description, sku_ref FROM service_tickets WHERE id = 7")).one()
+    assert tuple(row) == ("旧工单", "legacy-agent", "other", None, None)
+
+    second = _run_alembic(["upgrade", "head"], database_url=db_url)
+    assert second.returncode == 0, second.stdout + second.stderr
+
+
     db_url = _new_temp_sqlite(tmp_path)
     first = _run_alembic(["upgrade", "head"], database_url=db_url)
     assert first.returncode == 0

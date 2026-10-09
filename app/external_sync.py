@@ -300,12 +300,13 @@ def validate_inventory_batch_scope(records: list[InventorySnapshotRecord]) -> tu
     store_ref = first.store_ref
     warehouse_ref = first.warehouse_ref
     for record in records:
-        if (
-            record.account_ref != account_ref
-            or (record.store_ref or "default") != (store_ref or "default")
-            or (record.warehouse_ref or "__default_warehouse__") != (warehouse_ref or "__default_warehouse__")
-        ):
+        if record.account_ref != account_ref or (record.store_ref or "default") != (store_ref or "default"):
             raise ValueError("MIXED_EXTERNAL_SCOPE")
+        if first.platform != "shopify" and (record.warehouse_ref or "__default_warehouse__") != (warehouse_ref or "__default_warehouse__"):
+            raise ValueError("MIXED_EXTERNAL_SCOPE")
+    # A platform can legitimately expose multiple locations in one snapshot
+    # (Shopify inventoryItems is one such response). Scope is therefore
+    # account/store-wide; warehouse_ref remains part of each row's identity.
     return account_ref, store_ref, warehouse_ref
 
 

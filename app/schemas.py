@@ -6,6 +6,43 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+
+
+class MetricMeta(BaseModel):
+    """统一只读指标元数据；缺失事实必须显式标记完整度。"""
+
+    metric: str
+    value: int | float | Decimal | str | None = None
+    numerator: int | float | Decimal | None = None
+    denominator: int | float | Decimal | None = None
+    workspace_id: int | None = None
+    platform: str | None = None
+    account_ref: str | None = None
+    store_ref: str | None = None
+    warehouse_id: int | None = None
+    sku_id: int | None = None
+    business_date: date | None = None
+    timezone: str = "UTC"
+    as_of: date | datetime | str | None = None
+    source: str | None = None
+    data_completeness: Literal["complete", "partial", "insufficient", "unknown"] = "unknown"
+    metric_version: str = "1"
+    reason: str | None = None
+
+
+class AnalyticsMeta(BaseModel):
+    """分析响应共享的范围、时间和数据质量说明。"""
+
+    workspace_id: int
+    as_of: date | str | None = None
+    timezone: str = "UTC"
+    source: str | None = None
+    data_completeness: Literal["complete", "partial", "insufficient", "unknown"] = "unknown"
+    metric_version: str = "1"
+    metrics: list[MetricMeta] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class DashboardSummaryResponse(BaseModel):
     range: dict
     kpis: dict
@@ -19,6 +56,49 @@ class DashboardSummaryResponse(BaseModel):
     sales_trend: dict = Field(default_factory=dict)
     inventory_chart: dict = Field(default_factory=dict)
     sku_health: list[dict] = Field(default_factory=list)
+    external_facts: dict = Field(default_factory=dict)
+
+
+class OperationsTodoItem(BaseModel):
+    todo_id: str
+    type: str
+    priority: str
+    status: str
+    title: str
+    reason: str
+    entity_type: str
+    entity_id: int | str | None = None
+    source: str
+    warehouse_id: int | None = None
+    due_at: datetime | None = None
+    allowed_actions: list[str] = Field(default_factory=list)
+    target_path: str | None = None
+
+
+class OperationsTodoSummary(BaseModel):
+    total: int
+    matched_total: int
+    by_type: dict[str, int] = Field(default_factory=dict)
+    unknown_types: dict[str, int | None] = Field(default_factory=dict)
+
+
+class OperationsTodoMeta(BaseModel):
+    data_completeness: Literal["complete", "partial", "insufficient", "unknown"]
+    limitations: list[str] = Field(default_factory=list)
+    scope: dict = Field(default_factory=dict)
+    limit: int
+
+
+class OperationsTodayResponse(BaseModel):
+    workspace_id: int
+    as_of: datetime
+    timezone: str
+    source_mode: str
+    simulated: bool
+    evidence_level: str
+    summary: OperationsTodoSummary
+    items: list[OperationsTodoItem] = Field(default_factory=list)
+    meta: OperationsTodoMeta
 
 
 class ExternalSyncRetryRequest(BaseModel):
@@ -566,6 +646,92 @@ class ExternalOrderLineResponse(BaseModel):
     data_completeness: str
 
 
+class ExternalOrderListItem(BaseModel):
+    id: int
+    platform: str
+    account_ref: str
+    store_ref: str
+    external_order_no: str
+    order_status: str
+    external_created_at: datetime
+    paid_at: datetime | None
+    external_updated_at: datetime
+    gross_amount: Decimal
+    refund_amount: Decimal
+    currency: str
+    data_completeness: str
+    status_reason: str | None
+    source_mode: str
+    simulated: bool
+    line_count: int
+    net_item_qty: int
+
+
+class ExternalOrderPage(BaseModel):
+    items: list[ExternalOrderListItem]
+    page: int
+    page_size: int
+    total: int
+    summary: dict
+    meta: dict
+
+
+class ExternalOrderDetailResponse(ExternalOrderListItem):
+    lines: list[ExternalOrderLineResponse] = Field(default_factory=list)
+    meta: dict = Field(default_factory=dict)
+class TicketResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    workspace_id: int
+    ticket_no: str
+    subject: str
+    issue_type: str
+    description: str | None
+    sku_ref: str | None
+    status: str
+    priority: str
+    channel: str
+    customer_ref: str | None
+    external_order_ref: str | None
+    source_mode: str
+    simulated: bool
+    created_by: str
+    assigned_to: str | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+    closed_at: datetime | None
+
+
+class TicketPage(BaseModel):
+    items: list[TicketResponse]
+    page: int
+    page_size: int
+    total: int
+
+
+class TicketCreateRequest(BaseModel):
+    subject: str = Field(min_length=1, max_length=255)
+    issue_type: str = Field(default="other", pattern="^(presale|order_payment|logistics|return_refund|product_quality|complaint|other)$")
+    description: str = Field(default="", max_length=5000)
+    customer_ref: str | None = Field(default=None, max_length=255)
+    external_order_ref: str | None = Field(default=None, max_length=255)
+    sku_ref: str | None = Field(default=None, max_length=255)
+    priority: str = Field(default="normal", pattern="^(low|normal|high|urgent)$")
+
+
+class TicketEventRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=5000)
+
+
+class TicketTransitionRequest(BaseModel):
+    target: str = Field(pattern="^(open|assigned|in_progress|waiting|resolved|closed)$")
+    expected_version: int = Field(ge=1)
+
+
+class TicketAssignRequest(BaseModel):
+    assignee: str = Field(min_length=1, max_length=128)
+    expected_version: int = Field(ge=1)
 class ExternalOrderResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -585,6 +751,7 @@ class ExternalOrderResponse(BaseModel):
     status_reason: str | None
     created_at: datetime
     updated_at: datetime
+
 
 
 class ExternalProductMappingRequest(BaseModel):
@@ -732,6 +899,7 @@ class ProductQuadrantResponse(BaseModel):
     items: list[ProductQuadrantItem]
     unsupported_metrics: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    meta: AnalyticsMeta | None = None
 
 
 class ProductQuadrantPage(BaseModel):
@@ -763,6 +931,7 @@ class ReplenishmentEvaluationResponse(BaseModel):
     simulated: bool
     created_at: datetime
     updated_at: datetime
+    meta: AnalyticsMeta | None = None
 
 
 class ReplenishmentEvaluationPage(BaseModel):
@@ -770,6 +939,7 @@ class ReplenishmentEvaluationPage(BaseModel):
     page: int
     page_size: int
     total: int
+    meta: AnalyticsMeta | None = None
 
 
 class ReplenishmentSuggestionPage(BaseModel):
@@ -871,6 +1041,24 @@ class TaobaoPreviewResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class ShopifyPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resource: Literal["products", "orders", "inventory"] = "products"
+    live: bool = False
+
+
+class ShopifyPreviewResponse(BaseModel):
+    platform: str = "shopify"
+    resource: str
+    live_enabled: bool
+    simulated: bool
+    store_domain: str | None = None
+    total: int
+    records: list[dict]
+    request_ids: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class FixtureSyncRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     platform: str = Field(pattern="^(taobao|jd|pdd|douyin|amazon)$")
@@ -891,3 +1079,107 @@ class FixtureSyncResponse(BaseModel):
     sync_status: str
     orders: dict | None = None
     inventory: dict | None = None
+
+
+class ContentAssetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    product_id: int
+    revision_id: int | None
+    role: str
+    storage_uri: str
+    content_sha256: str
+    mime_type: str
+    size_bytes: int
+    width: int | None
+    height: int | None
+    provider: str
+    provider_model: str | None
+    source_mode: str
+    simulated: bool
+    selected: bool
+    created_at: datetime
+
+
+class ContentRevisionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    workspace_id: int
+    product_id: int
+    sku_id: int | None
+    revision_no: int
+    status: str
+    channel: str
+    content_json: str | None
+    source_snapshot_json: str
+    source_snapshot_hash: str
+    content_hash: str | None
+    provider: str
+    provider_model: str | None
+    provider_request_id: str | None
+    source_mode: str
+    simulated: bool
+    prompt_snapshot: str | None
+    quality_status: str
+    quality_issues_json: str | None
+    created_by: str | None
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    approved_at: datetime | None
+    rejection_reason: str | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+    assets: list[ContentAssetResponse] = Field(default_factory=list)
+
+
+class ContentJobCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    product_id: int = Field(gt=0)
+    sku_id: int | None = Field(default=None, gt=0)
+    scene: str = Field(default="电商主图优化", min_length=1, max_length=64)
+    style: str = Field(default="清新自然", min_length=1, max_length=64)
+    operation: str = Field(default="background_replace", pattern="^(background_replace|scene_extend|compose)$")
+    provider: str = Field(default="local", pattern="^(local|local_compositor|mock|wan)$")
+    brief: str = Field(default="", max_length=800)
+    width: int = Field(default=800, ge=256, le=2048)
+    height: int = Field(default=800, ge=256, le=2048)
+    candidate_count: int = Field(default=1, ge=1, le=4)
+    workflow_key: str | None = Field(default=None, pattern="^(package_preserve|scene_extend|model_atmosphere)$")
+
+
+class ContentJobResponse(BaseModel):
+    job_id: int
+    run_id: str | None
+    revision_id: int
+    job_status: str
+    revision_status: str
+    simulated: bool
+    provider: str
+
+
+class ContentReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["submit", "approve", "request_changes", "reject"]
+    note: str | None = Field(default=None, max_length=1000)
+    expected_version: int = Field(default=1, ge=1)
+
+
+class ContentExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision_id: int = Field(gt=0)
+    format: Literal["json", "markdown"] = "json"
+
+
+class ContentExportResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    revision_id: int
+    format: str
+    status: str
+    artifact_uri: str | None
+    artifact_sha256: str | None
+    artifact_size: int | None
+    simulated: bool
+    created_at: datetime
+    finished_at: datetime | None

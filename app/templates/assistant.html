@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI 运营助手</title>
   <link rel="stylesheet" href="/static/workspace-shell.css">
-  <script src="/static/labels.js"></script>
+  <script src="/static/labels.js?v=20260915-2"></script>
   <style>
     .assistant-result { padding: 1rem; background: #fbfcfe; border: 1px solid var(--shell-line); border-radius: .5rem; }
     .assistant-result table { min-width: 760px; }
@@ -39,6 +39,10 @@
             <button type="button" data-question="哪些 SKU 的库存健康需要关注？">库存健康</button>
             <button type="button" data-question="当前有哪些补货建议？">补货建议</button>
             <button type="button" data-question="最近同步状态怎么样？">同步状态</button>
+            <button type="button" data-question="分析销售波动">销售波动</button>
+            <button type="button" data-question="分析广告 ROI">广告 ROI</button>
+            <button type="button" data-question="检查库存预警">库存预警</button>
+            <button type="button" data-question="找商品机会">商品机会</button>
             <button type="button" data-question="查看商品和 SKU 信息">商品与 SKU</button>
           </div>
           <label class="field" for="assistant-message">问题</label>
@@ -65,7 +69,10 @@
     const COMPLETE = {complete:'完整', insufficient:'数据不足', partial:'部分完整'};
     const REASON = {LOW_STOCK:'库存偏低', STOCK_SUFFICIENT:'库存充足', INCOMPLETE_COVERAGE:'销量覆盖不完整', NO_SALES:'暂无销量'};
     const SYNC_TYPE = {orders:'订单同步', inventory:'库存同步', events:'事件同步', fixture_bundle:'订单与库存同步'};
-    const PLATFORM = {taobao:'淘宝', jd:'京东', pdd:'拼多多', douyin:'抖音', amazon:'亚马逊'};
+    const PLATFORM = {taobao:'淘宝', jd:'京东', pdd:'拼多多', douyin:'抖音', amazon:'亚马逊', shopify:'Shopify'};
+    const ANALYSIS_LABELS = {ad_roi:'广告投入产出', sales_fluctuation:'销售波动', inventory_alert:'库存预警', product_opportunities:'商品机会'};
+    const FIELD_LABELS = {metric:'指标',sku_id:'SKU 编号',days:'分析天数',status:'状态',reason:'原因',total_net_qty:'净销量',recent_qty:'近期销量',previous_qty:'前期销量',change_rate:'变化率',direction:'趋势',campaign_id:'广告活动',spend:'广告花费',attributed_sales:'归因销售额',roi:'投入产出比',clicks:'点击量',conversions:'转化数',warehouse_id:'仓库编号',alert_count:'预警数量',data_completeness:'数据完整度',source:'数据来源',as_of:'统计日期',timezone:'时区',count:'候选数量',positive_item_count:'有库存商品数',available_qty:'可售库存',location_count:'库存位置数',snapshot_count:'库存快照数'};
+    const VALUE_LABELS = {known:'有数据',unknown:'未知',insufficient:'数据不足',complete:'完整',partial:'部分完整',up:'上升',down:'下降',stable:'稳定',warning:'预警',critical:'严重',platform:'当前平台事实层',shopify_live:'Shopify 真实只读数据',mock:'演示数据',GROWTH_WITH_LOW_COVERAGE:'增长且库存覆盖偏低',LOW_STOCK:'库存偏低',LOW_COVERAGE:'库存覆盖偏低',CAMPAIGN_NOT_FOUND:'未找到广告事实'};
     function csrfToken() {
       const item = document.cookie.split('; ').find(value => value.startsWith('dianshang_csrf='));
       return item ? decodeURIComponent(item.slice('dianshang_csrf='.length)) : '';
@@ -75,8 +82,11 @@
       return mapping[value] || `${fallback}（${value}）`;
     }
     function display(value, fallback='数据不足') {
-      return value == null || value === '' ? fallback : String(value);
+      if (value == null || value === '') return fallback;
+      if (typeof value === 'boolean') return value ? '是' : '否';
+      return VALUE_LABELS[value] || String(value);
     }
+    function fieldLabel(key) { return FIELD_LABELS[key] || key; }
     function empty(text) {
       const el = document.createElement('div');
       el.className = 'assistant-empty';
@@ -122,6 +132,16 @@
       const rows = (data.items || []).map(item => [item.product_title || '未命名商品', item.variant_label || '未设置规格', item.sku_code || `SKU #${item.sku_id}`, item.warehouse_name || `仓库 #${item.warehouse_id}`, label(item.status, STATUS), item.decision_qty ?? item.suggested_qty, item.on_hand_qty, label(item.data_completeness, COMPLETE), label(item.reason, REASON, '未知原因')]);
       result.appendChild(rows.length ? makeTable(['商品','规格','SKU','仓库','状态','建议数量','当前库存','数据完整度','原因'], rows) : empty('当前没有可展示的补货建议；这不代表所有 SKU 都无需补货。'));
     }
+    function renderAnalysis(data) {
+      const note = document.createElement('p'); note.className='assistant-note';
+      note.textContent = `分析类型：${ANALYSIS_LABELS[data.metric] || '运营分析'}；数据来源：${display(data.source, '当前平台事实层')}；完整度：${display(data.data_completeness)}`;
+      result.appendChild(note);
+      const rows = Object.entries(data).filter(([key]) => !['evidence','alerts','items'].includes(key)).map(([key,value]) => [fieldLabel(key), typeof value === 'object' ? JSON.stringify(value) : display(value)]);
+      result.appendChild(makeTable(['字段','结果'], rows));
+      if (data.alerts?.length) result.appendChild(makeTable(['SKU','级别','库存','补货点','覆盖天数','原因'], data.alerts.map(x=>[x.sku_code, display(x.severity), x.on_hand_qty, x.reorder_point_qty, x.days_of_inventory, display(x.reason)])));
+      if (data.items?.length) result.appendChild(makeTable(['商品','增长率','覆盖天数','机会原因'], data.items.map(x=>[x.title, x.growth_rate, x.days_of_inventory, display(x.reason)])));
+      if (data.evidence?.length) result.appendChild(makeTable(['日期','净销量','数据完整度'], data.evidence.map(x=>[x.sales_date, x.net_qty, display(x.data_completeness)])));
+    }
     function renderSync(data) {
       const rows = (data.latest || []).map(item => [PLATFORM[item.platform] || item.platform || '未知平台', item.store_ref || '默认店铺', item.account_ref || '—', label(item.sync_type, SYNC_TYPE), label(item.status, STATUS), item.error_code || '无']);
       result.appendChild(rows.length ? makeTable(['平台','店铺','账号','同步类型','状态','错误码'], rows) : empty('暂无同步运行记录'));
@@ -130,8 +150,12 @@
       result.replaceChildren();
       const answer = document.createElement('p'); answer.className = 'assistant-note'; answer.textContent = body.answer || body.error_code || '查询完成'; result.appendChild(answer);
       if (!body.ok) { result.appendChild(empty(body.answer || '当前查询未完成')); return; }
-      const data = body.data || {}; addSummary(data.total ?? (data.items || []).length);
-      if (body.intent === 'catalog') renderCatalog(data); else if (body.intent === 'inventory_health') renderInventory(data); else if (body.intent === 'replenishment') renderReplenishment(data); else if (body.intent === 'sync_health') renderSync(data);
+      const data = body.data || {}; addSummary(data.total ?? data.count ?? (data.items || []).length);
+      if (body.intent === 'catalog') renderCatalog(data);
+      else if (body.intent === 'inventory_health') renderInventory(data);
+      else if (body.intent === 'replenishment') renderReplenishment(data);
+      else if (body.intent === 'sync_health') renderSync(data);
+      else if (ANALYSIS_LABELS[body.intent]) renderAnalysis(data);
       const note = document.createElement('p'); note.className = 'assistant-note'; note.textContent = (body.limitations || []).join('；'); result.appendChild(note);
     }
     document.querySelectorAll('[data-question]').forEach(button => button.onclick = () => { message.value = button.dataset.question; message.focus(); });

@@ -8,7 +8,7 @@
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
 from hashlib import sha256
@@ -17,10 +17,11 @@ import json
 import logging
 import re
 import uuid
+from urllib.parse import quote
 
 from fastapi import Body, Depends, File, Form, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
@@ -43,6 +44,10 @@ from app.db import (
     Product,
     ProductPriceHistory,
     ProductSku,
+    ProductMediaAsset,
+    ProductContentRevision,
+    ProductContentExport,
+    ProductContentAction,
     Warehouse,
     InboundOrder,
     UserAccount,
@@ -103,6 +108,9 @@ from app.schemas import (
     ExternalOrderIngestResponse,
     ExternalOrderResponse,
     ExternalOrderLineResponse,
+    ExternalOrderListItem,
+    ExternalOrderPage,
+    ExternalOrderDetailResponse,
     ExternalProductMappingRequest,
     ExternalProductMappingResponse,
     ExternalAccountResponse,
@@ -128,6 +136,8 @@ from app.schemas import (
     TaobaoPreviewResponse,
     FixtureSyncRequest,
     FixtureSyncResponse,
+    ShopifyPreviewRequest,
+    ShopifyPreviewResponse,
     ExternalInventoryIngestRequest,
     ExternalInventoryIngestResponse,
     ExternalInventoryPreviewRequest,
@@ -143,11 +153,25 @@ from app.schemas import (
     AdminUserPasswordReset,
     WarehouseAccessRequest,
     AlertResponse,
+    ContentAssetResponse,
+    ContentRevisionResponse,
+    ContentJobCreate,
+    ContentJobResponse,
+    ContentReviewRequest,
+    ContentExportRequest,
+    ContentExportResponse,
+    OperationsTodayResponse,
+    TicketResponse,
+    TicketPage,
+    TicketCreateRequest,
+    TicketEventRequest,
+    TicketTransitionRequest,
+    TicketAssignRequest,
 )
 
 from app.storage import StorageError, enforce_size_limit, save_upload
 from app.versioning import content_sha256
-from app.upload_security import validate_content
+from app.upload_security import validate_content, safe_storage_path
 from app.security import Principal as ApiPrincipal, authenticate_api_key
 from app.employee_auth import (
     ROLE_ADMIN,
@@ -189,7 +213,10 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 
 _WORKSPACE_NAV_ITEMS = (
     ("/dashboard", "运营驾驶舱", "▦", (ROLE_ADMIN, ROLE_OPERATIONS), "inventory.read"),
+    ("/orders", "订单事实", "▣", (ROLE_ADMIN, ROLE_OPERATIONS), "inventory.read"),
     ("/ops", "运营工作台", "◫", (ROLE_ADMIN, ROLE_OPERATIONS), None),
+    ("/content", "商品页生产", "✦", (ROLE_ADMIN, ROLE_OPERATIONS), "content.read"),
+    ("/shopify", "Shopify 接入", "◇", (ROLE_ADMIN, ROLE_OPERATIONS), "inventory.read"),
     ("/assistant", "AI 运营助手", "✦", (ROLE_ADMIN, ROLE_OPERATIONS), "analytics.read"),
     ("/warehouse", "仓库收货", "▤", (ROLE_ADMIN, ROLE_OPERATIONS, ROLE_WAREHOUSE), "inbound.read"),
     ("/admin/users", "成员权限", "♙", (ROLE_ADMIN,), None),
@@ -236,7 +263,7 @@ def _visible_navigation(principal, active_path: str) -> str:
 
     nav_by_path = {item[0]: item for item in _WORKSPACE_NAV_ITEMS}
     groups = (
-        ("运营分析", "Workspace", tuple(nav_by_path[path] for path in ("/dashboard", "/ops", "/assistant") if path in nav_by_path)),
+        ("运营分析", "Workspace", tuple(nav_by_path[path] for path in ("/dashboard", "/orders", "/ops", "/assistant", "/content", "/shopify") if path in nav_by_path)),
         ("仓储履约", "Warehouse", tuple(nav_by_path[path] for path in ("/warehouse",) if path in nav_by_path)),
         ("系统管理", "System", tuple(nav_by_path[path] for path in ("/admin/users",) if path in nav_by_path)),
         ("客服知识", "Knowledge", _SYSTEM_NAV_ITEMS),
@@ -326,8 +353,8 @@ async def request_context_middleware(request: Request, call_next):
             return response
     try:
         response = await call_next(request)
-    except Exception:
-        logger.exception("unhandled request error", extra={"request_id": request_id})
+    except Exception as exc:
+        logger.exception("unhandled request error: %s", exc, extra={"request_id": request_id})
         response = JSONResponse(
             status_code=500,
             content={"detail": {"code": "INTERNAL_ERROR", "message": "服务内部错误"}},
@@ -477,6 +504,18 @@ def logout(request: Request, db: Session = Depends(get_db)):
 def me(request: Request):
     principal = require_principal(request)
     return {"subject": principal.subject, "workspace_id": principal.workspace_id, "roles": principal.roles, "warehouse_ids": principal.warehouse_ids}
+
+
+@app.get("/content", response_class=HTMLResponse)
+def content_page(request: Request) -> HTMLResponse:
+    principal = require_principal(request, permission="content.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    return _render_workspace_page("content.html", principal, "/content")
+
+
+@app.get("/shopify", response_class=HTMLResponse)
+def shopify_page(request: Request) -> HTMLResponse:
+    principal = require_principal(request, permission="inventory.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    return _render_workspace_page("shopify.html", principal, "/shopify")
 
 
 @app.get("/ops", response_class=HTMLResponse)
@@ -1318,6 +1357,310 @@ def crawl_fixture(request: Request, db: Session = Depends(get_db)) -> CrawlJob:
         ) from exc
 
 
+@app.get("/api/operations/today", response_model=OperationsTodayResponse)
+def operations_today(
+    request: Request,
+    warehouse_id: int | None = Query(default=None, gt=0),
+    limit: int = Query(default=100, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Return a read-only, workspace-scoped operational todo aggregation."""
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    if warehouse_id is not None:
+        require_warehouse_access(principal, warehouse_id, db=db)
+        warehouse_ids = (warehouse_id,)
+    elif principal.has_role(ROLE_ADMIN, ROLE_OPERATIONS):
+        warehouse_ids = None
+    else:
+        warehouse_ids = principal.warehouse_ids
+    from app.operations_workbench import build_operations_today
+    try:
+        return build_operations_today(
+            db,
+            workspace_id=principal.workspace_id,
+            warehouse_ids=warehouse_ids,
+            limit=limit,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        status = 404 if code == "WORKSPACE_NOT_FOUND" else 422
+        raise HTTPException(status_code=status, detail={"code": code, "message": "运营待办查询参数无效"}) from exc
+
+
+@app.get("/api/operations/today/export")
+def export_operations_today(
+    request: Request,
+    warehouse_id: int | None = Query(default=None, gt=0),
+    limit: int = Query(default=100, ge=1, le=200),
+    todo_ids: str | None = Query(default=None, max_length=10_000),
+    types: str | None = Query(default=None, max_length=2_000),
+    priorities: str | None = Query(default=None, max_length=500),
+    db: Session = Depends(get_db),
+):
+    """Export the current user's visible operational todos as CSV."""
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    if warehouse_id is not None:
+        require_warehouse_access(principal, warehouse_id, db=db)
+        warehouse_ids = (warehouse_id,)
+    elif principal.has_role(ROLE_ADMIN, ROLE_OPERATIONS):
+        warehouse_ids = None
+    else:
+        warehouse_ids = principal.warehouse_ids
+    from app.operations_workbench import build_operations_today
+    from app.exports import operations_todo_csv
+
+    try:
+        body = build_operations_today(db, workspace_id=principal.workspace_id, warehouse_ids=warehouse_ids, limit=limit)
+    except ValueError as exc:
+        code = str(exc)
+        status = 404 if code == "WORKSPACE_NOT_FOUND" else 422
+        raise HTTPException(status_code=status, detail={"code": code, "message": "运营待办导出参数无效"}) from exc
+
+    def values(raw: str | None) -> set[str] | None:
+        if raw is None or not raw.strip():
+            return None
+        parsed = {part.strip() for part in raw.split(",") if part.strip()}
+        return parsed or None
+
+    selected_ids = values(todo_ids)
+    selected_types = values(types)
+    selected_priorities = values(priorities)
+    items = [
+        item for item in body["items"]
+        if (selected_ids is None or item["todo_id"] in selected_ids)
+        and (selected_types is None or item["type"] in selected_types)
+        and (selected_priorities is None or item["priority"] in selected_priorities)
+    ]
+    content, export_meta = operations_todo_csv(items)
+    filename = f"今日待办清单-{body['as_of']:%Y.%m.%d}.csv"
+    filename_ascii = f"operations-today-{body['as_of']:%Y.%m.%d}.csv"
+    from fastapi.responses import Response
+    response = Response(content=content, media_type="text/csv; charset=utf-8")
+    response.headers["Content-Disposition"] = f"attachment; filename=\"{filename_ascii}\"; filename*=UTF-8''{quote(filename)}"
+    response.headers["X-Export-Sha256"] = export_meta["sha256"]
+    response.headers["X-Export-Row-Count"] = str(export_meta["row_count"])
+    response.headers["X-Export-Source"] = body["source_mode"]
+    response.headers["X-Export-Simulated"] = str(body["simulated"]).lower()
+    response.headers["X-Export-Evidence-Level"] = body["evidence_level"]
+    response.headers["X-Export-Data-Completeness"] = body["meta"]["data_completeness"]
+    response.headers["X-Export-Workspace-Id"] = str(body["workspace_id"])
+    return response
+
+
+@app.get("/api/operations/today/export.xlsx")
+def export_operations_today_xlsx(
+    request: Request,
+    warehouse_id: int | None = Query(default=None, gt=0),
+    limit: int = Query(default=100, ge=1, le=200),
+    todo_ids: str | None = Query(default=None, max_length=10_000),
+    types: str | None = Query(default=None, max_length=2_000),
+    priorities: str | None = Query(default=None, max_length=500),
+    db: Session = Depends(get_db),
+):
+    """Export visible operational todos as a formatted Excel workbook."""
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    if warehouse_id is not None:
+        require_warehouse_access(principal, warehouse_id, db=db)
+        warehouse_ids = (warehouse_id,)
+    elif principal.has_role(ROLE_ADMIN, ROLE_OPERATIONS):
+        warehouse_ids = None
+    else:
+        warehouse_ids = principal.warehouse_ids
+    from app.operations_workbench import build_operations_today
+    try:
+        from app.exports import operations_todo_xlsx
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail={"code": "EXPORT_XLSX_UNAVAILABLE", "message": "Excel 导出依赖不可用，请联系管理员"}) from exc
+
+    try:
+        body = build_operations_today(db, workspace_id=principal.workspace_id, warehouse_ids=warehouse_ids, limit=limit)
+    except ValueError as exc:
+        code = str(exc)
+        status = 404 if code == "WORKSPACE_NOT_FOUND" else 422
+        raise HTTPException(status_code=status, detail={"code": code, "message": "运营待办导出参数无效"}) from exc
+
+    def values(raw: str | None) -> set[str] | None:
+        if raw is None or not raw.strip():
+            return None
+        parsed = {part.strip() for part in raw.split(",") if part.strip()}
+        return parsed or None
+
+    selected_ids = values(todo_ids)
+    selected_types = values(types)
+    selected_priorities = values(priorities)
+    items = [
+        item for item in body["items"]
+        if (selected_ids is None or item["todo_id"] in selected_ids)
+        and (selected_types is None or item["type"] in selected_types)
+        and (selected_priorities is None or item["priority"] in selected_priorities)
+    ]
+    try:
+        content, export_meta = operations_todo_xlsx(items)
+    except Exception as exc:
+        logger.exception("operations XLSX export generation failed")
+        raise HTTPException(status_code=500, detail={"code": "EXPORT_XLSX_FAILED", "message": "Excel 文件生成失败，请稍后重试"}) from exc
+    filename = f"今日待办清单-{body['as_of']:%Y.%m.%d}.xlsx"
+    filename_ascii = f"operations-today-{body['as_of']:%Y.%m.%d}.xlsx"
+    from fastapi.responses import Response
+    response = Response(content=content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    response.headers["Content-Disposition"] = f"attachment; filename=\"{filename_ascii}\"; filename*=UTF-8''{quote(filename)}"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, X-Export-Sha256, X-Export-Row-Count, X-Export-Source, X-Export-Simulated, X-Export-Evidence-Level, X-Export-Data-Completeness, X-Export-Workspace-Id"
+    response.headers["X-Export-Sha256"] = export_meta["sha256"]
+    response.headers["X-Export-Row-Count"] = str(export_meta["row_count"])
+    response.headers["X-Export-Source"] = body["source_mode"]
+    response.headers["X-Export-Simulated"] = str(body["simulated"]).lower()
+    response.headers["X-Export-Evidence-Level"] = body["evidence_level"]
+    response.headers["X-Export-Data-Completeness"] = body["meta"]["data_completeness"]
+    response.headers["X-Export-Workspace-Id"] = str(body["workspace_id"])
+    return response
+
+
+@app.get("/orders", response_class=HTMLResponse)
+def orders_page(request: Request) -> HTMLResponse:
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    return _render_workspace_page("orders.html", principal, "/orders")
+
+
+@app.get("/api/orders", response_model=ExternalOrderPage)
+def list_external_orders(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    platform: str | None = Query(default=None, max_length=32),
+    account_ref: str | None = Query(default=None, max_length=128),
+    store_ref: str | None = Query(default=None, max_length=128),
+    order_status: str | None = Query(default=None, max_length=32),
+    fulfillment_view: str | None = Query(default=None, max_length=32),
+    keyword: str | None = Query(default=None, max_length=255),
+    date_from: date | None = None,
+    date_to: date | None = None,
+    db: Session = Depends(get_db),
+):
+    principal = require_principal(request, permission="inventory.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    from app.order_workbench import list_orders
+    try:
+        return list_orders(db, workspace_id=principal.workspace_id, page=page, page_size=page_size, platform=platform, account_ref=account_ref, store_ref=store_ref, order_status=order_status, fulfillment_view=fulfillment_view, keyword=keyword, date_from=date_from, date_to=date_to)
+    except ValueError as exc:
+        code = str(exc)
+        raise HTTPException(status_code=422, detail={"code": code, "message": "订单查询参数无效"}) from exc
+
+
+@app.get("/api/orders/fulfillment-proposal.xlsx")
+def export_fulfillment_proposal(
+    request: Request,
+    platform: str | None = Query(default=None, max_length=32),
+    account_ref: str | None = Query(default=None, max_length=128),
+    store_ref: str | None = Query(default=None, max_length=128),
+    order_status: str | None = Query(default="paid", max_length=32),
+    keyword: str | None = Query(default=None, max_length=255),
+    date_from: date | None = None,
+    date_to: date | None = None,
+    page_size: int = Query(default=200, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Export paid external-order facts as a manual-only fulfillment proposal."""
+    principal = require_principal(request, permission="inventory.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    if order_status not in (None, "paid"):
+        raise HTTPException(status_code=422, detail={"code": "FULFILLMENT_PROPOSAL_STATUS_INVALID", "message": "待发清单只接受外部已支付订单"})
+    from app.order_workbench import get_orders_with_lines
+    from app.exports import fulfillment_proposal_xlsx
+    try:
+        result = get_orders_with_lines(db, workspace_id=principal.workspace_id, order_status="paid", platform=platform, account_ref=account_ref, store_ref=store_ref, keyword=keyword, date_from=date_from, date_to=date_to, limit=page_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": str(exc), "message": "订单导出筛选参数无效"}) from exc
+    orders = result["items"]
+    sources = {order["source_mode"] for order in orders}
+    completeness = "unknown" if not orders else "complete" if all(order["data_completeness"] == "complete" for order in orders) else "partial"
+    source_mode = next(iter(sources)) if len(sources) == 1 else "mixed" if sources else "unknown"
+    meta = {"workspace_id": principal.workspace_id, "as_of": datetime.utcnow(), "filter_summary": "外部状态=paid" + (f"；平台={platform}" if platform else "") + (f"；关键词={keyword}" if keyword else ""), "source_mode": source_mode, "simulated": all(order["simulated"] for order in orders) if orders else "unknown", "data_completeness": completeness}
+    try:
+        content, export_meta = fulfillment_proposal_xlsx(orders, meta=meta)
+    except Exception as exc:
+        logger.exception("fulfillment proposal XLSX generation failed")
+        raise HTTPException(status_code=500, detail={"code": "FULFILLMENT_PROPOSAL_EXPORT_FAILED", "message": "待发清单生成失败，请稍后重试"}) from exc
+    filename = f"待发清单-人工履约-{datetime.utcnow():%Y.%m.%d}.xlsx"
+    filename_ascii = f"fulfillment-proposal-{datetime.utcnow():%Y.%m.%d}.xlsx"
+    from fastapi.responses import Response
+    response = Response(content=content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    response.headers["Content-Disposition"] = f"attachment; filename=\"{filename_ascii}\"; filename*=UTF-8''{quote(filename)}"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, X-Export-Sha256, X-Export-Row-Count, X-Export-Order-Count, X-Export-Total-Orders, X-Export-Data-Completeness, X-Export-Source, X-Export-Simulated"
+    response.headers["X-Export-Sha256"] = export_meta["sha256"]
+    response.headers["X-Export-Row-Count"] = str(export_meta["row_count"])
+    response.headers["X-Export-Order-Count"] = str(export_meta["order_count"])
+    response.headers["X-Export-Total-Orders"] = str(result["total"])
+    response.headers["X-Export-Data-Completeness"] = completeness
+    response.headers["X-Export-Source"] = source_mode
+    response.headers["X-Export-Simulated"] = str(meta["simulated"]).lower()
+    return response
+
+
+@app.get("/api/orders/{order_id}", response_model=ExternalOrderDetailResponse)
+def get_external_order(order_id: int, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inventory.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    from app.order_workbench import get_order
+    result = get_order(db, workspace_id=principal.workspace_id, order_id=order_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail={"code": "ORDER_NOT_FOUND", "message": "订单不存在"})
+    result["lines"] = [ExternalOrderLineResponse.model_validate(line) for line in result["lines"]]
+    return result
+
+
+@app.get("/api/tickets", response_model=TicketPage)
+def list_tickets_api(request: Request, page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), status: str | None = Query(default=None, max_length=24), priority: str | None = Query(default=None, max_length=16), keyword: str | None = Query(default=None, max_length=255), db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="knowledge.read")
+    from app.tickets import list_tickets
+    rows, total = list_tickets(db, workspace_id=principal.workspace_id, page=page, page_size=page_size, status=status, priority=priority, keyword=keyword)
+    return TicketPage(items=[TicketResponse.model_validate(row) for row in rows], page=page, page_size=page_size, total=total)
+
+
+@app.post("/api/tickets", response_model=TicketResponse, status_code=201)
+def create_ticket_api(payload: TicketCreateRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="knowledge.write", roles=(ROLE_ADMIN, ROLE_OPERATIONS, ROLE_CUSTOMER_SERVICE))
+    from app.tickets import create_ticket
+    try:
+        ticket = create_ticket(db, workspace_id=principal.workspace_id, subject=payload.subject, priority=payload.priority, issue_type=payload.issue_type, description=payload.description, sku_ref=payload.sku_ref, customer_ref=payload.customer_ref, external_order_ref=payload.external_order_ref, actor=principal.subject, idempotency_key=request.headers.get("Idempotency-Key"))
+        return ticket
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": str(exc), "message": "工单创建失败"}) from exc
+
+
+@app.get("/api/tickets/{ticket_id}")
+def get_ticket_api(ticket_id: int, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="knowledge.read")
+    from app.tickets import ticket_detail
+    result = ticket_detail(db, workspace_id=principal.workspace_id, ticket_id=ticket_id)
+    if result is None: raise HTTPException(status_code=404, detail={"code":"TICKET_NOT_FOUND","message":"工单不存在"})
+    return {"ticket": TicketResponse.model_validate(result["ticket"]), "events": [{"id": e.id, "event_type": e.event_type, "body": e.body, "author": e.author, "created_at": e.created_at, "source_mode": e.source_mode, "simulated": e.simulated} for e in result["events"]], "assignments": [{"assignee": a.assignee, "actor": a.actor, "created_at": a.created_at, "ended_at": a.ended_at} for a in result["assignments"]], "links": [{"entity_type": l.entity_type, "entity_id": l.entity_id, "relation": l.relation} for l in result["links"]]}
+
+
+@app.post("/api/tickets/{ticket_id}/events")
+def add_ticket_event_api(ticket_id: int, payload: TicketEventRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="knowledge.write", roles=(ROLE_ADMIN, ROLE_OPERATIONS, ROLE_CUSTOMER_SERVICE))
+    from app.tickets import add_event
+    try:
+        event = add_event(db, workspace_id=principal.workspace_id, ticket_id=ticket_id, body=payload.body, author=principal.subject, idempotency_key=request.headers.get("Idempotency-Key"))
+        return {"id": event.id, "event_type": event.event_type, "body": event.body, "created_at": event.created_at}
+    except ValueError as exc: raise HTTPException(status_code=422, detail={"code":str(exc),"message":"工单事件失败"}) from exc
+
+
+@app.post("/api/tickets/{ticket_id}/transition", response_model=TicketResponse)
+def transition_ticket_api(ticket_id: int, payload: TicketTransitionRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="knowledge.write", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    from app.tickets import transition_ticket
+    try: return transition_ticket(db, workspace_id=principal.workspace_id, ticket_id=ticket_id, target=payload.target, actor=principal.subject, expected_version=payload.expected_version, idempotency_key=request.headers.get("Idempotency-Key") or "")
+    except ValueError as exc: raise HTTPException(status_code=409 if "CONFLICT" in str(exc) or "TRANSITION" in str(exc) else 422, detail={"code":str(exc),"message":"工单状态更新失败"}) from exc
+
+
+@app.post("/api/tickets/{ticket_id}/assign", response_model=TicketResponse)
+def assign_ticket_api(ticket_id: int, payload: TicketAssignRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="knowledge.write", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    from app.tickets import assign_ticket
+    try: return assign_ticket(db, workspace_id=principal.workspace_id, ticket_id=ticket_id, assignee=payload.assignee, actor=principal.subject, expected_version=payload.expected_version, idempotency_key=request.headers.get("Idempotency-Key") or "")
+    except ValueError as exc: raise HTTPException(status_code=409 if "CONFLICT" in str(exc) else 422, detail={"code":str(exc),"message":"工单分配失败"}) from exc
+
+
 @app.get("/api/dashboard/summary", response_model=DashboardSummaryResponse)
 def dashboard_summary(
     request: Request,
@@ -1336,8 +1679,15 @@ def dashboard_summary(
         sku = db.scalar(select(ProductSku).where(ProductSku.id == sku_id, ProductSku.workspace_id == principal.workspace_id, ProductSku.is_active.is_(True)))
         if sku is None:
             raise HTTPException(status_code=404, detail={"code": "SKU_NOT_FOUND", "message": "SKU 不存在"})
-    from app.dashboard import build_dashboard_summary
-    return build_dashboard_summary(db, workspace_id=principal.workspace_id, days=days, as_of=as_of, warehouse_id=warehouse_id, sku_id=sku_id, recent_limit=recent_limit)
+    from app.analytics_queries import AnalyticsQueryService
+    return AnalyticsQueryService(db).dashboard_summary(
+        workspace_id=principal.workspace_id,
+        days=days,
+        as_of=as_of,
+        warehouse_id=warehouse_id,
+        sku_id=sku_id,
+        recent_limit=recent_limit,
+    )
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -1349,7 +1699,122 @@ def dashboard_page(request: Request) -> HTMLResponse:
 
 
 
-@app.post("/api/external/orders/preview", response_model=ExternalOrderPreviewResponse)
+@app.get("/api/external/shopify/capabilities")
+def shopify_capabilities(request: Request):
+    require_principal(request, permission="inventory.read")
+    settings = get_settings()
+    return {"platform": "shopify", "read_only": True, "live_enabled": bool(settings.shopify_live_enabled and settings.shopify_store_domain and settings.shopify_access_token), "simulated": not settings.shopify_live_enabled, "store_domain": settings.shopify_store_domain or None, "api_version": settings.shopify_api_version, "granted_scopes": ["read_customers", "read_inventory", "read_orders", "read_products"], "limitations": ["当前只读，不执行 Shopify mutation", "订单历史范围受 granted scopes 和 Shopify 规则限制", "库存 GraphQL 字段以当前店铺 schema 为准"]}
+
+
+@app.post("/api/external/shopify/preview", response_model=ShopifyPreviewResponse)
+def shopify_preview(payload: ShopifyPreviewRequest, request: Request):
+    require_principal(request, permission="inventory.read")
+    settings = get_settings()
+    from app.platform_adapters.shopify import ShopifyFixtureTransport, ShopifyLiveTransport, ShopifyReadOnlyAdapter
+    if payload.live:
+        if not (settings.shopify_live_enabled and settings.shopify_store_domain and settings.shopify_access_token):
+            raise HTTPException(status_code=409, detail={"code": "SHOPIFY_LIVE_NOT_CONFIGURED", "message": "Shopify live 未配置店铺、Token 或启用开关"})
+        transport = ShopifyLiveTransport(settings.shopify_store_domain, settings.shopify_access_token, settings.shopify_api_version, settings.shopify_request_timeout_seconds, settings.shopify_max_retries)
+        adapter = ShopifyReadOnlyAdapter(transport, live_enabled=True, simulated=False, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
+    else:
+        empty = {"data": {"products": {"edges": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}, "orders": {"edges": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}, "locations": {"edges": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        adapter = ShopifyReadOnlyAdapter(ShopifyFixtureTransport({"products": empty, "orders": empty, "inventory": empty}), simulated=True, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
+    records = getattr(adapter, f"fetch_{payload.resource}")()
+    return ShopifyPreviewResponse(resource=payload.resource, live_enabled=adapter.live_enabled, simulated=adapter.simulated, store_domain=settings.shopify_store_domain or None, total=len(records), records=records, request_ids=[], limitations=["Preview 不写入内部事实层；使用 sync 入口才会写入订单/库存外部事实"])
+
+
+@app.post("/api/external/shopify/sync")
+def shopify_sync(request: Request, db: Session = Depends(get_db), resources: str = "orders,inventory"):
+    principal = require_principal(request, permission="inventory.write")
+    settings = get_settings()
+    if not (settings.shopify_live_enabled and settings.shopify_store_domain and settings.shopify_access_token):
+        raise HTTPException(status_code=409, detail={"code": "SHOPIFY_LIVE_NOT_CONFIGURED", "message": "Shopify live 未配置"})
+    from app.platform_adapters.shopify import ShopifyLiveTransport, ShopifyReadOnlyAdapter
+    from app.external_orders import ensure_external_account, ingest_orders
+    from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, ImportStats, ingest_inventory
+    selected = [item.strip() for item in resources.split(",") if item.strip()]
+    allowed = {"orders", "inventory"}
+    if not selected or not set(selected).issubset(allowed):
+        raise HTTPException(status_code=422, detail={"code": "SHOPIFY_RESOURCE_INVALID", "message": "当前同步只支持 orders/inventory"})
+    transport = ShopifyLiveTransport(settings.shopify_store_domain, settings.shopify_access_token, settings.shopify_api_version, settings.shopify_request_timeout_seconds, settings.shopify_max_retries)
+    adapter = ShopifyReadOnlyAdapter(transport, live_enabled=True, simulated=False, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
+    account_ref = settings.shopify_store_domain
+    run = begin_sync_run(db, workspace_id=principal.workspace_id, platform="shopify", sync_type="shopify_live", account_ref=account_ref, store_ref=settings.shopify_store_domain, source_mode="shopify_live", simulated=False)
+    initialize_resources(db, run, selected)
+    result = {"run_id": run.run_id, "platform": "shopify", "source_mode": "shopify_live", "simulated": False, "resources": {}}
+    for resource in selected:
+        mark_resource_running(db, run, resource)
+        try:
+            records = adapter.fetch_orders() if resource == "orders" else adapter.fetch_inventory()
+            if resource == "orders":
+                account = ensure_external_account(db, workspace_id=principal.workspace_id, platform="shopify", account_ref=account_ref, store_ref=settings.shopify_store_domain, source_mode="shopify_live", simulated=False)
+                normalized = []
+                for row in records:
+                    lines = []
+                    for line in ((row.get("lineItems") or {}).get("nodes") or []):
+                        variant = line.get("variant") or {}
+                        amount_set = line.get("originalTotalSet") or {}
+                        shop_money = amount_set.get("shopMoney") or {}
+                        order_total_set = row.get("currentTotalPriceSet") or {}
+                        order_shop_money = order_total_set.get("shopMoney") or {}
+                        currency = shop_money.get("currencyCode") or order_shop_money.get("currencyCode") or "USD"
+                        line_amount = shop_money.get("amount") or "0"
+                        order_amount = order_shop_money.get("amount") or "0"
+                        # Amounts are available in the Shopify GraphQL response;
+                        # preserve their currency instead of coercing to CNY.
+                        lines.append({
+                            "external_line_id": line.get("id") or "line",
+                            "external_sku": (line.get("sku") or variant.get("id") or "unknown"),
+                            "ordered_qty": line.get("quantity", 0),
+                            "cancelled_qty": 0,
+                            "refunded_qty": 0,
+                            "gross_amount": line_amount,
+                            "refund_amount": "0",
+                            "currency": currency,
+                        })
+                    financial_status = (row.get("displayFinancialStatus") or "").lower()
+                    status = {"paid": "paid", "partially_paid": "paid", "refunded": "completed", "partially_refunded": "completed", "voided": "cancelled", "pending": "pending"}.get(financial_status, "unknown")
+                    normalized.append({
+                        "account_ref": account_ref,
+                        "store_ref": settings.shopify_store_domain,
+                        "external_order_no": row.get("id") or row.get("name"),
+                        "order_status": status,
+                        "external_created_at": row.get("createdAt"),
+                        "external_updated_at": row.get("updatedAt") or row.get("createdAt"),
+                        "paid_at": row.get("processedAt"),
+                        "gross_amount": order_amount,
+                        "refund_amount": "0",
+                        "currency": (row.get("currentTotalPriceSet") or {}).get("shopMoney", {}).get("currencyCode") or "USD",
+                        "lines": lines,
+                        "source_mode": "shopify_live",
+                        "simulated": False,
+                        "status_reason": "Shopify 当前只读查询未包含退款明细；订单与行金额可用，退款金额为 unknown",
+                    })
+                from app.connectors import load_orders
+                from dataclasses import replace
+                # Normalize through the existing canonical order contract.
+                content = json.dumps(normalized, ensure_ascii=False)
+                canonical = [
+                    replace(record, source_mode="shopify_live", simulated=False)
+                    for record in load_orders(content, platform="shopify", source_mode="json")
+                ]
+                stats = ingest_orders(db, canonical, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
+                mark_resource_succeeded(db, run, resource, ImportStats(total=stats.total, inserted=stats.inserted, updated=stats.updated, no_op=stats.no_op, conflict=stats.conflict, stale=stats.stale))
+                result["resources"][resource] = {"total": stats.total, "inserted": stats.inserted, "updated": stats.updated, "no_op": stats.no_op, "conflict": stats.conflict, "data_completeness": "partial", "note": "退款明细未在当前只读查询中请求，退款金额保持 unknown"}
+            else:
+                from app.connectors import normalize_inventory_row
+                canonical = [normalize_inventory_row(row, platform="shopify", source_mode="shopify_live", index=index) for index, row in enumerate(records)]
+                stats = ingest_inventory(db, canonical, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
+                mark_resource_succeeded(db, run, resource, ImportStats(total=stats.total, inserted=stats.inserted, no_op=stats.no_op, conflict=stats.conflict, snapshot_ids=stats.snapshot_ids))
+                result["resources"][resource] = {"total": stats.total, "inserted": stats.inserted, "no_op": stats.no_op, "conflict": stats.conflict, "snapshot_ids": stats.snapshot_ids or [], "stored": True, "data_completeness": "complete"}
+        except Exception as exc:
+            mark_resource_failed(db, run, resource, exc)
+            result["resources"][resource] = {"error_code": getattr(exc, "code", type(exc).__name__), "error": str(exc)}
+    finalize_resource_run(db, run)
+    result["status"] = run.status
+    return result
+
+
 def external_orders_preview(payload: ExternalOrderPreviewRequest, request: Request):
     require_principal(request, permission="inventory.read")
     from app.connectors import load_orders
@@ -1498,10 +1963,24 @@ def list_replenishment_evaluations_api(
         warehouse_id=warehouse_id, sku_id=sku_id, status=status,
         limit=page_size, offset=(page - 1) * page_size,
     )
-    return ReplenishmentEvaluationPage(
-        items=[ReplenishmentEvaluationResponse.model_validate(item) for item in rows],
-        page=page, page_size=page_size, total=total,
-    )
+    return {
+        "items": [ReplenishmentEvaluationResponse.model_validate(item).model_dump(mode="json") for item in rows],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+    }
+
+
+@app.get("/api/analytics/replenishment-decisions")
+def replenishment_decision_metrics_api(
+    request: Request,
+    as_of: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    principal = require_principal(request, permission="replenishment.read")
+    from app.replenishment import build_replenishment_decision_metrics
+    result = build_replenishment_decision_metrics(db, workspace_id=principal.workspace_id, as_of=as_of)
+    return {**result, "meta": {"workspace_id": principal.workspace_id, "as_of": result["as_of"], "timezone": "UTC", "source": "ReplenishmentSuggestion", "data_completeness": result["data_completeness"], "metric_version": "1", "limitations": ["当前 PurchaseRequestLine 与 InboundOrder 没有明确外键关联，生成到人工入库确认耗时返回 unknown"]}}
 
 
 @app.get("/api/analytics/sales")
@@ -1511,8 +1990,8 @@ def analytics_sales(
     db: Session = Depends(get_db),
 ):
     principal = require_principal(request, permission="analytics.read")
-    from app.analytics import build_sales_summary
-    return build_sales_summary(db, workspace_id=principal.workspace_id, as_of=as_of)
+    from app.analytics_queries import AnalyticsQueryService
+    return AnalyticsQueryService(db).sales(workspace_id=principal.workspace_id, as_of=as_of)
 
 
 @app.get("/api/analytics/inventory-health")
@@ -1528,19 +2007,15 @@ def analytics_inventory_health(
     principal = require_principal(request, permission="analytics.read")
     if warehouse_id is not None:
         require_warehouse_access(principal, warehouse_id, db=db)
-    from app.analytics import build_inventory_health
-    body = build_inventory_health(
-        db,
+    from app.analytics_queries import AnalyticsQueryService
+    return AnalyticsQueryService(db).inventory_health(
         workspace_id=principal.workspace_id,
         coverage_days=coverage_days,
         as_of=as_of,
         warehouse_id=warehouse_id,
-        limit=page_size,
-        offset=(page - 1) * page_size,
+        page=page,
+        page_size=page_size,
     )
-    body["page"] = page
-    body["page_size"] = page_size
-    return body
 
 
 @app.get("/api/analytics/product-quadrant", response_model=ProductQuadrantResponse)
@@ -1560,20 +2035,28 @@ def product_quadrant(
     principal = require_principal(request, permission="analytics.read")
     if warehouse_id is not None:
         require_warehouse_access(principal, warehouse_id, db=db)
-    from app.analytics import build_product_quadrant
+    from app.analytics_queries import AnalyticsQueryError, AnalyticsQueryService
     try:
-        summary = build_product_quadrant(
-            db, workspace_id=principal.workspace_id, as_of=as_of,
-            growth_window=growth_window, baseline_window=baseline_window,
-            days_window=days_window, warehouse_id=warehouse_id,
-            growth_high=growth_high, days_low=days_low,
+        summary = AnalyticsQueryService(db).product_quadrant(
+            workspace_id=principal.workspace_id,
+            as_of=as_of,
+            growth_window=growth_window,
+            baseline_window=baseline_window,
+            days_window=days_window,
+            warehouse_id=warehouse_id,
+            growth_high=growth_high,
+            days_low=days_low,
+            page=page,
+            page_size=page_size,
         )
-    except ValueError as exc:
-        code = str(exc)
+    except AnalyticsQueryError as exc:
+        code = exc.code
         status = 422 if code.endswith("WINDOW") or code.endswith("RANGE") else 404
-        raise HTTPException(status_code=status, detail={"code": code, "message": "商品四象限参数无效"})
-    items = summary.pop("items")
-    return ProductQuadrantResponse(items=[ProductQuadrantItem.model_validate(item) for item in items[:page_size]], **summary, page=page, page_size=page_size, total=len(items))
+        raise HTTPException(status_code=status, detail={"code": code, "message": "商品四象限参数无效"}) from exc
+    return ProductQuadrantResponse(
+        items=[ProductQuadrantItem.model_validate(item) for item in summary.pop("items")],
+        **summary,
+    )
 
 
 @app.post("/api/analytics/replenishment-evaluation", response_model=ReplenishmentEvaluationResponse, status_code=201)
@@ -2004,6 +2487,233 @@ def external_reconciliation(snapshot_id: int, request: Request, db: Session = De
         raise HTTPException(status_code=404, detail={"code": str(exc), "message": "外部快照不存在"}) from exc
 
 
+
+
+@app.get("/api/content/workflows")
+def list_content_workflows(request: Request):
+    require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    from app.visual_workflows import WORKFLOWS
+    from app.workflow_schema import workflow_hash
+    return {"items": [workflow.plan() | {"workflow_hash": workflow_hash(workflow.graph()), "nodes": workflow.graph()["nodes"], "edges": workflow.graph()["edges"]} for workflow in WORKFLOWS.values()]}
+
+
+@app.get("/api/content/workflows/{workflow_key}")
+def get_content_workflow(workflow_key: str, request: Request):
+    require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    try:
+        from app.visual_workflows import get_workflow
+        from app.workflow_schema import workflow_hash
+        workflow = get_workflow(workflow_key)
+        graph = workflow.graph()
+        return workflow.plan() | {"workflow_hash": workflow_hash(graph), "nodes": graph["nodes"], "edges": graph["edges"]}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"code": "WORKFLOW_NOT_FOUND", "message": "工作流不存在"}) from exc
+
+
+@app.post("/api/content/runs", response_model=ContentJobResponse, status_code=202)
+def create_content_run(payload: ContentJobCreate, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    product = db.scalar(select(Product).where(Product.id == payload.product_id, Product.workspace_id == principal.workspace_id))
+    if product is None:
+        raise HTTPException(status_code=404, detail={"code": "PRODUCT_NOT_FOUND", "message": "商品不存在"})
+    sku = db.scalar(select(ProductSku).where(ProductSku.id == payload.sku_id, ProductSku.product_id == product.id, ProductSku.workspace_id == principal.workspace_id)) if payload.sku_id else None
+    if payload.sku_id and sku is None:
+        raise HTTPException(status_code=404, detail={"code": "SKU_NOT_FOUND", "message": "SKU 不属于当前商品"})
+    key = request.headers.get("Idempotency-Key") or ""
+    if not key or len(key) > 128:
+        raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供有效的 Idempotency-Key"})
+    from app.content_production import build_snapshot, build_spec, canonical_json, snapshot_hash
+    from app.visual_workflows import build_workflow_prompt, resolve_workflow, snapshot_workflow
+    import hashlib
+    source_asset = db.scalar(select(ProductMediaAsset).where(ProductMediaAsset.workspace_id == principal.workspace_id, ProductMediaAsset.product_id == product.id, ProductMediaAsset.role == "source", ProductMediaAsset.selected.is_(True)).order_by(ProductMediaAsset.id.desc()))
+    source_descriptor = None
+    if source_asset is not None:
+        source_descriptor = {"asset_id": source_asset.id, "sha256": source_asset.content_sha256, "mime_type": source_asset.mime_type, "width": source_asset.width, "height": source_asset.height}
+    snapshot = build_snapshot(product, sku)
+    if source_descriptor:
+        snapshot["source_assets"] = [source_descriptor]
+    workflow = resolve_workflow(workflow_key=getattr(payload, "workflow_key", None), category=product.category)
+    spec = build_spec(scene=payload.scene, style=payload.style, operation=payload.operation, width=payload.width, height=payload.height, candidate_count=payload.candidate_count, snapshot=snapshot, brief=build_workflow_prompt(workflow, product_title=product.title, brief=payload.brief))
+    body_hash = hashlib.sha256(canonical_json(payload.model_dump()).encode()).hexdigest()
+    existing = db.scalar(select(ProductContentRevision).where(ProductContentRevision.workspace_id == principal.workspace_id, ProductContentRevision.idempotency_key == key))
+    if existing is not None:
+        if existing.payload_hash != body_hash:
+            raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_KEY_REUSE", "message": "幂等键对应请求内容已改变"})
+        job = db.get(CrawlJob, existing.generation_job_id) if existing.generation_job_id else None
+        return ContentJobResponse(job_id=job.id if job else 0, run_id=job.run_id if job else None, revision_id=existing.id, job_status=job.status if job else "succeeded", revision_status=existing.status, simulated=existing.simulated, provider=existing.provider)
+    max_revision = db.scalar(select(func.max(ProductContentRevision.revision_no)).where(ProductContentRevision.workspace_id == principal.workspace_id, ProductContentRevision.product_id == product.id)) or 0
+    revision = ProductContentRevision(workspace_id=principal.workspace_id, product_id=product.id, sku_id=payload.sku_id, revision_no=max_revision + 1, status="generating", channel="generic", source_snapshot_json=canonical_json(snapshot), source_snapshot_hash=snapshot_hash(snapshot), provider=payload.provider, source_mode="live" if payload.provider == "wan" else "local", simulated=payload.provider != "wan", prompt_snapshot=canonical_json({**spec.__dict__, "workflow": snapshot_workflow(workflow)}), created_by=principal.subject, version=1, idempotency_key=key, payload_hash=body_hash)
+    db.add(revision); db.flush()
+    from app.repository import enqueue_job
+    job = enqueue_job(db, type_="content_generate", source=payload.provider, keyword=payload.scene, payload={"revision_id": revision.id, "provider": payload.provider}, workspace_id=principal.workspace_id, idempotency_key=key, payload_hash=body_hash)
+    revision.generation_job_id = job.id
+    db.commit(); db.refresh(revision)
+    from app.background import _submit_future
+    _submit_future(job.id)
+    return ContentJobResponse(job_id=job.id, run_id=job.run_id, revision_id=revision.id, job_status=job.status, revision_status=revision.status, simulated=revision.simulated, provider=revision.provider)
+
+
+@app.get("/api/content/jobs/{job_id}")
+def get_content_job(job_id: int, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    job = db.scalar(select(CrawlJob).where(CrawlJob.id == job_id, CrawlJob.workspace_id == principal.workspace_id, CrawlJob.type == "content_generate"))
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "CONTENT_JOB_NOT_FOUND", "message": "内容任务不存在"})
+    revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.generation_job_id == job.id, ProductContentRevision.workspace_id == principal.workspace_id))
+    return {"job_id": job.id, "run_id": job.run_id, "job_status": job.status, "revision_status": revision.status if revision else "unknown", "revision_id": revision.id if revision else None, "simulated": revision.simulated if revision else True, "provider": revision.provider if revision else job.source}
+
+
+@app.get("/api/content/runs")
+def list_content_runs(request: Request, product_id: int | None = Query(default=None, gt=0), limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)):
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    filters = [ProductContentRevision.workspace_id == principal.workspace_id]
+    if product_id:
+        filters.append(ProductContentRevision.product_id == product_id)
+    revisions = db.scalars(select(ProductContentRevision).where(*filters).order_by(ProductContentRevision.id.desc()).limit(limit)).all()
+    rows = []
+    for revision in revisions:
+        job = db.get(CrawlJob, revision.generation_job_id) if revision.generation_job_id else None
+        rows.append({"revision_id": revision.id, "product_id": revision.product_id, "revision_no": revision.revision_no, "status": revision.status, "quality_status": revision.quality_status, "provider": revision.provider, "simulated": revision.simulated, "job_id": job.id if job else None, "job_status": job.status if job else "unknown", "created_at": revision.created_at})
+    return {"items": rows}
+
+
+@app.get("/api/content/runs/{job_id}")
+def get_content_run(job_id: int, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    job = db.scalar(select(CrawlJob).where(CrawlJob.id == job_id, CrawlJob.workspace_id == principal.workspace_id, CrawlJob.type == "content_generate"))
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "CONTENT_JOB_NOT_FOUND", "message": "内容任务不存在"})
+    revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.generation_job_id == job.id, ProductContentRevision.workspace_id == principal.workspace_id))
+    if revision is None:
+        raise HTTPException(status_code=404, detail={"code": "CONTENT_REVISION_NOT_FOUND", "message": "内容版本不存在"})
+    assets = db.scalars(select(ProductMediaAsset).where(ProductMediaAsset.revision_id == revision.id, ProductMediaAsset.workspace_id == principal.workspace_id).order_by(ProductMediaAsset.id)).all()
+    return {"job_id": job.id, "job_status": job.status, "revision": {**ContentRevisionResponse.model_validate(revision).model_dump(mode="json"), "assets": [ContentAssetResponse.model_validate(x).model_dump(mode="json") for x in assets]}}
+
+
+@app.get("/api/products/{product_id}/media", response_model=list[ContentAssetResponse])
+def list_product_media(product_id: int, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    if db.scalar(select(Product.id).where(Product.id == product_id, Product.workspace_id == principal.workspace_id)) is None:
+        raise HTTPException(status_code=404, detail={"code": "PRODUCT_NOT_FOUND", "message": "商品不存在"})
+    return db.scalars(select(ProductMediaAsset).where(ProductMediaAsset.product_id == product_id, ProductMediaAsset.workspace_id == principal.workspace_id).order_by(ProductMediaAsset.id.desc())).all()
+
+
+@app.post("/api/products/{product_id}/media", response_model=ContentAssetResponse, status_code=201)
+async def upload_product_media(product_id: int, request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    product = db.scalar(select(Product).where(Product.id == product_id, Product.workspace_id == principal.workspace_id))
+    if product is None:
+        raise HTTPException(status_code=404, detail={"code": "PRODUCT_NOT_FOUND", "message": "商品不存在"})
+    content = await file.read()
+    limit = get_settings().aigc_max_upload_bytes
+    if not content or len(content) > limit:
+        raise HTTPException(status_code=413, detail={"code": "MEDIA_TOO_LARGE", "message": "基础图为空或超过大小限制"})
+    from app.content_production import _artifact_root, save_asset_bytes
+    import io
+    try:
+        image = __import__("PIL").Image.open(io.BytesIO(content))
+        image.verify()
+        with __import__("PIL").Image.open(io.BytesIO(content)) as checked:
+            width, height = checked.size
+            mime = checked.get_format_mimetype() or file.content_type or "image/png"
+    except Exception as exc:
+        raise HTTPException(status_code=415, detail={"code": "MEDIA_INVALID", "message": "基础图不是有效图片"}) from exc
+    digest = sha256(content).hexdigest()
+    asset = db.scalar(select(ProductMediaAsset).where(ProductMediaAsset.workspace_id == principal.workspace_id, ProductMediaAsset.product_id == product_id, ProductMediaAsset.role == "source", ProductMediaAsset.content_sha256 == digest))
+    if asset is not None:
+        asset.selected = True
+        db.commit(); db.refresh(asset)
+        return asset
+    db.query(ProductMediaAsset).filter(ProductMediaAsset.workspace_id == principal.workspace_id, ProductMediaAsset.product_id == product_id, ProductMediaAsset.role == "source").update({"selected": False}, synchronize_session=False)
+    path = save_asset_bytes(workspace_id=principal.workspace_id, run_id=f"source-{product_id}", name=f"{digest}.bin", data=content)
+    asset = ProductMediaAsset(workspace_id=principal.workspace_id, product_id=product_id, role="source", storage_uri=path, content_sha256=digest, mime_type=mime, size_bytes=len(content), width=width, height=height, provider="upload", source_mode="upload", simulated=False, selected=True)
+    db.add(asset); db.commit(); db.refresh(asset)
+    return asset
+
+
+@app.get("/api/content/assets/{asset_id}")
+def download_content_asset(asset_id: int, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    asset = db.scalar(select(ProductMediaAsset).where(ProductMediaAsset.id == asset_id, ProductMediaAsset.workspace_id == principal.workspace_id))
+    if asset is None:
+        raise HTTPException(status_code=404, detail={"code": "CONTENT_ASSET_NOT_FOUND", "message": "素材不存在"})
+    root = get_settings().resolve_path(get_settings().artifacts_dir) / "content"
+    try:
+        path = safe_storage_path(root, asset.storage_uri)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"code": "CONTENT_ASSET_NOT_FOUND", "message": "素材不存在"}) from exc
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail={"code": "CONTENT_ASSET_NOT_FOUND", "message": "素材文件不存在"})
+    return FileResponse(path, media_type=asset.mime_type)
+
+
+@app.post("/api/content/revisions/{revision_id}/review")
+def review_content_revision(revision_id: int, payload: ContentReviewRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.id == revision_id, ProductContentRevision.workspace_id == principal.workspace_id))
+    if revision is None:
+        raise HTTPException(status_code=404, detail={"code": "CONTENT_REVISION_NOT_FOUND", "message": "内容版本不存在"})
+    if revision.version != payload.expected_version:
+        raise HTTPException(status_code=409, detail={"code": "CONTENT_VERSION_CONFLICT", "message": "内容版本已变化，请刷新后重试"})
+    if payload.action == "approve" and revision.quality_status == "blocked":
+        raise HTTPException(status_code=409, detail={"code": "CONTENT_QUALITY_BLOCKED", "message": "质量检查未通过，不能审核通过"})
+    transitions = {"submit": {"draft": "in_review"}, "approve": {"in_review": "approved"}, "request_changes": {"in_review": "changes_requested"}, "reject": {"in_review": "rejected", "draft": "rejected"}}
+    target = transitions.get(payload.action, {}).get(revision.status)
+    if target is None:
+        raise HTTPException(status_code=409, detail={"code": "CONTENT_INVALID_STATE", "message": "当前状态不允许此审核动作"})
+    key = request.headers.get("Idempotency-Key") or ""
+    if not key:
+        raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供 Idempotency-Key"})
+    import hashlib
+    action_hash = hashlib.sha256(canonical_json(payload.model_dump()).encode()).hexdigest() if "canonical_json" in globals() else hashlib.sha256(json.dumps(payload.model_dump(), ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    previous_action = db.scalar(select(ProductContentAction).where(ProductContentAction.workspace_id == principal.workspace_id, ProductContentAction.revision_id == revision.id, ProductContentAction.action_type == payload.action, ProductContentAction.idempotency_key == key))
+    if previous_action is not None:
+        if previous_action.payload_hash != action_hash:
+            raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_KEY_REUSE", "message": "审核幂等键对应内容已改变"})
+        return {"id": revision.id, "status": revision.status, "version": revision.version, "reviewed_by": revision.reviewed_by, "replayed": True}
+    db.add(ProductContentAction(workspace_id=principal.workspace_id, revision_id=revision.id, action_type=payload.action, from_status=revision.status, to_status=target, note=payload.note, expected_version=payload.expected_version, idempotency_key=key, payload_hash=action_hash, actor=principal.subject, request_id=getattr(request.state, "request_id", None)))
+    revision.status = target; revision.version += 1; revision.reviewed_by = principal.subject; revision.reviewed_at = datetime.utcnow()
+    if target == "approved": revision.approved_at = datetime.utcnow()
+    if target in {"rejected", "changes_requested"}: revision.rejection_reason = payload.note
+    db.commit(); db.refresh(revision)
+    return {"id": revision.id, "status": revision.status, "version": revision.version, "reviewed_by": revision.reviewed_by}
+
+
+@app.post("/api/content/revisions/{revision_id}/export", response_model=ContentExportResponse, status_code=202)
+def export_content_revision(revision_id: int, payload: ContentExportRequest, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    if payload.revision_id != revision_id:
+        raise HTTPException(status_code=422, detail={"code": "REVISION_MISMATCH", "message": "版本 ID 不匹配"})
+    revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.id == revision_id, ProductContentRevision.workspace_id == principal.workspace_id, ProductContentRevision.status == "approved"))
+    if revision is None:
+        raise HTTPException(status_code=409, detail={"code": "CONTENT_NOT_APPROVED", "message": "只有审核通过的版本可以导出"})
+    key = request.headers.get("Idempotency-Key") or ""
+    if not key or len(key) > 128:
+        raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供 Idempotency-Key"})
+    body_hash = sha256(json.dumps(payload.model_dump(), ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    existing = db.scalar(select(ProductContentExport).where(ProductContentExport.workspace_id == principal.workspace_id, ProductContentExport.idempotency_key == key))
+    if existing is not None:
+        if existing.payload_hash != body_hash:
+            raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_KEY_REUSE", "message": "幂等键对应内容已改变"})
+        return existing
+    export = ProductContentExport(workspace_id=principal.workspace_id, revision_id=revision.id, format=payload.format, status="queued", simulated=revision.simulated, idempotency_key=key, payload_hash=body_hash, created_by=principal.subject)
+    db.add(export); db.flush()
+    from app.repository import enqueue_job
+    job = enqueue_job(db, type_="content_export", source="content", keyword=payload.format, payload={"export_id": export.id}, workspace_id=principal.workspace_id, idempotency_key=f"export:{key}", payload_hash=body_hash)
+    db.commit(); db.refresh(export)
+    export_job_id = job.id
+    from app.background import _submit_future
+    _submit_future(export_job_id)
+    return export
+
+
+@app.get("/api/content/exports/{export_id}", response_model=ContentExportResponse)
+def get_content_export(export_id: int, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    export = db.scalar(select(ProductContentExport).where(ProductContentExport.id == export_id, ProductContentExport.workspace_id == principal.workspace_id))
+    if export is None:
+        raise HTTPException(status_code=404, detail={"code": "CONTENT_EXPORT_NOT_FOUND", "message": "导出任务不存在"})
+    return export
 
 
 @app.get("/api/products", response_model=ProductPage)

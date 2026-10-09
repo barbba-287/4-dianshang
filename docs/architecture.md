@@ -55,6 +55,8 @@ products                 product_price_history
 - 采集失败保留 `crawl_jobs` 失败状态、错误码和错误信息。
 - `.env`、数据库文件、截图、Trace 和原始快照不进入公开仓库。
 
-## 当前边界
+## 竞品公开类目回放（当前离线能力）
 
-当前版本只验证本地 fixture 和本地数据库闭环，不代表已接入淘宝、京东等真实平台，也不执行订单、支付、下单、改价或删除操作。后续新增真实数据源前，应先确认公开/授权范围和访问规则。
+`app/catalog_replay.py` 提供 `local_html_replay`：只读取 manifest 明确列出的本地 HTML，验证公开商品字段的 DOM 解析、分页、去重、限页、阻断检测和 Playwright 诊断产物。CLI 入口为 `python -m app.cli replay-catalog --manifest <path>`，默认不访问网络、不写数据库，也不接收任意远程 URL。
+
+这不是淘宝/天猫真实竞品生产接入。未来真实页面 transport 必须单独审查平台规则和法律边界，只读取无需登录的公开商品信息；不登录竞品后台、不使用 Cookie/Token、不抓取订单/库存/销售额等非公开经营数据，不绕过验证码、MFA、风控或访问限制。遇到阻断时 fail-closed 并转人工。自有店铺后台报表自动化属于另一个明确授权的 RPA 范围。

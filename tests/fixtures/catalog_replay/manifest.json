@@ -1,0 +1,5 @@
+{
+  "mode": "local_html_replay",
+  "root": ".",
+  "entrypoint": "page-1.html"
+}

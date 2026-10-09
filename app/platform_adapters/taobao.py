@@ -5,6 +5,7 @@ an explicitly enabled transport is injected by a future authorized runtime.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Callable
 
@@ -67,6 +68,8 @@ class TaobaoAdapter:
         response = self._request(resource="orders", account_ref=account_ref, store_ref=store_ref, cursor=cursor, updated_from=updated_from, updated_to=updated_to)
         rows = self._rows(response, resource="orders")
         normalized = [normalize_order_row({**row, "account_ref": account_ref, "store_ref": store_ref, "simulated": self.simulated}, platform=self.platform, source_mode="mock" if self.simulated else "json", index=index) for index, row in enumerate(rows)]
+        if not self.simulated:
+            normalized = [replace(record, simulated=False) for record in normalized]
         next_cursor = response.get("next_cursor")
         return AdapterPage(records=normalized, next_cursor=str(next_cursor) if next_cursor else None, has_more=bool(response.get("has_more")), request_id=str(response.get("request_id")) if response.get("request_id") else None, source_ref=response.get("source_ref"), data_completeness=str(response.get("data_completeness") or "complete"), metadata={"resource": "orders"})
 
@@ -75,6 +78,8 @@ class TaobaoAdapter:
         rows = self._rows(response, resource="inventory")
         rows = [{**row, "account_ref": account_ref, "store_ref": store_ref, "simulated": self.simulated} for row in rows]
         normalized = [normalize_inventory_row(row, platform=self.platform, source_mode="mock" if self.simulated else "json", index=index) for index, row in enumerate(rows)]
+        if not self.simulated:
+            normalized = [replace(record, simulated=False) for record in normalized]
         next_cursor = response.get("next_cursor")
         return AdapterPage(records=normalized, next_cursor=str(next_cursor) if next_cursor else None, has_more=bool(response.get("has_more")), request_id=str(response.get("request_id")) if response.get("request_id") else None, source_ref=response.get("source_ref"), data_completeness=str(response.get("data_completeness") or "complete"), metadata={"resource": "inventory"})
 

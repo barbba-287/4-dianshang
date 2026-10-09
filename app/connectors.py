@@ -11,8 +11,9 @@ import io
 import json
 from typing import Any, Iterable, Protocol
 
-PLATFORMS = ("taobao", "jd", "pdd", "douyin", "amazon")
+PLATFORMS = ("taobao", "jd", "pdd", "douyin", "amazon", "shopify")
 MODES = ("json", "csv", "mock")
+NORMALIZED_SOURCE_MODES = MODES + ("shopify_live",)
 
 
 @dataclass(frozen=True)
@@ -236,7 +237,7 @@ def _payload_hash(row: dict[str, Any]) -> str:
 def normalize_inventory_row(row: dict[str, Any], *, platform: str, source_mode: str, index: int) -> InventorySnapshotRecord:
     if platform not in PLATFORMS:
         raise ConnectorError(f"不支持的平台: {platform}")
-    if source_mode not in MODES:
+    if source_mode not in NORMALIZED_SOURCE_MODES:
         raise ConnectorError(f"不支持的数据模式: {source_mode}")
     external_sku = _required_text(row, "external_sku")
     account_ref = _required_text(row, "account_ref")
@@ -267,7 +268,7 @@ def normalize_inventory_row(row: dict[str, Any], *, platform: str, source_mode: 
         idempotency_key=key,
         raw_ref=str(row["raw_ref"]).strip() if row.get("raw_ref") else f"mock://{platform}/inventory/{index}",
         source_mode=source_mode,
-        simulated=True,
+        simulated=source_mode != "shopify_live",
     )
 
 
@@ -300,7 +301,7 @@ def _order_status(value: Any) -> tuple[str, str | None]:
 def normalize_order_row(row: dict[str, Any], *, platform: str, source_mode: str, index: int) -> ExternalOrderRecord:
     if platform not in PLATFORMS:
         raise ConnectorError(f"不支持的平台: {platform}")
-    if source_mode not in MODES:
+    if source_mode not in NORMALIZED_SOURCE_MODES:
         raise ConnectorError(f"不支持的数据模式: {source_mode}")
     account_ref = _required_text(row, "account_ref")
     order_no = _required_text(row, "external_order_no")
@@ -351,7 +352,7 @@ def normalize_order_row(row: dict[str, Any], *, platform: str, source_mode: str,
         payload_hash=_payload_hash(canonical),
         idempotency_key=str(row.get("idempotency_key") or f"{platform}:{account_ref}:{store_ref}:{order_no}:{event_version if event_version is not None else updated.isoformat()}"),
         raw_ref=str(row["raw_ref"]).strip() if row.get("raw_ref") else f"mock://{platform}/orders/{index}",
-        source_mode=source_mode, simulated=bool(row.get("simulated", source_mode == "mock")), data_completeness="partial" if reason else "complete", status_reason=reason,
+        source_mode=source_mode, simulated=source_mode != "shopify_live", data_completeness="partial" if reason or row.get("status_reason") else "complete", status_reason=reason or (str(row.get("status_reason")) if row.get("status_reason") else None),
     )
 
 
@@ -372,7 +373,7 @@ def load_orders(content: str | bytes, *, platform: str, source_mode: str = "json
 def normalize_event_row(row: dict[str, Any], *, platform: str, source_mode: str, index: int) -> CanonicalEvent:
     if platform not in PLATFORMS:
         raise ConnectorError(f"不支持的平台: {platform}")
-    if source_mode not in MODES:
+    if source_mode not in NORMALIZED_SOURCE_MODES:
         raise ConnectorError(f"不支持的数据模式: {source_mode}")
     event_id = _required_text(row, "external_event_id")
     account_ref = _required_text(row, "account_ref")
@@ -403,7 +404,7 @@ def normalize_event_row(row: dict[str, Any], *, platform: str, source_mode: str,
         payload=payload,
         raw_ref=str(row["raw_ref"]).strip() if row.get("raw_ref") else f"mock://{platform}/events/{index}",
         source_mode=source_mode,
-        simulated=True,
+        simulated=source_mode != "shopify_live",
     )
 
 
@@ -434,6 +435,8 @@ def _decode_input(content: str | bytes, *, source_mode: str) -> list[dict[str, A
                     if not row.get(key) and value:
                         row[key] = value
         return rows
+    if source_mode == "shopify_live":
+        raise ConnectorError("shopify_live 记录必须通过已授权的 Shopify Adapter 提供")
     raise ConnectorError(f"不支持的数据模式: {source_mode}")
 
 

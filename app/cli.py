@@ -25,6 +25,7 @@ python -m app.cli status
 """
 
 import io
+import json
 import sys
 from pathlib import Path
 import argparse
@@ -286,10 +287,77 @@ def cmd_query(args: list[str]) -> int:
     return 0
 
 
+def cmd_collect_taobao_catalog(args: list[str]) -> int:
+    """人工确认后单次读取淘宝公开搜索页；不落库、不自动重试。"""
+    from app.catalog_live import CatalogLiveError, CatalogLiveLimits, collect_taobao_public_catalog
+
+    keyword = _option(args, "--keyword")
+    if not keyword:
+        print(json.dumps({"ok": False, "mode": "taobao_catalog_live", "error_code": "INVALID_REPLAY_INPUT", "error": "缺少 --keyword"}, ensure_ascii=False))
+        return 2
+    allowed = {"--keyword", "--confirm-public-read-only", "--allow-same-origin-public-requests", "--allow-approved-cdn", "--max-pages", "--delay-ms", "--timeout-seconds", "--total-timeout-seconds", "--max-products", "--artifacts-dir", "--headed"}
+    unknown = [arg for arg in args if arg.startswith("--") and arg not in allowed]
+    if unknown:
+        print(json.dumps({"ok": False, "mode": "taobao_catalog_live", "error_code": "INVALID_REPLAY_INPUT", "error": "包含不支持的参数"}, ensure_ascii=False))
+        return 2
+    try:
+        result = collect_taobao_public_catalog(
+            keyword,
+            confirm_public_read_only="--confirm-public-read-only" in args,
+            limits=CatalogLiveLimits(
+                max_pages=int(_option(args, "--max-pages", "1")),
+                min_delay_seconds=int(_option(args, "--delay-ms", "3000")) / 1000,
+                page_timeout_seconds=int(_option(args, "--timeout-seconds", str(get_settings().taobao_catalog_live_page_timeout_seconds))),
+                total_timeout_seconds=int(_option(args, "--total-timeout-seconds", str(get_settings().taobao_catalog_live_total_timeout_seconds))),
+                max_products=int(_option(args, "--max-products", "100")),
+            ),
+            artifacts_dir=_option(args, "--artifacts-dir"),
+            headed="--headed" in args,
+            allow_same_origin_public_requests="--allow-same-origin-public-requests" in args,
+            allow_approved_cdn="--allow-approved-cdn" in args,
+        )
+        print(json.dumps({"ok": True, "mode": "taobao_catalog_live", "pages_seen": result.pages_seen, "products": len(result.records), "data_completeness": result.data_completeness, "run_id": result.run_id, "artifacts": result.artifact_refs, "error_code": None}, ensure_ascii=False, sort_keys=True))
+        return 0
+    except CatalogLiveError as exc:
+        print(json.dumps({"ok": False, "mode": "taobao_catalog_live", "pages_seen": exc.pages_seen, "products": 0, "data_completeness": exc.data_completeness, "error_code": exc.code, "error": exc.message, "artifacts": exc.artifact_refs}, ensure_ascii=False, sort_keys=True))
+        return 2
+    except (TypeError, ValueError):
+        print(json.dumps({"ok": False, "mode": "taobao_catalog_live", "error_code": "INVALID_REPLAY_INPUT", "error": "参数格式无效"}, ensure_ascii=False))
+        return 2
+def cmd_replay_catalog(args: list[str]) -> int:
+    """回放受控本地商品类目页面；不访问网络、不写数据库。"""
+    from app.catalog_replay import CatalogReplayError, ReplayLimits, replay_catalog
+
+    manifest = _option(args, "--manifest")
+    if not manifest:
+        print(json.dumps({"ok": False, "error_code": "INVALID_REPLAY_INPUT", "error": "缺少 --manifest"}, ensure_ascii=False))
+        return 2
+    try:
+        max_pages = int(_option(args, "--max-pages", "3"))
+        delay_ms = int(_option(args, "--delay-ms", "1000"))
+        timeout = int(_option(args, "--timeout-seconds", str(get_settings().crawl_timeout_seconds)))
+        artifacts_dir = _option(args, "--artifacts-dir")
+        result = replay_catalog(
+            manifest,
+            limits=ReplayLimits(max_pages=max_pages, delay_seconds=delay_ms / 1000, timeout_seconds=timeout),
+            artifacts_dir=artifacts_dir,
+        )
+        print(json.dumps({"ok": True, "mode": "local_html_replay", "pages_seen": result.pages_seen, "products": len(result.records), "data_completeness": result.data_completeness, "artifacts": result.artifact_refs, "run_id": result.run_id, "error": None}, ensure_ascii=False, sort_keys=True))
+        return 0 if result.data_completeness == "complete" else 2
+    except CatalogReplayError as exc:
+        print(json.dumps({"ok": False, "mode": "local_html_replay", "error_code": exc.code, "error": exc.message, "data_completeness": exc.data_completeness, "artifacts": exc.artifact_refs}, ensure_ascii=False, sort_keys=True))
+        return 2
+    except (TypeError, ValueError) as exc:
+        print(json.dumps({"ok": False, "error_code": "INVALID_REPLAY_INPUT", "error": str(exc)}, ensure_ascii=False))
+        return 2
+
+
+
+
 def cmd_external_list_connectors(args: list[str]) -> int:
     from app.connectors import connector_capabilities
 
-    print(__import__("json").dumps(connector_capabilities(), ensure_ascii=False, indent=2))
+    print(json.dumps(connector_capabilities(), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -449,6 +517,8 @@ COMMANDS = {
     "init-admin": cmd_init_admin,
     "seed-docs": cmd_seed_docs,
     "enqueue-crawl": cmd_enqueue_crawl,
+    "replay-catalog": cmd_replay_catalog,
+    "collect-taobao-catalog": cmd_collect_taobao_catalog,
     "query": cmd_query,
     "seed-demo": cmd_seed_demo,
     "status": cmd_status,
@@ -463,6 +533,8 @@ COMMAND_HELP = {
     "init-admin": "创建首个管理员账户（显式执行）",
     "seed-docs": "向 uploads/ 写入示例 PDF + DOCX 并同步解析、索引（可用 --workspace 指定商家）",
     "enqueue-crawl": "把 fixtures/products.html 入队到 ThreadPoolExecutor，等待完成（可用 --workspace 指定商家）",
+    "replay-catalog": "回放受控本地类目 HTML（仅离线、不访问网络、不写数据库）",
+    "collect-taobao-catalog": "人工确认后单次读取淘宝公开搜索页（默认关闭、不落库）",
     "query": "用法: python -m app.cli query <text...>   从向量库检索并返回 answer + 引用",
     "seed-demo": "创建隔离的虚构商品、库存、销量、补货、告警和采购草稿演示数据",
     "status": "打印当前配置与数据库 / 向量库规模",

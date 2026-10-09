@@ -64,10 +64,19 @@ def _sales_inputs(db: Session, *, workspace_id: int, sku_id: int, as_of: date, w
         DailySkuSale.sales_date >= start,
         DailySkuSale.sales_date <= as_of,
     )).all()
-    complete_days = {row.sales_date for row in rows if row.data_completeness == "complete"}
+    rows_by_date: dict[date, list[DailySkuSale]] = {}
+    for row in rows:
+        rows_by_date.setdefault(row.sales_date, []).append(row)
+    complete_days = {
+        sales_date
+        for sales_date, day_rows in rows_by_date.items()
+        if all(row.data_completeness == "complete" for row in day_rows)
+    }
+    complete_rows = [row for row in rows if row.sales_date in complete_days]
+    complete_net_qty = sum(row.net_qty for row in complete_rows)
     net_qty = sum(row.net_qty for row in rows)
     complete = len(complete_days) == window_days
-    average = (Decimal(net_qty) / Decimal(window_days)) if complete else None
+    average = (Decimal(complete_net_qty) / Decimal(window_days)) if complete else None
     return {
         "from": start.isoformat(),
         "to": as_of.isoformat(),
@@ -265,9 +274,11 @@ def evaluate_replenishment(
         workspace_id=workspace_id, suggestion_id=suggestion.id, sku_id=suggestion.sku_id, warehouse_id=suggestion.warehouse_id,
         formula_version=suggestion.formula_version, suggested_qty=suggestion.suggested_qty,
         window_start=window_start, window_end=window_end, actual_sales_qty=actual,
+        stockout_days=None,
+        post_replenishment_coverage_days=None,
         absolute_error=abs(actual - suggestion.suggested_qty) if actual is not None else None,
         evaluation_status=status, data_completeness="complete" if complete else "insufficient",
-        source_snapshot_hash=source_hash, source_snapshot_json=json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+        source_snapshot_hash=source_hash, source_snapshot_json=json.dumps({**snapshot, "stockout_days": None, "post_replenishment_coverage_days": None, "unknown_metrics": ["stockout_days", "post_replenishment_coverage_days"]}, ensure_ascii=False, sort_keys=True),
         source_mode=source_mode, simulated=simulated,
     )
     db.add(evaluation)
@@ -276,7 +287,41 @@ def evaluate_replenishment(
     return evaluation
 
 
-def list_replenishment_evaluations(db: Session, *, workspace_id: int, suggestion_id: int | None = None, warehouse_id: int | None = None, sku_id: int | None = None, status: str | None = None, limit: int = 20, offset: int = 0):
+def build_replenishment_decision_metrics(db: Session, *, workspace_id: int, as_of: date | None = None) -> dict:
+    """Return decision rates without treating an empty decision set as 0%."""
+    from sqlalchemy import func
+
+    filters = [ReplenishmentSuggestion.workspace_id == workspace_id]
+    if as_of is not None:
+        filters.append(ReplenishmentSuggestion.created_at <= datetime.combine(as_of, datetime.max.time()))
+    total = int(db.scalar(select(func.count(ReplenishmentSuggestion.id)).where(*filters)) or 0)
+    decided = int(db.scalar(select(func.count(ReplenishmentSuggestion.id)).where(*filters, ReplenishmentSuggestion.status.in_(("confirmed", "modified", "ignored")))) or 0)
+    adopted = int(db.scalar(select(func.count(ReplenishmentSuggestion.id)).where(*filters, ReplenishmentSuggestion.status.in_(("confirmed", "modified")))) or 0)
+    ignored = int(db.scalar(select(func.count(ReplenishmentSuggestion.id)).where(*filters, ReplenishmentSuggestion.status == "ignored")) or 0)
+    quality = "complete" if decided else "unknown"
+    return {
+        "as_of": as_of.isoformat() if as_of else None,
+        "data_completeness": quality,
+        "metrics": {
+            "suggestion_adoption_rate": {"value": adopted / decided if decided else None, "numerator": adopted if decided else None, "denominator": decided if decided else None, "data_completeness": quality, "reason": None if decided else "NO_DECIDED_SUGGESTIONS"},
+            "suggestion_ignore_rate": {"value": ignored / decided if decided else None, "numerator": ignored if decided else None, "denominator": decided if decided else None, "data_completeness": quality, "reason": None if decided else "NO_DECIDED_SUGGESTIONS"},
+            "generation_to_inbound_confirmation_seconds": {"value": None, "numerator": None, "denominator": None, "data_completeness": "unknown", "reason": "PURCHASE_REQUEST_INBOUND_LINK_MISSING"},
+        },
+        "scope": {"workspace_id": workspace_id, "source": "ReplenishmentSuggestion", "timezone": "UTC", "metric_version": "1", "total_suggestions": total},
+    }
+
+
+def list_replenishment_evaluations(
+    db: Session,
+    *,
+    workspace_id: int,
+    suggestion_id: int | None = None,
+    warehouse_id: int | None = None,
+    sku_id: int | None = None,
+    status: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+):
     from app.db import ReplenishmentEvaluation
     filters = [ReplenishmentEvaluation.workspace_id == workspace_id]
     if suggestion_id is not None: filters.append(ReplenishmentEvaluation.suggestion_id == suggestion_id)

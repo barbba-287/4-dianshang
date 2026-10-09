@@ -303,6 +303,10 @@ def _run_one_job(job_id: int, worker_id: str) -> None:
                 _execute_document_import(db, job)
             elif type_ == "document_index":
                 _execute_document_index(db, job)
+            elif type_ == "content_generate":
+                _execute_content_generation(db, job)
+            elif type_ == "content_export":
+                _execute_content_export(db, job)
             else:
                 raise RuntimeError(f"未知任务类型: {type_}")
             if is_cancel_requested(db, job_id=job_id):
@@ -318,6 +322,7 @@ def _run_one_job(job_id: int, worker_id: str) -> None:
                 _retry_after_rollback(db, job, worker_id, exc)
         except Exception as exc:  # noqa: BLE001 - 顶层兜底
             _retry_after_rollback(db, job, worker_id, exc)
+            _mark_content_generation_failed(db, job, exc)
         finally:
             stop_event.set()
             heartbeat.join(timeout=2)
@@ -326,6 +331,23 @@ def _run_one_job(job_id: int, worker_id: str) -> None:
         _pop_cancel_future(job_id)
 
 
+def _mark_content_generation_failed(db: Session, job: CrawlJob, exc: Exception) -> None:
+    """Keep the content revision status consistent with a failed job."""
+    if job.type != "content_generate":
+        return
+    import json
+    from app.db import ProductContentRevision
+    revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.generation_job_id == job.id, ProductContentRevision.workspace_id == job.workspace_id))
+    if revision is None or revision.status not in {"generating", "draft"}:
+        return
+    # A retryable provider error leaves the revision generating until the job
+    # reaches its terminal failed state; retry_wait is not a final failure.
+    if getattr(exc, "retryable", True) and (job.retry_count or 0) < (job.max_retries or 0):
+        return
+    revision.status = "generation_failed"
+    revision.quality_issues_json = json.dumps([{"code": getattr(exc, "code", "GENERATION_FAILED"), "message": getattr(exc, "message", "内容生成失败")}], ensure_ascii=False)
+    revision.updated_at = datetime.utcnow()
+    db.commit()
 def _cancel_job(db: Session, *, job_id: int, worker_id: str) -> None:
     db.rollback()
     job = db.get(CrawlJob, job_id)
@@ -342,6 +364,7 @@ def _retry_after_rollback(db: Session, job: CrawlJob, worker_id: str, exc: Excep
     db.rollback()
     code = getattr(exc, "code", type(exc).__name__)
     message = getattr(exc, "message", str(exc))
+    retryable = getattr(exc, "retryable", True)
     try:
         retry_job(
             db,
@@ -350,6 +373,7 @@ def _retry_after_rollback(db: Session, job: CrawlJob, worker_id: str, exc: Excep
             error_code=code,
             error_message=message[:500],
             backoff_seconds=compute_backoff_seconds(job.attempt),
+            increment_retry=retryable,
         )
     except Exception:
         db.rollback()
@@ -587,6 +611,20 @@ def _execute_document_index(db: Session, job: CrawlJob) -> None:
         )
     store.add(records)
     job.cursor = str(len(records))
+
+
+def _execute_content_generation(db: Session, job: CrawlJob) -> None:
+    """Execute one content production run through the provider-neutral service."""
+    from app.content_production import execute_generation_job
+
+    execute_generation_job(db, job, cancel_check=lambda: is_cancel_requested(db, job_id=job.id))
+
+
+def _execute_content_export(db: Session, job: CrawlJob) -> None:
+    """Export an approved content revision to a controlled artifact."""
+    from app.content_production import execute_export_job
+
+    execute_export_job(db, job, cancel_check=lambda: is_cancel_requested(db, job_id=job.id))
 
 
 def _decode_job_payload(job: CrawlJob) -> dict:

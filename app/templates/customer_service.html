@@ -1,18 +1,95 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>客服知识</title>
-<link rel="stylesheet" href="/static/workspace-shell.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>客服工单</title>
+  <link rel="stylesheet" href="/static/workspace-shell.css">
+  <style>
+    :root { --line:#e4eaf2; --muted:#69778b; --ink:#142033; --brand:#2a78d6; }
+    .cs-heading { margin-bottom:1rem; }
+    .cs-heading h1 { margin:0 0 .35rem; }
+    .cs-boundary { padding:.8rem 1rem; border:1px solid #f0d58a; border-radius:.6rem; background:#fff8e6; color:#795b00; font-size:.84rem; line-height:1.5; }
+    .cs-grid { display:grid; grid-template-columns:minmax(320px,.8fr) minmax(0,1.5fr); gap:1rem; margin-top:1rem; }
+    .cs-panel { min-width:0; padding:1.1rem; border:1px solid var(--line); border-radius:.75rem; background:#fff; box-shadow:0 6px 18px #1e3a5f0a; }
+    .cs-panel h2 { margin:0 0 .8rem; font-size:1rem; }
+    .cs-section-title { margin:1rem 0 .55rem; font-size:.82rem; color:var(--muted); font-weight:700; }
+    .cs-form { display:grid; grid-template-columns:1fr 1fr; gap:.7rem; }
+    .cs-field { display:flex; flex-direction:column; gap:.3rem; min-width:0; color:var(--muted); font-size:.8rem; }
+    .cs-field.full { grid-column:1/-1; }
+    .cs-field input,.cs-field select,.cs-field textarea { width:100%; min-height:2.35rem; box-sizing:border-box; padding:.5rem .65rem; border:1px solid #ccd7e5; border-radius:.45rem; color:var(--ink); background:#fff; font:inherit; }
+    .cs-field textarea { min-height:125px; resize:vertical; line-height:1.5; }
+    .cs-help { margin:0; color:var(--muted); font-size:.74rem; line-height:1.45; }
+    .cs-actions { display:flex; align-items:center; gap:.6rem; margin-top:1rem; }
+    button { min-height:2.25rem; padding:.48rem .75rem; border:0; border-radius:.45rem; background:var(--brand); color:#fff; cursor:pointer; font:inherit; }
+    button:disabled { opacity:.6; cursor:wait; }
+    .cs-message { min-height:1.35rem; color:var(--muted); font-size:.8rem; }
+    .cs-message.error { color:#a72727; }.cs-message.success { color:#14751a; }
+    .cs-toolbar { display:flex; align-items:center; gap:.55rem; margin-bottom:.8rem; }.cs-toolbar h2 { flex:1; }
+    .cs-toolbar select { min-height:2.25rem; padding:.45rem .6rem; border:1px solid #ccd7e5; border-radius:.45rem; font:inherit; }
+    .cs-table-wrap { overflow-x:auto; }.cs-table { width:100%; min-width:900px; border-collapse:collapse; }
+    .cs-table th,.cs-table td { padding:.65rem .55rem; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; font-size:.8rem; }.cs-table th { color:var(--muted); font-size:.74rem; white-space:nowrap; }
+    .cs-status { display:inline-block; padding:.2rem .5rem; border-radius:99px; background:#edf2f7; font-size:.72rem; white-space:nowrap; }.cs-status.high,.cs-status.urgent { background:#fff4d6; color:#946500; }.cs-status.resolved,.cs-status.closed { background:#e9f7ec; color:#14751a; }
+    .cs-detail { display:none; margin-top:1rem; padding:1rem; border:1px solid #dce7f2; border-radius:.6rem; background:#f7fafe; }.cs-detail.visible { display:block; }.cs-detail h3 { margin:0 0 .55rem; }
+    .cs-detail-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.5rem; margin-bottom:.8rem; }.cs-detail-meta div { padding:.55rem; border:1px solid #dce7f2; border-radius:.45rem; background:#fff; font-size:.78rem; }
+    .cs-event { padding:.6rem 0; border-bottom:1px solid #dce7f2; line-height:1.5; font-size:.82rem; }.cs-event:last-child { border-bottom:0; }.cs-event-author { color:var(--muted); font-size:.75rem; }
+    .cs-note { display:flex; gap:.55rem; margin-top:.8rem; }.cs-note textarea { flex:1; min-height:70px; padding:.5rem; border:1px solid #ccd7e5; border-radius:.45rem; font:inherit; }
+    .cs-suggest { position:relative; }.cs-suggestions { position:absolute; z-index:20; left:0; right:0; top:calc(100% + .2rem); max-height:220px; overflow:auto; border:1px solid #ccd7e5; border-radius:.45rem; background:#fff; box-shadow:0 8px 20px #1e3a5f22; }.cs-suggestions[hidden] { display:none; }
+    .cs-suggestions button { display:block; width:100%; padding:.6rem .7rem; border:0; border-bottom:1px solid #eef2f6; border-radius:0; background:#fff; color:var(--ink); text-align:left; }.cs-suggestions button:hover { background:#f1f6fb; }.cs-suggest-empty { padding:.65rem .7rem; color:var(--muted); font-size:.76rem; }
+    @media(max-width:950px){.cs-grid{grid-template-columns:1fr}}@media(max-width:600px){.cs-form{grid-template-columns:1fr}.cs-field.full{grid-column:auto}.cs-detail-meta{grid-template-columns:1fr}.cs-toolbar{flex-wrap:wrap}.cs-toolbar h2{flex-basis:100%}}
+  </style>
 </head>
 <body>
 <div class="shell"><aside class="sidebar"></aside><main class="main">
-<header class="topbar"><div class="muted">Workspace / <strong>客服知识</strong></div><button id="logout" type="button">退出登录</button></header>
-<div class="content"><div class="page-heading"><div><h1>客服知识</h1><p class="muted">当前账户拥有商品、库存和知识库只读权限。</p></div></div>
-<section class="panel"><h2>知识库</h2><p class="muted">客服知识库能力正在建设中。</p></section></div>
+<header class="topbar"><div class="muted">Workspace / <strong>客服工单</strong></div><button id="logout" type="button">退出登录</button></header>
+<div class="content">
+  <div class="cs-heading"><h1>客服工单</h1><p class="muted">把需要持续跟进、跨人协作或等待反馈的问题记录下来；简单问题直接回答，不必建工单。</p></div>
+  <div class="cs-boundary">内部工单记录，不是客户聊天窗口。AI 只生成内部建议；有引用才建议回答，无证据则拒答；不自动回复、不自动关闭。</div>
+  <div class="cs-grid">
+    <section class="cs-panel">
+      <h2>新建客服问题</h2><p class="cs-help">适合物流异常、退款跟进、投诉升级和需要其他部门协作的问题。</p>
+      <div class="cs-section-title">问题识别</div>
+      <div class="cs-form">
+        <label class="cs-field"><span>问题类型</span><select id="issue-type"><option value="presale">售前咨询</option><option value="order_payment">订单支付</option><option value="logistics">物流配送</option><option value="return_refund">退货退款</option><option value="product_quality">商品质量</option><option value="complaint">投诉升级</option><option value="other">其他</option></select></label>
+        <label class="cs-field"><span>优先级</span><select id="priority"><option value="normal">普通</option><option value="high">高</option><option value="urgent">紧急</option></select></label>
+        <label class="cs-field full"><span>问题主题</span><input id="subject" placeholder="例如：订单三天没有物流更新"></label>
+      </div>
+      <div class="cs-section-title">关联业务事实</div>
+      <div class="cs-form">
+        <label class="cs-field"><span>客户/客户编号</span><input id="customer-ref" placeholder="可手工填写"><small class="cs-help">当前订单事实暂无客户检索字段</small></label>
+        <label class="cs-field"><span>订单号</span><div class="cs-suggest"><input id="order-ref" placeholder="输入片段，如 001" autocomplete="off"><div id="order-suggestions" class="cs-suggestions" hidden></div></div></label>
+        <label class="cs-field full"><span>商品/SKU</span><div class="cs-suggest"><input id="sku-ref" placeholder="输入 SKU 或规格片段" autocomplete="off"><div id="sku-suggestions" class="cs-suggestions" hidden></div></div></label>
+      </div>
+      <div class="cs-section-title">问题描述</div><label class="cs-field"><textarea id="description" placeholder="记录客户说了什么、已核实什么、还需要谁处理"></textarea></label>
+      <div class="cs-actions"><button id="create" type="button">创建人工工单</button><span id="message" class="cs-message"></span></div>
+    </section>
+    <section class="cs-panel">
+      <div class="cs-toolbar"><h2>待处理工单</h2><select id="status-filter"><option value="">全部状态</option><option value="open">待处理</option><option value="assigned">已分配</option><option value="in_progress">处理中</option><option value="waiting">等待反馈</option><option value="resolved">已解决</option><option value="closed">已关闭</option></select><button id="refresh" type="button">刷新</button></div>
+      <div class="cs-table-wrap"><table class="cs-table"><thead><tr><th>工单号</th><th>问题类型</th><th>主题</th><th>订单号</th><th>客户</th><th>优先级</th><th>负责人</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="tickets"></tbody></table></div>
+      <div id="detail" class="cs-detail"></div>
+    </section>
+  </div>
+</div>
 </main></div>
 <script>
 function csrfToken(){const item=document.cookie.split('; ').find(value=>value.startsWith('dianshang_csrf='));return item?decodeURIComponent(item.slice('dianshang_csrf='.length)):'';}
-document.querySelector('#logout').onclick=async()=>{try{const response=await fetch('/logout',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrfToken()}});if(!response.ok)throw new Error('退出失败');location.href='/login';}catch(error){alert(error.message);}};
+function escapeHtml(value){return String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+function typeLabel(value){return ({presale:'售前咨询',order_payment:'订单支付',logistics:'物流配送',return_refund:'退货退款',product_quality:'商品质量',complaint:'投诉升级',other:'其他'}[value]||value||'其他');}
+function statusLabel(value){return ({open:'待处理',assigned:'已分配',in_progress:'处理中',waiting:'等待反馈',resolved:'已解决',closed:'已关闭'}[value]||value||'未知');}
+function priorityLabel(value){return ({low:'低',normal:'普通',high:'高',urgent:'紧急'}[value]||value||'普通');}
+async function api(path,options={}){const response=await fetch(path,{...options,credentials:'same-origin',headers:{'X-CSRF-Token':csrfToken(),...(options.headers||{})}});const body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.detail?.message||'请求失败');return body;}
+function showMessage(text,kind=''){const node=document.querySelector('#message');node.textContent=text;node.className=`cs-message${kind?` ${kind}`:''}`;}
+function renderTickets(items){const target=document.querySelector('#tickets');target.innerHTML=items.length?items.map(ticket=>`<tr><td><strong>${escapeHtml(ticket.ticket_no)}</strong></td><td>${escapeHtml(typeLabel(ticket.issue_type))}</td><td>${escapeHtml(ticket.subject)}</td><td>${escapeHtml(ticket.external_order_ref||'—')}</td><td>${escapeHtml(ticket.customer_ref||'—')}</td><td><span class="cs-status ${escapeHtml(ticket.priority)}">${escapeHtml(priorityLabel(ticket.priority))}</span></td><td>${escapeHtml(ticket.assigned_to||'未分配')}</td><td><span class="cs-status ${escapeHtml(ticket.status)}">${escapeHtml(statusLabel(ticket.status))}</span></td><td>${escapeHtml(ticket.updated_at)}</td><td><button type="button" data-ticket-id="${escapeHtml(ticket.id)}">查看</button></td></tr>`).join(''):'<tr><td colspan="10" class="muted">暂无工单。只有需要跟进、协作或等待反馈的问题才建议创建工单。</td></tr>';target.querySelectorAll('[data-ticket-id]').forEach(button=>{button.onclick=()=>loadTicketDetail(button.dataset.ticketId);});}
+async function loadTickets(){const filter=document.querySelector('#status-filter').value;try{const body=await api(`/api/tickets?page_size=100${filter?`&status=${encodeURIComponent(filter)}`:''}`);renderTickets(body.items||[]);}catch(error){document.querySelector('#tickets').innerHTML=`<tr><td colspan="10" class="cs-error">加载失败：${escapeHtml(error.message)}</td></tr>`;}}
+async function loadTicketDetail(id){const panel=document.querySelector('#detail');try{const data=await api(`/api/tickets/${encodeURIComponent(id)}`);panel.classList.add('visible');panel.innerHTML=`<h3>${escapeHtml(data.ticket.ticket_no)} · ${escapeHtml(data.ticket.subject)}</h3><div class="cs-detail-meta"><div>类型：${escapeHtml(typeLabel(data.ticket.issue_type))}</div><div>状态：${escapeHtml(statusLabel(data.ticket.status))}</div><div>负责人：${escapeHtml(data.ticket.assigned_to||'未分配')}</div><div>订单：${escapeHtml(data.ticket.external_order_ref||'—')}</div><div>客户：${escapeHtml(data.ticket.customer_ref||'—')}</div><div>SKU：${escapeHtml(data.ticket.sku_ref||'—')}</div></div><p class="cs-help">AI 建议仅为内部草稿，需人工发送；无证据时拒答。</p><div>${(data.events||[]).map(event=>`<div class="cs-event"><strong>${escapeHtml(event.event_type)}</strong>：${escapeHtml(event.body)}<br><span class="cs-event-author">${escapeHtml(event.author)} · ${escapeHtml(event.created_at)}</span></div>`).join('')||'<p class="muted">暂无内部事件</p>'}</div><div class="cs-note"><textarea id="event-body" placeholder="追加内部备注"></textarea><button id="add-event" type="button">追加备注</button></div>`;document.querySelector('#add-event').onclick=()=>addInternalEvent(id);}catch(error){panel.classList.add('visible');panel.innerHTML=`<p class="cs-error">详情加载失败：${escapeHtml(error.message)}</p>`;}}
+async function addInternalEvent(id){const input=document.querySelector('#event-body');if(!input.value.trim())return;try{await api(`/api/tickets/${encodeURIComponent(id)}/events`,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':`event-${Date.now()}`},body:JSON.stringify({body:input.value})});await loadTicketDetail(id);await loadTickets();}catch(error){showMessage(`备注失败：${error.message}`,'error');}}
+function showSuggestions(target,items,renderItem,onSelect){target.innerHTML=items.length?items.map((item,index)=>`<button type="button" data-suggestion-index="${index}">${renderItem(item)}</button>`).join(''):'<div class="cs-suggest-empty">暂无匹配结果</div>';target.hidden=false;target.querySelectorAll('[data-suggestion-index]').forEach(button=>{button.onclick=()=>{onSelect(items[Number(button.dataset.suggestionIndex)]);target.hidden=true;};});}
+function setupOrderSuggest(){const input=document.querySelector('#order-ref');const target=document.querySelector('#order-suggestions');let timer;input.oninput=()=>{clearTimeout(timer);const value=input.value.trim();if(!value){target.hidden=true;return;}timer=setTimeout(async()=>{try{const data=await api(`/api/orders?page=1&page_size=10&keyword=${encodeURIComponent(value)}`);showSuggestions(target,data.items||[],item=>`${escapeHtml(item.external_order_no)} · ${escapeHtml(item.platform)}/${escapeHtml(item.store_ref)} · ${escapeHtml(statusLabel(item.order_status))}`,item=>{input.value=item.external_order_no;});}catch(_){target.hidden=true;}},250);};}
+async function setupSkuSuggest(){const input=document.querySelector('#sku-ref');const target=document.querySelector('#sku-suggestions');let skus=[];try{skus=await api('/api/skus');}catch(_){return;}input.oninput=()=>{const value=input.value.trim().toLowerCase();if(!value){target.hidden=true;return;}const matches=(skus||[]).filter(item=>`${item.sku_code||''} ${item.variant_label||''}`.toLowerCase().includes(value)).slice(0,10);showSuggestions(target,matches,item=>`${escapeHtml(item.sku_code)} · ${escapeHtml(item.variant_label||'无规格')}`,item=>{input.value=item.sku_code;});};}
+async function createTicket(){const button=document.querySelector('#create');button.disabled=true;showMessage('正在创建工单…');try{await api('/api/tickets',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':`ticket-${Date.now()}`},body:JSON.stringify({subject:document.querySelector('#subject').value,issue_type:document.querySelector('#issue-type').value,description:document.querySelector('#description').value,customer_ref:document.querySelector('#customer-ref').value,external_order_ref:document.querySelector('#order-ref').value,sku_ref:document.querySelector('#sku-ref').value,priority:document.querySelector('#priority').value})});showMessage('工单已创建，后续由人工处理。','success');document.querySelector('#subject').value='';document.querySelector('#description').value='';await loadTickets();}catch(error){showMessage(`创建失败：${error.message}`,'error');}finally{button.disabled=false;}}
+function bindEvents(){document.querySelector('#create').onclick=createTicket;document.querySelector('#status-filter').onchange=loadTickets;document.querySelector('#refresh').onclick=loadTickets;document.querySelector('#logout').onclick=async()=>{await fetch('/logout',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrfToken()}});location.href='/login';};}
+async function init(){bindEvents();setupOrderSuggest();await setupSkuSuggest();await loadTickets();}
+init();
 </script>
-</body></html>
+</body>
+</html>
