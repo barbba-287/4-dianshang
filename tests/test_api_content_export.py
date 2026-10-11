@@ -337,7 +337,90 @@ def test_export_background_rechecks_approval(client, monkeypatch):
             execute_export_job(db, job, cancel_check=lambda: False)
         assert exc.value.code == "CONTENT_NOT_APPROVED"
         export = db.get(db_mod.ProductContentExport, export_id)
-        assert export.status == "queued"
+        assert export.status == "failed"
+        assert export.error_code == "CONTENT_NOT_APPROVED"
+
+
+def test_export_persist_failed_maps_500(client, monkeypatch):
+    """N1：CONTENT_EXPORT_PERSIST_FAILED 映射 500（与同步侧 EXTERNAL_SYNC_FAILED 一致）。"""
+    _c, _db, _bg, _wa, revision_id, _wb, _rb = client
+    from app.content_application import ContentApplicationError, ContentApplicationService
+
+    def fake_export(self, **kwargs):
+        raise ContentApplicationError("CONTENT_EXPORT_PERSIST_FAILED", "导出任务无法持久化")
+
+    monkeypatch.setattr(ContentApplicationService, "export_revision", fake_export)
+    resp = _export(client, revision_id, "export-persist-failed")
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["code"] == "CONTENT_EXPORT_PERSIST_FAILED"
+
+
+def test_export_failed_replay_returns_same_row(client, monkeypatch):
+    """N3：已失败导出同键重放 → 返回既有失败行，无新行/新 job。"""
+    _c, db_mod, _bg, _wa, revision_id, _wb, _rb = client
+    import app.background as bg
+
+    monkeypatch.setattr(bg, "_submit_future", lambda job_id: None)
+    first = _export(client, revision_id, "export-failed-replay")
+    assert first.status_code == 202
+    export_id = first.json()["id"]
+
+    with db_mod.SessionLocal() as db:
+        revision = db.get(db_mod.ProductContentRevision, revision_id)
+        revision.status = "draft"
+        db.commit()
+    from app.content_production import ContentProviderError, execute_export_job
+    with db_mod.SessionLocal() as db:
+        job = db.query(db_mod.CrawlJob).filter(db_mod.CrawlJob.type == "content_export").first()
+        with pytest.raises(ContentProviderError) as exc:
+            execute_export_job(db, job, cancel_check=lambda: False)
+        assert exc.value.code == "CONTENT_NOT_APPROVED"
+
+    with db_mod.SessionLocal() as db:
+        export = db.get(db_mod.ProductContentExport, export_id)
+        assert export.status == "failed"
+        assert export.error_code == "CONTENT_NOT_APPROVED"
+
+    with db_mod.SessionLocal() as db:
+        revision = db.get(db_mod.ProductContentRevision, revision_id)
+        revision.status = "approved"
+        db.commit()
+
+    replay = _export(client, revision_id, "export-failed-replay")
+    assert replay.status_code == 202
+    assert replay.json()["id"] == export_id
+    with db_mod.SessionLocal() as db:
+        assert db.query(db_mod.ProductContentExport).count() == 1
+        assert db.query(db_mod.CrawlJob).filter(db_mod.CrawlJob.type == "content_export").count() == 1
+
+
+def test_export_background_failure_message_truncated(client, monkeypatch):
+    """N4：失败态 error_message 截断到 500 字符，长尾部不残留。"""
+    _c, db_mod, _bg, _wa, revision_id, _wb, _rb = client
+    import app.background as bg
+    import app.content_production as cp
+
+    monkeypatch.setattr(bg, "_submit_future", lambda job_id: None)
+    resp = _export(client, revision_id, "export-truncate")
+    assert resp.status_code == 202
+    export_id = resp.json()["id"]
+
+    long_message = "x" * 800 + "SENSITIVE-MARKER"
+
+    def boom(*args, **kwargs):
+        raise cp.ContentProviderError("CONTENT_ARTIFACT_WRITE_FAILED", long_message)
+
+    monkeypatch.setattr(cp, "save_asset_bytes", boom)
+
+    with db_mod.SessionLocal() as db:
+        job = db.query(db_mod.CrawlJob).filter(db_mod.CrawlJob.type == "content_export").first()
+        with pytest.raises(cp.ContentProviderError):
+            cp.execute_export_job(db, job, cancel_check=lambda: False)
+        export = db.get(db_mod.ProductContentExport, export_id)
+        assert export.status == "failed"
+        assert export.error_code == "CONTENT_ARTIFACT_WRITE_FAILED"
+        assert len(export.error_message) <= 500
+        assert "SENSITIVE-MARKER" not in export.error_message
 
 
 def test_export_artifact_hash_reproducible(client):
@@ -350,6 +433,8 @@ def test_export_artifact_hash_reproducible(client):
         export_b = db.get(db_mod.ProductContentExport, b)
         assert export_a.status == "succeeded"
         assert export_b.status == "succeeded"
+        assert export_a.error_code is None
+        assert export_b.error_code is None
         assert export_a.artifact_sha256 == export_b.artifact_sha256
 
 

@@ -315,22 +315,40 @@ def execute_export_job(db: Session, job: CrawlJob, cancel_check) -> None:
     export = db.scalar(select(ProductContentExport).where(ProductContentExport.id == int(payload["export_id"]), ProductContentExport.workspace_id == job.workspace_id))
     if export is None:
         raise ContentProviderError("CONTENT_EXPORT_NOT_FOUND", "导出任务不存在")
-    revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.id == export.revision_id, ProductContentRevision.workspace_id == job.workspace_id, ProductContentRevision.status == "approved"))
-    if revision is None:
-        raise ContentProviderError("CONTENT_NOT_APPROVED", "只有审核通过的版本可以导出")
-    content = json.loads(revision.content_json or "{}")
-    assets = db.scalars(select(ProductMediaAsset).where(ProductMediaAsset.revision_id == revision.id, ProductMediaAsset.workspace_id == job.workspace_id).order_by(ProductMediaAsset.id)).all()
-    root = _artifact_root().resolve()
-    manifest = {"revision_id": revision.id, "revision_no": revision.revision_no, "content_hash": revision.content_hash, "source_snapshot_hash": revision.source_snapshot_hash, "provider": revision.provider, "simulated": revision.simulated, "assets": [{"asset_id": row.id, "storage_uri": row.storage_uri, "sha256": row.content_sha256, "selected": row.selected} for row in assets]}
-    target = safe_storage_path(root, f"exports/{job.workspace_id}/{export.id}")
-    target.mkdir(parents=True, exist_ok=True)
-    (target / "listing.json").write_text(canonical_json(content) + "\n", encoding="utf-8")
-    (target / "listing.md").write_text(_listing_markdown(content), encoding="utf-8")
-    (target / "manifest.json").write_text(canonical_json(manifest) + "\n", encoding="utf-8")
-    for row in assets:
-        (target / f"candidate-{row.id:02d}.png").write_bytes(safe_storage_path(root, row.storage_uri).read_bytes())
-    artifact = (canonical_json({"listing": content, "manifest": manifest}) + "\n").encode("utf-8")
-    export.artifact_uri = save_asset_bytes(workspace_id=job.workspace_id, run_id=f"exports/{export.id}", name="package.json", data=artifact)
-    export.artifact_sha256, export.artifact_size = hashlib.sha256(artifact).hexdigest(), len(artifact)
-    export.manifest_json, export.status, export.finished_at, export.simulated = canonical_json(manifest), "succeeded", datetime.utcnow(), revision.simulated
-    db.commit()
+    export_id = export.id
+    try:
+        revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.id == export.revision_id, ProductContentRevision.workspace_id == job.workspace_id, ProductContentRevision.status == "approved"))
+        if revision is None:
+            raise ContentProviderError("CONTENT_NOT_APPROVED", "只有审核通过的版本可以导出")
+        content = json.loads(revision.content_json or "{}")
+        assets = db.scalars(select(ProductMediaAsset).where(ProductMediaAsset.revision_id == revision.id, ProductMediaAsset.workspace_id == job.workspace_id).order_by(ProductMediaAsset.id)).all()
+        root = _artifact_root().resolve()
+        manifest = {"revision_id": revision.id, "revision_no": revision.revision_no, "content_hash": revision.content_hash, "source_snapshot_hash": revision.source_snapshot_hash, "provider": revision.provider, "simulated": revision.simulated, "assets": [{"asset_id": row.id, "storage_uri": row.storage_uri, "sha256": row.content_sha256, "selected": row.selected} for row in assets]}
+        target = safe_storage_path(root, f"exports/{job.workspace_id}/{export.id}")
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "listing.json").write_text(canonical_json(content) + "\n", encoding="utf-8")
+        (target / "listing.md").write_text(_listing_markdown(content), encoding="utf-8")
+        (target / "manifest.json").write_text(canonical_json(manifest) + "\n", encoding="utf-8")
+        for row in assets:
+            (target / f"candidate-{row.id:02d}.png").write_bytes(safe_storage_path(root, row.storage_uri).read_bytes())
+        artifact = (canonical_json({"listing": content, "manifest": manifest}) + "\n").encode("utf-8")
+        export.artifact_uri = save_asset_bytes(workspace_id=job.workspace_id, run_id=f"exports/{export.id}", name="package.json", data=artifact)
+        export.artifact_sha256, export.artifact_size = hashlib.sha256(artifact).hexdigest(), len(artifact)
+        export.manifest_json, export.status, export.finished_at, export.simulated = canonical_json(manifest), "succeeded", datetime.utcnow(), revision.simulated
+        db.commit()
+    except Exception as exc:
+        # 后台执行失败：先回滚成功路径可能遗留的半成品改动，再以独立事务写失败态，
+        # 最后原样抛出交由 background 记录 CrawlJob（保持 F5 行为不变）。
+        db.rollback()
+        try:
+            failed = db.get(ProductContentExport, export_id)
+            if failed is not None:
+                failed.status = "failed"
+                failed.error_code = getattr(exc, "code", type(exc).__name__)
+                failed.error_message = getattr(exc, "message", str(exc))[:500]
+                failed.finished_at = datetime.utcnow()
+                db.commit()
+        except Exception:
+            # 失败态写入本身失败时不得掩盖原始异常：回滚后静默，由 background 兜底记录。
+            db.rollback()
+        raise

@@ -2664,7 +2664,13 @@ def export_content_revision(revision_id: int, payload: ContentExportRequest, req
             "CONTENT_NOT_APPROVED": 409,
             "REVISION_MISMATCH": 422,
             "IDEMPOTENCY_KEY_REUSE": 409,
+            "CONTENT_EXPORT_PERSIST_FAILED": 500,
         }
+        if exc.code == "CONTENT_EXPORT_PERSIST_FAILED":
+            logger.error(
+                "内容导出持久化失败 code=%s workspace_id=%s revision_id=%s",
+                exc.code, principal.workspace_id, revision_id,
+            )
         raise HTTPException(status_code=status_by_code.get(exc.code, 422), detail={"code": exc.code, "message": exc.message}) from exc
 
     export = result["export"]
