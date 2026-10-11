@@ -9,6 +9,7 @@ data/*.db
 data/vectors*.json
 artifacts/*
 !artifacts/.gitkeep
+!artifacts/test-*.txt
 uploads/*
 
 # 本地项目文档和执行计划，不上传到远程仓库

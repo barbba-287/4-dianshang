@@ -153,6 +153,10 @@ cd D:/ai/dianshang && git status --short
 | 探针脚本 | 不得写入仓库；放在仓库外的临时位置，只读访问仓库 |
 | 演示数据库 | `data/*.db`（已在 `.gitignore`） |
 
+> 环境限制：若运行环境存在 `sitecustomize.py` 之类的 shim 劫持 `shutil.rmtree`（回收站删除被阻止），
+> `--basetemp` 的 fixture teardown 清理阶段会报 error（非断言失败），表现为全量 `errors` 而非 `passed/failed`。
+> 此时应在无 shim 环境复跑，或临时移除 shim 后重跑；勿将此类清理阶段 error 误判为测试失败。
+
 ### 6.3 解释器
 
 项目解释器：`D:\python\python\python.exe`（Python 3.14.4，fastapi 0.141.1，pytest 8.4.2）。

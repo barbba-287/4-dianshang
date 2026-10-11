@@ -1,0 +1,430 @@
+........................................................................ [ 25%]
+........................................................................ [ 51%]
+........................................................................ [ 77%]
+................................................................         [100%]
+============================== warnings summary ===============================
+..\..\python\python\Lib\site-packages\fastapi\testclient.py:1
+  D:\python\python\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/test_admin_users.py: 63 warnings
+tests/test_api.py: 203 warnings
+tests/test_api_agent.py: 126 warnings
+tests/test_api_alerts.py: 27 warnings
+tests/test_api_analytics.py: 122 warnings
+tests/test_api_content_export.py: 339 warnings
+tests/test_api_dashboard.py: 110 warnings
+tests/test_api_documents.py: 156 warnings
+tests/test_api_inventory.py: 241 warnings
+tests/test_api_jobs.py: 128 warnings
+tests/test_api_operations_workbench.py: 111 warnings
+tests/test_api_orders.py: 56 warnings
+tests/test_api_product_quadrant.py: 380 warnings
+tests/test_api_rag.py: 98 warnings
+tests/test_api_replenishment.py: 337 warnings
+tests/test_api_sync_compensation.py: 134 warnings
+tests/test_api_taobao.py: 42 warnings
+tests/test_api_tickets.py: 52 warnings
+tests/test_cli_auth.py: 12 warnings
+tests/test_content_application.py: 79 warnings
+tests/test_external_orders.py: 50 warnings
+tests/test_frontend_customer_service.py: 21 warnings
+tests/test_frontend_orders.py: 21 warnings
+tests/test_frontend_warehouse.py: 21 warnings
+tests/test_operations_workbench.py: 20 warnings
+tests/test_order_workbench.py: 27 warnings
+tests/test_platform_sync.py: 32 warnings
+tests/test_replenishment.py: 179 warnings
+tests/test_tickets.py: 16 warnings
+  D:\python\python\Lib\site-packages\sqlalchemy\sql\schema.py:3623: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+tests/test_admin_users.py::test_admin_user_lifecycle_and_warehouse_scope
+tests/test_admin_users.py::test_admin_csrf_and_page_contract
+  D:\ai\dianshang\tests\test_admin_users.py:69: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    observed_at=datetime.utcnow(),
+
+tests/test_admin_users.py: 2 warnings
+tests/test_api.py: 22 warnings
+tests/test_api_agent.py: 9 warnings
+tests/test_api_alerts.py: 1 warning
+tests/test_api_content_export.py: 18 warnings
+tests/test_api_dashboard.py: 4 warnings
+tests/test_api_documents.py: 27 warnings
+tests/test_api_inventory.py: 17 warnings
+tests/test_api_jobs.py: 10 warnings
+tests/test_api_operations_workbench.py: 6 warnings
+tests/test_api_orders.py: 3 warnings
+tests/test_api_rag.py: 13 warnings
+tests/test_api_replenishment.py: 7 warnings
+tests/test_api_tickets.py: 3 warnings
+tests/test_frontend_customer_service.py: 1 warning
+tests/test_frontend_orders.py: 1 warning
+tests/test_frontend_warehouse.py: 1 warning
+tests/test_jobs.py: 20 warnings
+tests/test_s7_stability.py: 2 warnings
+  D:\ai\dianshang\app\repository.py:38: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_admin_users.py: 2 warnings
+tests/test_api.py: 6 warnings
+tests/test_api_agent.py: 9 warnings
+tests/test_api_alerts.py: 1 warning
+tests/test_api_dashboard.py: 4 warnings
+tests/test_api_documents.py: 7 warnings
+tests/test_api_inventory.py: 8 warnings
+tests/test_api_jobs.py: 4 warnings
+tests/test_api_operations_workbench.py: 6 warnings
+tests/test_api_orders.py: 3 warnings
+tests/test_api_rag.py: 5 warnings
+tests/test_api_replenishment.py: 7 warnings
+tests/test_api_tickets.py: 3 warnings
+tests/test_frontend_customer_service.py: 1 warning
+tests/test_frontend_orders.py: 1 warning
+tests/test_frontend_warehouse.py: 1 warning
+tests/test_s7_stability.py: 2 warnings
+  D:\ai\dianshang\app\background.py:95: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_admin_users.py: 2 warnings
+tests/test_api_alerts.py: 1 warning
+tests/test_api_analytics.py: 4 warnings
+tests/test_api_content_export.py: 18 warnings
+tests/test_api_dashboard.py: 4 warnings
+tests/test_api_inventory.py: 8 warnings
+tests/test_api_operations_workbench.py: 3 warnings
+tests/test_api_orders.py: 2 warnings
+tests/test_api_product_quadrant.py: 9 warnings
+tests/test_api_replenishment.py: 7 warnings
+tests/test_api_sync_compensation.py: 6 warnings
+tests/test_api_taobao.py: 2 warnings
+tests/test_api_tickets.py: 3 warnings
+tests/test_frontend_customer_service.py: 1 warning
+tests/test_frontend_orders.py: 1 warning
+tests/test_frontend_warehouse.py: 1 warning
+  D:\ai\dianshang\app\employee_auth.py:200: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(seconds=settings.session_ttl_seconds),
+
+tests/test_admin_users.py: 2 warnings
+tests/test_api_alerts.py: 1 warning
+tests/test_api_analytics.py: 4 warnings
+tests/test_api_content_export.py: 18 warnings
+tests/test_api_dashboard.py: 4 warnings
+tests/test_api_inventory.py: 8 warnings
+tests/test_api_operations_workbench.py: 3 warnings
+tests/test_api_orders.py: 2 warnings
+tests/test_api_product_quadrant.py: 9 warnings
+tests/test_api_replenishment.py: 7 warnings
+tests/test_api_sync_compensation.py: 6 warnings
+tests/test_api_taobao.py: 2 warnings
+tests/test_api_tickets.py: 3 warnings
+tests/test_frontend_customer_service.py: 1 warning
+tests/test_frontend_orders.py: 1 warning
+tests/test_frontend_warehouse.py: 1 warning
+  D:\ai\dianshang\app\main.py:476: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    user.last_login_at = datetime.utcnow()
+
+tests/test_admin_users.py: 18 warnings
+tests/test_api_alerts.py: 7 warnings
+tests/test_api_analytics.py: 9 warnings
+tests/test_api_content_export.py: 23 warnings
+tests/test_api_dashboard.py: 7 warnings
+tests/test_api_inventory.py: 61 warnings
+tests/test_api_operations_workbench.py: 5 warnings
+tests/test_api_orders.py: 7 warnings
+tests/test_api_product_quadrant.py: 11 warnings
+tests/test_api_replenishment.py: 26 warnings
+tests/test_api_sync_compensation.py: 19 warnings
+tests/test_api_taobao.py: 3 warnings
+tests/test_api_tickets.py: 3 warnings
+tests/test_frontend_customer_service.py: 1 warning
+tests/test_frontend_orders.py: 1 warning
+tests/test_frontend_warehouse.py: 2 warnings
+  D:\ai\dianshang\app\employee_auth.py:214: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if session is None or session.revoked_at is not None or session.expires_at <= datetime.utcnow():
+
+tests/test_admin_users.py: 18 warnings
+tests/test_api_alerts.py: 7 warnings
+tests/test_api_analytics.py: 9 warnings
+tests/test_api_content_export.py: 23 warnings
+tests/test_api_dashboard.py: 7 warnings
+tests/test_api_inventory.py: 61 warnings
+tests/test_api_operations_workbench.py: 5 warnings
+tests/test_api_orders.py: 7 warnings
+tests/test_api_product_quadrant.py: 11 warnings
+tests/test_api_replenishment.py: 26 warnings
+tests/test_api_sync_compensation.py: 19 warnings
+tests/test_api_taobao.py: 3 warnings
+tests/test_api_tickets.py: 3 warnings
+tests/test_frontend_customer_service.py: 1 warning
+tests/test_frontend_orders.py: 1 warning
+tests/test_frontend_warehouse.py: 2 warnings
+  D:\ai\dianshang\app\employee_auth.py:221: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    session.last_seen_at = datetime.utcnow()
+
+tests/test_admin_users.py::test_admin_user_lifecycle_and_warehouse_scope
+  D:\ai\dianshang\app\account_admin.py:194: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_admin_users.py::test_admin_user_lifecycle_and_warehouse_scope
+tests/test_admin_users.py::test_admin_user_lifecycle_and_warehouse_scope
+  D:\ai\dianshang\app\account_admin.py:223: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_agent.py: 4 warnings
+tests/test_agent_core.py: 4 warnings
+tests/test_api_agent.py: 7 warnings
+  D:\ai\dianshang\app\agent\registry.py:218: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow().isoformat()
+
+tests/test_api_alerts.py::test_low_stock_alert_lifecycle_and_deduplication
+  D:\ai\dianshang\tests\test_api_alerts.py:50: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    observed_at=datetime.utcnow(),
+
+tests/test_api_alerts.py::test_low_stock_alert_lifecycle_and_deduplication
+tests/test_api_alerts.py::test_low_stock_alert_lifecycle_and_deduplication
+  D:\ai\dianshang\app\alerts.py:47: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_api_alerts.py::test_low_stock_alert_lifecycle_and_deduplication
+  D:\ai\dianshang\app\alerts.py:129: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    alert.acknowledged_at = datetime.utcnow()
+
+tests/test_api_analytics.py: 9 warnings
+tests/test_api_dashboard.py: 2 warnings
+tests/test_api_product_quadrant.py: 5 warnings
+  D:\ai\dianshang\app\business_dates.py:41: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return latest_any or datetime.utcnow().date()
+
+tests/test_api_content_export.py: 17 warnings
+  D:\ai\dianshang\tests\test_api_content_export.py:58: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    observed_at=datetime.utcnow(),
+
+tests/test_api_content_export.py: 17 warnings
+  D:\ai\dianshang\tests\test_api_content_export.py:91: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    observed_at=datetime.utcnow(),
+
+tests/test_api_content_export.py::test_export_requires_approved_revision_and_is_idempotent
+tests/test_api_content_export.py::test_export_contract_fields
+tests/test_api_content_export.py::test_export_executes_and_succeeds
+tests/test_api_content_export.py::test_export_get_same_workspace
+tests/test_api_content_export.py::test_export_key_reuse_different_format
+tests/test_api_content_export.py::test_export_new_key_creates_second_export
+tests/test_api_content_export.py::test_export_new_key_creates_second_export
+tests/test_api_content_export.py::test_export_artifact_hash_reproducible
+tests/test_api_content_export.py::test_export_artifact_hash_reproducible
+  D:\ai\dianshang\app\content_production.py:335: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    export.manifest_json, export.status, export.finished_at, export.simulated = canonical_json(manifest), "succeeded", datetime.utcnow(), revision.simulated
+
+tests/test_api_dashboard.py::test_dashboard_uses_latest_sales_business_date
+tests/test_api_dashboard.py::test_dashboard_summary_empty
+tests/test_api_dashboard.py::test_dashboard_sync_health_latest_is_deduplicated
+tests/test_api_dashboard.py::test_workspace_sidebar_is_fixed_and_scrollable
+  D:\ai\dianshang\tests\test_api_dashboard.py:28: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    product = repo_mod.upsert_product(db, ProductRecord(source="fixture", external_product_id="dash-1", title="看板商品", url="https://fixture.local/dash-1", current_price=Decimal("10.00"), observed_at=datetime.utcnow()))
+
+tests/test_api_dashboard.py::test_dashboard_uses_latest_sales_business_date
+tests/test_api_dashboard.py::test_dashboard_uses_latest_sales_business_date
+tests/test_api_dashboard.py::test_dashboard_summary_empty
+tests/test_api_dashboard.py::test_dashboard_sync_health_latest_is_deduplicated
+  D:\ai\dianshang\app\dashboard.py:320: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_api_dashboard.py::test_dashboard_uses_latest_sales_business_date
+tests/test_api_dashboard.py::test_dashboard_uses_latest_sales_business_date
+tests/test_api_dashboard.py::test_dashboard_summary_empty
+tests/test_api_dashboard.py::test_dashboard_sync_health_latest_is_deduplicated
+  D:\ai\dianshang\app\external_sync.py:454: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+tests/test_api_dashboard.py::test_dashboard_summary_empty
+  D:\ai\dianshang\tests\test_api_dashboard.py:82: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_api_dashboard.py::test_dashboard_sync_health_latest_is_deduplicated
+  D:\ai\dianshang\tests\test_api_dashboard.py:144: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_api_operations_workbench.py::test_operations_today_export_has_scope_headers_and_filters
+tests/test_api_operations_workbench.py::test_operations_today_export_has_scope_headers_and_filters
+  D:\ai\dianshang\tests\test_api_operations_workbench.py:78: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    warehouse_id=warehouse_id, created_at=datetime.utcnow(), last_seen_at=datetime.utcnow(),
+
+tests/test_api_operations_workbench.py::test_operations_today_export_has_scope_headers_and_filters
+tests/test_api_operations_workbench.py::test_operations_today_export_has_scope_headers_and_filters
+tests/test_api_operations_workbench.py::test_operations_today_xlsx_export_has_formatted_content_type
+tests/test_api_operations_workbench.py::test_operations_today_contract_and_ops_page
+tests/test_operations_workbench.py::test_today_is_workspace_and_warehouse_scoped
+tests/test_operations_workbench.py::test_today_is_workspace_and_warehouse_scoped
+  D:\ai\dianshang\app\operations_workbench.py:126: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+tests/test_api_orders.py::test_orders_api_list_detail_and_page_is_read_only
+tests/test_api_orders.py::test_orders_api_list_detail_and_page_is_read_only
+tests/test_api_orders.py::test_fulfillment_proposal_export_defaults_paid_and_is_read_only
+tests/test_api_orders.py::test_fulfillment_proposal_export_defaults_paid_and_is_read_only
+  D:\ai\dianshang\tests\test_api_orders.py:33: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    order = db_mod.ExternalOrder(workspace_id=workspace.id, external_account_id=account.id, platform="mock", account_ref="demo", store_ref="store", external_order_no="API-PAID", order_status="paid", external_created_at=datetime.utcnow(), external_updated_at=datetime.utcnow(), gross_amount=Decimal("20.00"), refund_amount=Decimal("0"), currency="CNY", payload_json="{}", payload_hash="api-hash", idempotency_key="api-key", source_mode="mock", simulated=True, data_completeness="complete")
+
+tests/test_api_orders.py::test_orders_api_list_detail_and_page_is_read_only
+tests/test_api_orders.py::test_orders_api_list_detail_and_page_is_read_only
+tests/test_api_orders.py::test_fulfillment_proposal_export_defaults_paid_and_is_read_only
+tests/test_api_orders.py::test_fulfillment_proposal_export_defaults_paid_and_is_read_only
+  D:\ai\dianshang\tests\test_api_orders.py:38: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    private = db_mod.ExternalOrder(workspace_id=other.id, external_account_id=private_account.id, platform="mock", account_ref="other", store_ref="other", external_order_no="PRIVATE", order_status="paid", external_created_at=datetime.utcnow(), external_updated_at=datetime.utcnow(), gross_amount=Decimal("20.00"), refund_amount=Decimal("0"), currency="CNY", payload_json="{}", payload_hash="private-hash", idempotency_key="private-key", source_mode="mock", simulated=True, data_completeness="complete")
+
+tests/test_api_orders.py::test_orders_api_list_detail_and_page_is_read_only
+tests/test_order_workbench.py::test_order_list_filters_summary_and_lines_are_workspace_scoped
+tests/test_order_workbench.py::test_order_list_filters_summary_and_lines_are_workspace_scoped
+tests/test_order_workbench.py::test_order_list_date_range_and_invalid_filters
+  D:\ai\dianshang\app\order_workbench.py:99: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "meta": {"workspace_id": workspace_id, "as_of": datetime.utcnow(), "source": "ExternalOrder", "data_completeness": "complete" if items and complete == len(items) else "partial" if items else "unknown", "limitations": ["订单状态是外部平台事实，不等于内部履约完成", "当前只读，不执行发货、面单、付款、退款或平台写回"]},
+
+tests/test_api_orders.py::test_fulfillment_proposal_export_defaults_paid_and_is_read_only
+  D:\ai\dianshang\app\main.py:1576: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    meta = {"workspace_id": principal.workspace_id, "as_of": datetime.utcnow(), "filter_summary": "外部状态=paid" + (f"；平台={platform}" if platform else "") + (f"；关键词={keyword}" if keyword else ""), "source_mode": source_mode, "simulated": all(order["simulated"] for order in orders) if orders else "unknown", "data_completeness": completeness}
+
+tests/test_api_orders.py::test_fulfillment_proposal_export_defaults_paid_and_is_read_only
+  D:\ai\dianshang\app\main.py:1582: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    filename = f"待发清单-人工履约-{datetime.utcnow():%Y.%m.%d}.xlsx"
+
+tests/test_api_orders.py::test_fulfillment_proposal_export_defaults_paid_and_is_read_only
+  D:\ai\dianshang\app\main.py:1583: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    filename_ascii = f"fulfillment-proposal-{datetime.utcnow():%Y.%m.%d}.xlsx"
+
+tests/test_api_replenishment.py::test_replenishment_api_flow_and_inventory_unchanged
+tests/test_api_replenishment.py::test_purchase_draft_api_lifecycle_and_idempotency
+tests/test_api_replenishment.py::test_purchase_draft_api_rejects_idempotency_reuse_and_stale_version
+tests/test_api_replenishment.py::test_replenishment_suggestions_list_route_and_filter
+tests/test_api_replenishment.py::test_replenishment_suggestions_route_is_in_openapi
+tests/test_api_replenishment.py::test_replenishment_api_requires_idempotency
+tests/test_api_replenishment.py::test_replenishment_evaluation_records_observation_window
+  D:\ai\dianshang\tests\test_api_replenishment.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    product = repo_mod.upsert_product(db, ProductRecord(source="fixture", external_product_id="api-p", title="商品", url="https://fixture.local/api-p", current_price=Decimal("10.00"), observed_at=__import__("datetime").datetime.utcnow()), workspace_id=workspace.id)
+
+tests/test_api_replenishment.py::test_replenishment_api_flow_and_inventory_unchanged
+tests/test_api_replenishment.py::test_purchase_draft_api_lifecycle_and_idempotency
+tests/test_api_replenishment.py::test_purchase_draft_api_rejects_idempotency_reuse_and_stale_version
+tests/test_api_replenishment.py::test_replenishment_suggestions_list_route_and_filter
+tests/test_replenishment.py::test_generate_decide_and_submit_purchase_request_without_inventory_side_effect
+tests/test_replenishment.py::test_purchase_draft_lifecycle_and_inventory_invariant
+tests/test_replenishment.py::test_purchase_draft_rejects_stale_version_without_partial_commit
+tests/test_replenishment.py::test_decision_idempotency_and_version_conflict
+tests/test_replenishment.py::test_ignore_requires_reason_and_workspace_isolation
+  D:\ai\dianshang\app\replenishment.py:406: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_api_replenishment.py::test_replenishment_api_flow_and_inventory_unchanged
+tests/test_replenishment.py::test_generate_decide_and_submit_purchase_request_without_inventory_side_effect
+  D:\ai\dianshang\app\replenishment.py:655: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    submitted_by=actor, submitted_at=datetime.utcnow(), idempotency_key=idempotency_key,
+
+tests/test_api_replenishment.py::test_replenishment_api_flow_and_inventory_unchanged
+tests/test_replenishment.py::test_generate_decide_and_submit_purchase_request_without_inventory_side_effect
+  D:\ai\dianshang\app\replenishment.py:660: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_api_replenishment.py::test_purchase_draft_api_lifecycle_and_idempotency
+tests/test_replenishment.py::test_purchase_draft_lifecycle_and_inventory_invariant
+  D:\ai\dianshang\app\replenishment.py:595: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_api_sync_compensation.py: 5 warnings
+tests/test_platform_sync.py: 5 warnings
+  D:\ai\dianshang\app\external_sync.py:243: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    heartbeat_at=datetime.utcnow(),
+
+tests/test_api_sync_compensation.py::test_direct_inventory_ingest_creates_one_completed_run
+  D:\ai\dianshang\app\external_sync.py:258: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    run.finished_at = datetime.utcnow()
+
+tests/test_api_sync_compensation.py: 16 warnings
+tests/test_platform_sync.py: 23 warnings
+  D:\ai\dianshang\app\external_sync.py:87: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    run.heartbeat_at = datetime.utcnow()
+
+tests/test_api_sync_compensation.py::test_sync_detail_and_retry_idempotency
+tests/test_api_sync_compensation.py::test_sync_detail_and_retry_idempotency
+tests/test_api_sync_compensation.py::test_sync_retry_rejects_invalid_requests_and_workspace_scope
+tests/test_api_sync_compensation.py::test_sync_retry_rejects_invalid_requests_and_workspace_scope
+tests/test_platform_sync.py::test_fixture_bundle_run_is_successful_and_idempotent
+tests/test_platform_sync.py::test_fixture_bundle_run_is_successful_and_idempotent
+tests/test_platform_sync.py::test_fixture_bundle_rejects_mixed_store_and_marks_run_failed
+tests/test_platform_sync.py::test_fixture_sync_marks_partial_and_keeps_successful_resource
+tests/test_platform_sync.py::test_fixture_sync_all_resources_failed_keeps_failed_run
+  D:\ai\dianshang\app\external_sync.py:200: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    run.finished_at = datetime.utcnow()
+
+tests/test_api_sync_compensation.py::test_sync_detail_and_retry_idempotency
+tests/test_api_sync_compensation.py::test_sync_detail_and_retry_idempotency
+tests/test_api_sync_compensation.py::test_sync_detail_and_retry_idempotency
+tests/test_api_sync_compensation.py::test_sync_retry_rejects_invalid_requests_and_workspace_scope
+  D:\ai\dianshang\app\main.py:2270: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_api_tickets.py::test_ticket_list_api_repairs_legacy_ticket_columns
+tests/test_api_tickets.py::test_ticket_list_api_repairs_legacy_ticket_columns
+tests/test_api_tickets.py::test_ticket_list_api_repairs_legacy_ticket_columns
+  D:\ai\dianshang\migrations\versions\0018_repair_service_ticket_schema.py:44: SADeprecationWarning: The Column.copy() method is deprecated and will be removed in a future release. (deprecated since: 1.4)
+    op.add_column("service_tickets", column.copy())
+
+tests/test_catalog_replay.py::test_replay_collects_and_deduplicates_pages
+tests/test_catalog_replay.py::test_replay_collects_and_deduplicates_pages
+tests/test_catalog_replay.py::test_replay_collects_and_deduplicates_pages
+tests/test_catalog_replay.py::test_replay_collects_and_deduplicates_pages
+tests/test_catalog_replay.py::test_replay_page_limit_is_partial
+tests/test_catalog_replay.py::test_replay_page_limit_is_partial
+tests/test_crawler.py::test_normalize_product_cleans_fields_and_parses_currency
+tests/test_crawler.py::test_normalize_product_rejects_missing_identity
+  D:\ai\dianshang\app\crawler.py:61: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    observed_at=datetime.utcnow(),
+
+tests/test_content_application.py: 18 warnings
+  D:\ai\dianshang\tests\test_content_application.py:274: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    observed_at=datetime.utcnow(),
+
+tests/test_jobs.py::test_recover_expired_job_moves_to_retry_wait
+  D:\ai\dianshang\tests\test_jobs.py:165: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_at = datetime.utcnow() + timedelta(seconds=2)
+
+tests/test_jobs.py::test_recover_expired_cancelled_job
+  D:\ai\dianshang\tests\test_jobs.py:181: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert recover_expired_jobs(db, now=datetime.utcnow() + timedelta(seconds=2)) == 1
+
+tests/test_jobs.py::test_recover_expired_job_fails_at_retry_limit
+  D:\ai\dianshang\tests\test_jobs.py:191: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert recover_expired_jobs(db, now=datetime.utcnow() + timedelta(seconds=2)) == 1
+
+tests/test_jobs.py::test_recover_expired_job_ignores_active_lease
+  D:\ai\dianshang\tests\test_jobs.py:202: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert recover_expired_jobs(db, now=datetime.utcnow()) == 0
+
+tests/test_operations_workbench.py::test_today_aggregates_existing_facts_and_preserves_demo_boundary
+tests/test_operations_workbench.py::test_today_is_workspace_and_warehouse_scoped
+  D:\ai\dianshang\tests\test_operations_workbench.py:46: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    observed_at=datetime.utcnow(),
+
+tests/test_operations_workbench.py::test_today_aggregates_existing_facts_and_preserves_demo_boundary
+tests/test_operations_workbench.py::test_today_is_workspace_and_warehouse_scoped
+  D:\ai\dianshang\tests\test_operations_workbench.py:53: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_replenishment.py::test_generate_decide_and_submit_purchase_request_without_inventory_side_effect
+tests/test_replenishment.py::test_purchase_draft_lifecycle_and_inventory_invariant
+tests/test_replenishment.py::test_purchase_draft_rejects_stale_version_without_partial_commit
+tests/test_replenishment.py::test_decision_idempotency_and_version_conflict
+tests/test_replenishment.py::test_ignore_requires_reason_and_workspace_isolation
+tests/test_replenishment.py::test_ignore_requires_reason_and_workspace_isolation
+  D:\ai\dianshang\tests\test_replenishment.py:34: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    product = upsert_product(db, ProductRecord(source="fixture", external_product_id=f"p-{tenant_key}", title="商品", url="https://fixture.local/p", current_price=Decimal("10.00"), observed_at=__import__("datetime").datetime.utcnow()), workspace_id=workspace.id)
+
+tests/test_tickets.py::test_ticket_lifecycle_events_assignment_and_workspace_scope
+  D:\ai\dianshang\app\tickets.py:78: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_tickets.py::test_ticket_lifecycle_events_assignment_and_workspace_scope
+  D:\ai\dianshang\app\tickets.py:59: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db.add(event); ticket.updated_at = datetime.utcnow(); db.commit(); db.refresh(event); return event
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+280 passed, 4241 warnings in 318.87s (0:05:18)
