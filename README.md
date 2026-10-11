@@ -26,7 +26,7 @@
 | 淘宝只读 Adapter | 只读协议、脱敏 fixture、能力查询和离线 preview；真实网络默认关闭，不提供下单/付款/退款/改价/库存写回 |
 | Shopify Dev Store 只读 Canary | 官方 Admin GraphQL 只读接入商品、订单、库存；已验证真实商品/订单/库存结构，订单与库存可同步到外部事实层；不执行 Shopify mutation |
 | 离线多平台同步编排 | JSON/CSV/mock 订单+库存 bundle、ExternalSyncRun 成功/失败、账户/店铺一致性校验和幂等回放；Shopify live 资源级 partial/重试链路已接入 |
-| 迁移与回归 | 当前 Alembic head `0018_repair_service_ticket_schema`；P0-0 全量回归为 `205 passed`；MySQL 迁移和 offline SQL 未在本次环境验证 |
+| 迁移与回归 | 当前 Alembic head `0018_repair_service_ticket_schema`；全量回归为 `283 passed`；MySQL 迁移和 offline SQL 未在本次环境验证 |
 | 运营概览看板 | `/dashboard` 与 `/api/dashboard/summary`：内部库存、外部 Shopify 库存观察、入库状态/数量、销量摘要、SKU 健康、补货建议、同步健康、商品表现四象限和口径限制 |
 | AI 运营助手 | `/assistant` 与 `/api/assistant/query`：按当前 Workspace 查询商品/SKU、库存健康、销售波动、广告 ROI、库存预警、商品机会、补货建议和同步状态；只读，不执行高影响写操作 |
 | 页面展示约定 | `/static/labels.js` 为工作台公共枚举中文映射；数据库/API 继续使用原始 code，页面显示中文标签；状态、完整度、原因、级别和分析字段不直接暴露英文枚举 |
@@ -49,7 +49,7 @@
 
 ### 当前仍需收口
 
-- P0-0 全量回归为 `205 passed`（`PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider`，2026-10-04）；
+- 全量回归为 `283 passed`（`PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider`，2026-10-11）；
 - `app/assistant.py`、`app/business_dates.py` 和新增文档仍需纳入发布清单后，才能宣称干净 clone 可复现；
 - 当前 Shopify 是单工作区、本地 `.env` 凭证的 Dev Store Canary，不是多租户 OAuth/secret vault；
 - 不包含 Shopify mutation、商品发布、库存写回、物流、税务、跨境结算或真实生产经营收益；
@@ -136,11 +136,43 @@ python -m app.cli init-admin --login home_admin --tenant-key home-shop --workspa
 
 约定要点：任务以仓库内任务文件下发（样例 `dev_task.md`）；实现方交付必须附原始测试输出与用例映射；无原始证据不得标记"完成"。
 
-测试运行建议使用仓库内隔离目录，避免系统临时目录清理引发权限拦截：
+## 测试
+
+### 运行全量回归
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
+```
+
+定向运行：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests/test_content_application.py tests/test_api_content_export.py
+```
+
+### 测试耗时与 WAL 优化
+
+测试用例默认使用独立的 SQLite 临时库，每次建立 schema 都要建 40 余张表。SQLite 默认的 `journal_mode=delete` 会为每次 DDL 创建并删除一个 `-journal` 回滚日志文件，在 Windows 上约 40ms/表，建满全部表需约 10.5s；改用 `journal_mode=WAL` 后同一操作约 0.04s。
+
+`tests/conftest.py` 已为测试进程内的所有 SQLite 连接统一开启 WAL，并通过 `tests/_wal_bootstrap/sitecustomize.py`（经 `PYTHONPATH` 注入）让 `subprocess` 启动的子进程同样生效。这套改动把本机全量回归从约 39 分钟压到约 1.5 分钟。
+
+要点：
+
+- 该设置**仅作用于测试进程**，不改变生产库配置（`app/config.py` 的 `DATABASE_URL` 与 `init_db.py` / Alembic 迁移路径均未改动）。
+- 监听器挂在 `sqlalchemy.engine.Engine` 基类而非某个 engine 实例——多个测试文件会用 `importlib.reload(app.db)` 重建 engine，实例级监听会随之失效。
+- 新增测试文件无需任何额外配置即可获得该优化。
+
+### 已知环境限制
+
+若运行环境存在劫持 `shutil.rmtree` 的 `sitecustomize.py`（例如某些沙箱），fixture 的临时目录清理阶段会报 `error`（非断言失败），表现为全量出现 `errors` 而非 `passed/failed`。此时应在无此类 shim 的环境复跑，或临时移除 shim 后重跑；勿将清理阶段的 `error` 误判为测试失败。
+
+另可使用仓库内隔离目录作为 pytest 的 basetemp，避免系统临时目录清理引发权限拦截：
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider --basetemp=./.testtmp
 ```
+
+该目录已在 `.gitignore` 中忽略。
 
 
 ## 启动
@@ -587,7 +619,7 @@ python -m app.cli external-preview --platform taobao --mode json --file examples
 - 内容生产控制平面：`0016_content_production`，包含内容 revision、审核、导出和媒体资产；
 - 淘宝只读 Adapter、能力查询和 fixture preview：真实网络默认关闭；
 - 离线与 Shopify live 资源级同步编排：ExternalSyncRun、失败收尾、幂等回放和多 location 库存；
-- P0-0 全量回归：`205 passed`（`PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider`，2026-10-04）；
+- 全量回归：`283 passed`（`PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider`，2026-10-11）；
 - 当前 Alembic head：`0018_repair_service_ticket_schema`（MySQL 迁移未在本次环境验证）。
 
 后续工作优先级：
@@ -602,19 +634,17 @@ python -m app.cli external-preview --platform taobao --mode json --file examples
 python scripts/demo.py
 
 # 全量回归
-python -m pytest -q
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
 ```
 
 当前回归基线说明：
 
 ```text
-全量回归：205 passed
+全量回归：283 passed
 命令：PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
-时间：2026-10-04
-环境：Windows 11，Python 3.14，SQLite 测试数据库
-
-P0-0 定向回归：59 passed
-命令：PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests/test_alembic.py tests/test_admin_users.py tests/test_s7_security.py tests/test_s7_stability.py tests/test_external_orders.py tests/test_platform_sync.py tests/test_api_sync_compensation.py tests/test_api_inventory.py tests/test_jobs.py tests/test_replenishment.py
+时间：2026-10-11
+环境：Windows 11，Python 3.14，SQLite 测试数据库（WAL）
+证据：artifacts/test-full-run-20261011-followup.txt
 
 迁移验证：当前唯一 head 为 `0018_repair_service_ticket_schema`；临时 SQLite 空库重复 `upgrade head`、旧工单结构修复及列表 API 回归已通过；MySQL 和 offline SQL 未在本次环境验证。
 
