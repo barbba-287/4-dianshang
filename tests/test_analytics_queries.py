@@ -74,13 +74,73 @@ def test_product_quadrant_builds_meta_and_preserves_reported_page(monkeypatch):
 
     assert captured["workspace_id"] == 11
     assert captured["warehouse_id"] == 9
-    assert result["items"] == [item]
+    assert result["items"] == []
     assert result["total"] == 1
     assert result["page"] == 2
     assert result["page_size"] == 1
     assert result["meta"]["workspace_id"] == 11
     assert result["meta"]["data_completeness"] == "complete"
     assert result["meta"]["metrics"][0]["metric"] == "product_quadrant_items"
+
+
+def test_product_quadrant_applies_page_offset_and_preserves_global_metadata(monkeypatch):
+    items = [
+        {"data_completeness": "complete", "sku_id": sku_id}
+        for sku_id in (1, 2, 3)
+    ]
+
+    def fake_builder(db, **kwargs):
+        return {
+            "as_of": "2026-10-08",
+            "business_timezone": "UTC",
+            "growth_window": 7,
+            "baseline_window": 14,
+            "days_window": 14,
+            "growth_high": 0.1,
+            "days_low": 14.0,
+            "summary": {"total_scored": 3},
+            "items": items,
+            "limitations": ["fixture"],
+            "unsupported_metrics": [],
+        }
+
+    monkeypatch.setattr("app.analytics.build_product_quadrant", fake_builder)
+    result = AnalyticsQueryService(_FakeSession()).product_quadrant(
+        workspace_id=11, page=2, page_size=2
+    )
+
+    assert [item["sku_id"] for item in result["items"]] == [3]
+    assert result["page"] == 2
+    assert result["page_size"] == 2
+    assert result["total"] == 3
+    assert result["summary"] == {"total_scored": 3}
+    assert result["meta"]["metrics"][0]["value"] == 3
+
+
+def test_product_quadrant_out_of_range_page_is_empty(monkeypatch):
+    def fake_builder(db, **kwargs):
+        return {
+            "as_of": "2026-10-08",
+            "business_timezone": "UTC",
+            "growth_window": 7,
+            "baseline_window": 14,
+            "days_window": 14,
+            "growth_high": 0.1,
+            "days_low": 14.0,
+            "summary": {"total_scored": 1},
+            "items": [{"data_completeness": "complete", "sku_id": 1}],
+            "limitations": [],
+            "unsupported_metrics": [],
+        }
+
+    monkeypatch.setattr("app.analytics.build_product_quadrant", fake_builder)
+    result = AnalyticsQueryService(_FakeSession()).product_quadrant(
+        workspace_id=11, page=2, page_size=1
+    )
+
+    assert result["items"] == []
+    assert result["total"] == 1
+    assert result["page"] == 2
 
 
 def test_product_quadrant_converts_builder_value_error(monkeypatch):

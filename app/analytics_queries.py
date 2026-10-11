@@ -128,12 +128,12 @@ class AnalyticsQueryService:
             ],
             "limitations": summary.get("limitations", []),
         }
-        # Preserve the historical API behavior: page is reported, but the
-        # query only slices the first page and does not apply an offset.
-        summary["items"] = items[:page_size]
+        total = len(items)
+        offset = (page - 1) * page_size
+        summary["items"] = items[offset : offset + page_size]
         summary["page"] = page
         summary["page_size"] = page_size
-        summary["total"] = len(items)
+        summary["total"] = total
         return summary
 
     def dashboard_summary(

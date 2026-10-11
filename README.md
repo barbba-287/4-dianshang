@@ -126,6 +126,23 @@ python -m app.cli init-admin --login home_admin --tenant-key home-shop --workspa
 浏览器 session 写请求使用 CSRF 双提交校验；页面会自动携带 `X-CSRF-Token`。API Key 是机器调用凭证，不用于员工网页登录；生产环境请按实际部署开启 HTTPS 和安全 Cookie。
 
 
+## 开发协作与交接
+
+本项目由规划方（需求拆解、接口契约、测试用例设计、独立复核）与实现方（代码编写）分工推进，交接规则见：
+
+- 开发规范：`CLAUDE.md`
+- 任务下发与交付举证契约：`docs/claude-handoff-contract.md`
+- 工程阶段与切片来源：`docs/engineering-roadmap.md`
+
+约定要点：任务以仓库内任务文件下发（样例 `dev_task.md`）；实现方交付必须附原始测试输出与用例映射；无原始证据不得标记"完成"。
+
+测试运行建议使用仓库内隔离目录，避免系统临时目录清理引发权限拦截：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider --basetemp=./.testtmp
+```
+
+
 ## 启动
 
 ```bash

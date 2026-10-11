@@ -2228,19 +2228,28 @@ def list_purchase_requests(request: Request, page: int = Query(default=1, ge=1),
 @app.post("/api/external/sync/fixture", response_model=FixtureSyncResponse)
 def external_fixture_sync(payload: FixtureSyncRequest, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, permission="catalog.write")
-    from app.platform_sync import run_fixture_sync
+    from app.sync_application import SyncApplicationError, SyncApplicationService, fixture_response_data
+
     try:
-        result = run_fixture_sync(db, workspace_id=principal.workspace_id, platform=payload.platform, account_ref=payload.account_ref, store_ref=payload.store_ref, orders_content=payload.orders_content, inventory_content=payload.inventory_content, source_mode=payload.source_mode)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": str(exc), "message": "离线同步失败"}) from exc
-    order_stats = result["orders"]
-    inventory_stats = result["inventory"]
+        result = SyncApplicationService(db).run_fixture_bundle(
+            workspace_id=principal.workspace_id,
+            platform=payload.platform,
+            account_ref=payload.account_ref,
+            store_ref=payload.store_ref,
+            orders_content=payload.orders_content,
+            inventory_content=payload.inventory_content,
+            source_mode=payload.source_mode,
+        )
+    except SyncApplicationError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": exc.message}) from exc
+
     return FixtureSyncResponse(
-        platform=payload.platform, account_ref=payload.account_ref, store_ref=payload.store_ref,
-        simulated=True, live_enabled=False, sync_run_id=result["run"].run_id,
-        sync_status=result["run"].status,
-        orders={"total": order_stats.total, "inserted": order_stats.inserted, "updated": order_stats.updated, "no_op": order_stats.no_op, "conflict": order_stats.conflict, "stale": order_stats.stale} if order_stats else None,
-        inventory={"total": inventory_stats.total, "inserted": inventory_stats.inserted, "no_op": inventory_stats.no_op, "conflict": inventory_stats.conflict, "snapshot_ids": inventory_stats.snapshot_ids or []} if inventory_stats else None,
+        platform=payload.platform,
+        account_ref=payload.account_ref,
+        store_ref=payload.store_ref,
+        simulated=True,
+        live_enabled=False,
+        **fixture_response_data(result),
     )
 
 
@@ -2282,55 +2291,32 @@ def retry_external_sync_run(run_id: str, payload: ExternalSyncRetryRequest, requ
         raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供 Idempotency-Key"})
     if len(key) > 128:
         raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_TOO_LONG", "message": "Idempotency-Key 超过长度限制"})
-    from app.db import ExternalSyncRun
-    from app.external_sync import resource_status, retryable_resources
-    from app.platform_sync import run_fixture_sync
-    import hashlib
-    import sqlalchemy.exc
-    parent = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.run_id == run_id, ExternalSyncRun.workspace_id == principal.workspace_id))
-    if parent is None:
-        raise HTTPException(status_code=404, detail={"code": "SYNC_RUN_NOT_FOUND", "message": "同步运行不存在"})
-    if parent.status not in {"failed", "partial"} or parent.sync_type not in {"fixture_bundle", "orders", "inventory"}:
-        raise HTTPException(status_code=409, detail={"code": "SYNC_RUN_NOT_RETRYABLE", "message": "该同步运行不支持补偿"})
-    available = set(retryable_resources(parent))
-    selected = set(payload.resources or available)
-    if not selected or not selected.issubset({"orders", "inventory"}) or not selected.issubset(available):
-        raise HTTPException(status_code=409, detail={"code": "SYNC_RESOURCE_NOT_RETRYABLE", "message": "选定资源不可补偿"})
-    if "orders" in selected and not payload.orders_content or "inventory" in selected and not payload.inventory_content:
-        raise HTTPException(status_code=422, detail={"code": "FIXTURE_CONTENT_REQUIRED", "message": "补偿资源必须提供 fixture"})
-    content_hash = hashlib.sha256(json.dumps({
-        "run_id": run_id,
-        "resources": sorted(selected),
-        "orders_content": payload.orders_content if "orders" in selected else None,
-        "inventory_content": payload.inventory_content if "inventory" in selected else None,
-    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    existing = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.workspace_id == principal.workspace_id, ExternalSyncRun.retry_of_run_id == run_id, ExternalSyncRun.retry_idempotency_key == key))
-    if existing is not None:
-        if existing.retry_payload_hash != content_hash:
-            raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_KEY_REUSE", "message": "补偿幂等键对应内容已改变"})
-        response = _external_sync_run_response(existing)
-        return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
-    carried = resource_status(parent)
+    from app.sync_application import SyncApplicationError, SyncApplicationService
+
     try:
-        result = run_fixture_sync(db, workspace_id=principal.workspace_id, platform=parent.platform, account_ref=parent.account_ref or "", store_ref=parent.store_ref or "default", orders_content=payload.orders_content if "orders" in selected else None, inventory_content=payload.inventory_content if "inventory" in selected else None, source_mode=parent.source_mode, attempt=(parent.attempt or 1) + 1, retry_of_run_id=parent.run_id, retry_idempotency_key=key, retry_payload_hash=content_hash, carried_forward={name: item for name, item in carried.items() if name not in selected}, sync_type_override=parent.sync_type)
-    except sqlalchemy.exc.IntegrityError as exc:
-        db.rollback()
-        competing = db.scalar(select(ExternalSyncRun).where(
-            ExternalSyncRun.workspace_id == principal.workspace_id,
-            ExternalSyncRun.retry_of_run_id == run_id,
-            ExternalSyncRun.retry_idempotency_key == key,
-        ))
-        if competing is None:
-            raise HTTPException(status_code=500, detail={"code": "SYNC_RETRY_PERSIST_FAILED", "message": "同步补偿无法持久化"}) from exc
-        if competing.retry_payload_hash != content_hash:
-            raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_KEY_REUSE", "message": "补偿幂等键对应内容已改变"}) from exc
-        response = _external_sync_run_response(competing)
+        result = SyncApplicationService(db).retry_fixture_bundle(
+            workspace_id=principal.workspace_id,
+            run_id=run_id,
+            resources=payload.resources,
+            orders_content=payload.orders_content,
+            inventory_content=payload.inventory_content,
+            idempotency_key=key,
+        )
+    except SyncApplicationError as exc:
+        status_by_code = {
+            "SYNC_RUN_NOT_FOUND": 404,
+            "SYNC_RUN_NOT_RETRYABLE": 409,
+            "SYNC_RESOURCE_NOT_RETRYABLE": 409,
+            "IDEMPOTENCY_KEY_REUSE": 409,
+            "SYNC_RETRY_PERSIST_FAILED": 500,
+        }
+        status_code = status_by_code.get(exc.code, 422)
+        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": exc.message}) from exc
+
+    response = _external_sync_run_response(result["run"])
+    if result["replayed"]:
         return JSONResponse(status_code=200, content=response.model_dump(mode="json"))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": str(exc), "message": "同步补偿失败"}) from exc
-    child = result["run"]
-    db.commit(); db.refresh(child)
-    return JSONResponse(status_code=201, content=_external_sync_run_response(child).model_dump(mode="json"))
+    return JSONResponse(status_code=201, content=response.model_dump(mode="json"))
 
 
 @app.get("/api/external/sync/runs", response_model=list[ExternalSyncRunResponse])
@@ -2422,36 +2408,19 @@ def external_inventory_preview(payload: ExternalInventoryPreviewRequest, request
 @app.post("/api/external/inventory/ingest", response_model=ExternalInventoryIngestResponse)
 def external_inventory_ingest(payload: ExternalInventoryIngestRequest, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, permission="catalog.write")
-    from app.connectors import load_records
-    from app.external_sync import begin_sync_run, complete_sync_run, fail_sync_run, ingest_inventory, validate_inventory_batch_scope
-    run = None
+    from app.sync_application import SyncApplicationError, SyncApplicationService, inventory_response_data
+
     try:
-        records = load_records(payload.content, platform=payload.platform, source_mode=payload.source_mode)
-        account_ref, store_ref, _warehouse_ref = validate_inventory_batch_scope(records)
-        run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=payload.platform, sync_type="inventory", account_ref=account_ref, store_ref=store_ref, source_mode=payload.source_mode)
-        result = ingest_inventory(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
-        complete_sync_run(db, run, result)
-    except ValueError as exc:
-        if 'run' in locals() and run is not None:
-            fail_sync_run(db, run, exc)
-        raise HTTPException(status_code=422, detail={"code": str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
-    except Exception as exc:
-        if 'run' in locals() and run is not None:
-            fail_sync_run(db, run, exc)
-        raise HTTPException(status_code=500, detail={"code": "EXTERNAL_SYNC_FAILED", "message": "外部库存同步失败"}) from exc
-    return ExternalInventoryIngestResponse(
-        platform=payload.platform,
-        source_mode=payload.source_mode,
-        simulated=True,
-        live_enabled=False,
-        inserted=result.inserted,
-        no_op=result.no_op,
-        conflict=result.conflict,
-        total=result.total,
-        snapshot_ids=result.snapshot_ids or [],
-        sync_run_id=result.sync_run_id,
-        sync_status=result.sync_status,
-    )
+        result = SyncApplicationService(db).ingest_inventory(
+            workspace_id=principal.workspace_id,
+            platform=payload.platform,
+            source_mode=payload.source_mode,
+            content=payload.content,
+        )
+    except SyncApplicationError as exc:
+        status_code = 500 if exc.code == "EXTERNAL_SYNC_FAILED" else 422
+        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": exc.message}) from exc
+    return ExternalInventoryIngestResponse(**inventory_response_data(result))
 
 
 @app.post("/api/external/events/ingest", response_model=ExternalEventIngestResponse)
@@ -2513,44 +2482,40 @@ def get_content_workflow(workflow_key: str, request: Request):
 @app.post("/api/content/runs", response_model=ContentJobResponse, status_code=202)
 def create_content_run(payload: ContentJobCreate, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
-    product = db.scalar(select(Product).where(Product.id == payload.product_id, Product.workspace_id == principal.workspace_id))
-    if product is None:
-        raise HTTPException(status_code=404, detail={"code": "PRODUCT_NOT_FOUND", "message": "商品不存在"})
-    sku = db.scalar(select(ProductSku).where(ProductSku.id == payload.sku_id, ProductSku.product_id == product.id, ProductSku.workspace_id == principal.workspace_id)) if payload.sku_id else None
-    if payload.sku_id and sku is None:
-        raise HTTPException(status_code=404, detail={"code": "SKU_NOT_FOUND", "message": "SKU 不属于当前商品"})
     key = request.headers.get("Idempotency-Key") or ""
     if not key or len(key) > 128:
         raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供有效的 Idempotency-Key"})
-    from app.content_production import build_snapshot, build_spec, canonical_json, snapshot_hash
-    from app.visual_workflows import build_workflow_prompt, resolve_workflow, snapshot_workflow
-    import hashlib
-    source_asset = db.scalar(select(ProductMediaAsset).where(ProductMediaAsset.workspace_id == principal.workspace_id, ProductMediaAsset.product_id == product.id, ProductMediaAsset.role == "source", ProductMediaAsset.selected.is_(True)).order_by(ProductMediaAsset.id.desc()))
-    source_descriptor = None
-    if source_asset is not None:
-        source_descriptor = {"asset_id": source_asset.id, "sha256": source_asset.content_sha256, "mime_type": source_asset.mime_type, "width": source_asset.width, "height": source_asset.height}
-    snapshot = build_snapshot(product, sku)
-    if source_descriptor:
-        snapshot["source_assets"] = [source_descriptor]
-    workflow = resolve_workflow(workflow_key=getattr(payload, "workflow_key", None), category=product.category)
-    spec = build_spec(scene=payload.scene, style=payload.style, operation=payload.operation, width=payload.width, height=payload.height, candidate_count=payload.candidate_count, snapshot=snapshot, brief=build_workflow_prompt(workflow, product_title=product.title, brief=payload.brief))
-    body_hash = hashlib.sha256(canonical_json(payload.model_dump()).encode()).hexdigest()
-    existing = db.scalar(select(ProductContentRevision).where(ProductContentRevision.workspace_id == principal.workspace_id, ProductContentRevision.idempotency_key == key))
-    if existing is not None:
-        if existing.payload_hash != body_hash:
-            raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_KEY_REUSE", "message": "幂等键对应请求内容已改变"})
-        job = db.get(CrawlJob, existing.generation_job_id) if existing.generation_job_id else None
-        return ContentJobResponse(job_id=job.id if job else 0, run_id=job.run_id if job else None, revision_id=existing.id, job_status=job.status if job else "succeeded", revision_status=existing.status, simulated=existing.simulated, provider=existing.provider)
-    max_revision = db.scalar(select(func.max(ProductContentRevision.revision_no)).where(ProductContentRevision.workspace_id == principal.workspace_id, ProductContentRevision.product_id == product.id)) or 0
-    revision = ProductContentRevision(workspace_id=principal.workspace_id, product_id=product.id, sku_id=payload.sku_id, revision_no=max_revision + 1, status="generating", channel="generic", source_snapshot_json=canonical_json(snapshot), source_snapshot_hash=snapshot_hash(snapshot), provider=payload.provider, source_mode="live" if payload.provider == "wan" else "local", simulated=payload.provider != "wan", prompt_snapshot=canonical_json({**spec.__dict__, "workflow": snapshot_workflow(workflow)}), created_by=principal.subject, version=1, idempotency_key=key, payload_hash=body_hash)
-    db.add(revision); db.flush()
-    from app.repository import enqueue_job
-    job = enqueue_job(db, type_="content_generate", source=payload.provider, keyword=payload.scene, payload={"revision_id": revision.id, "provider": payload.provider}, workspace_id=principal.workspace_id, idempotency_key=key, payload_hash=body_hash)
-    revision.generation_job_id = job.id
-    db.commit(); db.refresh(revision)
-    from app.background import _submit_future
-    _submit_future(job.id)
-    return ContentJobResponse(job_id=job.id, run_id=job.run_id, revision_id=revision.id, job_status=job.status, revision_status=revision.status, simulated=revision.simulated, provider=revision.provider)
+    from app.content_application import ContentApplicationError, ContentApplicationService
+
+    try:
+        result = ContentApplicationService(db).create_generation(
+            workspace_id=principal.workspace_id,
+            actor=principal.subject,
+            idempotency_key=key,
+            **payload.model_dump(),
+        )
+    except ContentApplicationError as exc:
+        status_by_code = {
+            "PRODUCT_NOT_FOUND": 404,
+            "SKU_NOT_FOUND": 404,
+            "IDEMPOTENCY_KEY_REUSE": 409,
+        }
+        raise HTTPException(status_code=status_by_code.get(exc.code, 422), detail={"code": exc.code, "message": exc.message}) from exc
+
+    revision = result["revision"]
+    job = result["job"]
+    if not result["replayed"]:
+        from app.background import _submit_future
+        _submit_future(job.id)
+    return ContentJobResponse(
+        job_id=job.id if job else 0,
+        run_id=job.run_id if job else None,
+        revision_id=revision.id,
+        job_status=job.status if job else "succeeded",
+        revision_status=revision.status,
+        simulated=revision.simulated,
+        provider=revision.provider,
+    )
 
 
 @app.get("/api/content/jobs/{job_id}")
@@ -2650,60 +2615,62 @@ def download_content_asset(asset_id: int, request: Request, db: Session = Depend
 @app.post("/api/content/revisions/{revision_id}/review")
 def review_content_revision(revision_id: int, payload: ContentReviewRequest, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
-    revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.id == revision_id, ProductContentRevision.workspace_id == principal.workspace_id))
-    if revision is None:
-        raise HTTPException(status_code=404, detail={"code": "CONTENT_REVISION_NOT_FOUND", "message": "内容版本不存在"})
-    if revision.version != payload.expected_version:
-        raise HTTPException(status_code=409, detail={"code": "CONTENT_VERSION_CONFLICT", "message": "内容版本已变化，请刷新后重试"})
-    if payload.action == "approve" and revision.quality_status == "blocked":
-        raise HTTPException(status_code=409, detail={"code": "CONTENT_QUALITY_BLOCKED", "message": "质量检查未通过，不能审核通过"})
-    transitions = {"submit": {"draft": "in_review"}, "approve": {"in_review": "approved"}, "request_changes": {"in_review": "changes_requested"}, "reject": {"in_review": "rejected", "draft": "rejected"}}
-    target = transitions.get(payload.action, {}).get(revision.status)
-    if target is None:
-        raise HTTPException(status_code=409, detail={"code": "CONTENT_INVALID_STATE", "message": "当前状态不允许此审核动作"})
     key = request.headers.get("Idempotency-Key") or ""
-    if not key:
-        raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供 Idempotency-Key"})
-    import hashlib
-    action_hash = hashlib.sha256(canonical_json(payload.model_dump()).encode()).hexdigest() if "canonical_json" in globals() else hashlib.sha256(json.dumps(payload.model_dump(), ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-    previous_action = db.scalar(select(ProductContentAction).where(ProductContentAction.workspace_id == principal.workspace_id, ProductContentAction.revision_id == revision.id, ProductContentAction.action_type == payload.action, ProductContentAction.idempotency_key == key))
-    if previous_action is not None:
-        if previous_action.payload_hash != action_hash:
-            raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_KEY_REUSE", "message": "审核幂等键对应内容已改变"})
-        return {"id": revision.id, "status": revision.status, "version": revision.version, "reviewed_by": revision.reviewed_by, "replayed": True}
-    db.add(ProductContentAction(workspace_id=principal.workspace_id, revision_id=revision.id, action_type=payload.action, from_status=revision.status, to_status=target, note=payload.note, expected_version=payload.expected_version, idempotency_key=key, payload_hash=action_hash, actor=principal.subject, request_id=getattr(request.state, "request_id", None)))
-    revision.status = target; revision.version += 1; revision.reviewed_by = principal.subject; revision.reviewed_at = datetime.utcnow()
-    if target == "approved": revision.approved_at = datetime.utcnow()
-    if target in {"rejected", "changes_requested"}: revision.rejection_reason = payload.note
-    db.commit(); db.refresh(revision)
-    return {"id": revision.id, "status": revision.status, "version": revision.version, "reviewed_by": revision.reviewed_by}
+    from app.content_application import ContentApplicationError, ContentApplicationService
+
+    try:
+        result = ContentApplicationService(db).review_revision(
+            workspace_id=principal.workspace_id,
+            revision_id=revision_id,
+            action=payload.action,
+            note=payload.note,
+            expected_version=payload.expected_version,
+            idempotency_key=key,
+            actor=principal.subject,
+            request_id=getattr(request.state, "request_id", None),
+        )
+    except ContentApplicationError as exc:
+        status_by_code = {
+            "CONTENT_REVISION_NOT_FOUND": 404,
+            "CONTENT_VERSION_CONFLICT": 409,
+            "CONTENT_QUALITY_BLOCKED": 409,
+            "CONTENT_INVALID_STATE": 409,
+            "IDEMPOTENCY_KEY_REUSE": 409,
+        }
+        raise HTTPException(status_code=status_by_code.get(exc.code, 422), detail={"code": exc.code, "message": exc.message}) from exc
+    revision = result["revision"]
+    return {"id": revision.id, "status": revision.status, "version": revision.version, "reviewed_by": revision.reviewed_by, "replayed": result["replayed"]}
 
 
 @app.post("/api/content/revisions/{revision_id}/export", response_model=ContentExportResponse, status_code=202)
 def export_content_revision(revision_id: int, payload: ContentExportRequest, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
-    if payload.revision_id != revision_id:
-        raise HTTPException(status_code=422, detail={"code": "REVISION_MISMATCH", "message": "版本 ID 不匹配"})
-    revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.id == revision_id, ProductContentRevision.workspace_id == principal.workspace_id, ProductContentRevision.status == "approved"))
-    if revision is None:
-        raise HTTPException(status_code=409, detail={"code": "CONTENT_NOT_APPROVED", "message": "只有审核通过的版本可以导出"})
     key = request.headers.get("Idempotency-Key") or ""
     if not key or len(key) > 128:
         raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供 Idempotency-Key"})
-    body_hash = sha256(json.dumps(payload.model_dump(), ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-    existing = db.scalar(select(ProductContentExport).where(ProductContentExport.workspace_id == principal.workspace_id, ProductContentExport.idempotency_key == key))
-    if existing is not None:
-        if existing.payload_hash != body_hash:
-            raise HTTPException(status_code=409, detail={"code": "IDEMPOTENCY_KEY_REUSE", "message": "幂等键对应内容已改变"})
-        return existing
-    export = ProductContentExport(workspace_id=principal.workspace_id, revision_id=revision.id, format=payload.format, status="queued", simulated=revision.simulated, idempotency_key=key, payload_hash=body_hash, created_by=principal.subject)
-    db.add(export); db.flush()
-    from app.repository import enqueue_job
-    job = enqueue_job(db, type_="content_export", source="content", keyword=payload.format, payload={"export_id": export.id}, workspace_id=principal.workspace_id, idempotency_key=f"export:{key}", payload_hash=body_hash)
-    db.commit(); db.refresh(export)
-    export_job_id = job.id
-    from app.background import _submit_future
-    _submit_future(export_job_id)
+    from app.content_application import ContentApplicationError, ContentApplicationService
+
+    try:
+        result = ContentApplicationService(db).export_revision(
+            workspace_id=principal.workspace_id,
+            revision_id=revision_id,
+            request_revision_id=payload.revision_id,
+            export_format=payload.format,
+            idempotency_key=key,
+            actor=principal.subject,
+        )
+    except ContentApplicationError as exc:
+        status_by_code = {
+            "CONTENT_NOT_APPROVED": 409,
+            "REVISION_MISMATCH": 422,
+            "IDEMPOTENCY_KEY_REUSE": 409,
+        }
+        raise HTTPException(status_code=status_by_code.get(exc.code, 422), detail={"code": exc.code, "message": exc.message}) from exc
+
+    export = result["export"]
+    if not result["replayed"]:
+        from app.background import _submit_future
+        _submit_future(result["job"].id)
     return export
 
 

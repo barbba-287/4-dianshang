@@ -897,6 +897,9 @@ class ProductQuadrantResponse(BaseModel):
     days_low: float
     summary: ProductQuadrantSummary
     items: list[ProductQuadrantItem]
+    page: int = 1
+    page_size: int = 20
+    total: int = 0
     unsupported_metrics: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     meta: AnalyticsMeta | None = None

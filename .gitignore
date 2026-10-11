@@ -14,3 +14,10 @@ uploads/*
 # 本地项目文档和执行计划，不上传到远程仓库
 电商ai.md
 docs/enterprise-production-requirements.md
+
+# 本地测试隔离目录（--basetemp），不进入版本控制
+.testtmp/
+CCR-使用文档.md
+面试/
+问题解决资产库/
+docs/interview-demo-script.md

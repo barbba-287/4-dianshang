@@ -85,6 +85,33 @@ def test_product_quadrant_returns_summary(client):
     assert body["items"]
 
 
+def test_product_quadrant_returns_paginated_items_and_stable_total(client):
+    c, _db, _ws, _wh, _ids = client
+    first = c.get("/api/analytics/product-quadrant", params={"page": 1, "page_size": 2})
+    second = c.get("/api/analytics/product-quadrant", params={"page": 2, "page_size": 2})
+    beyond = c.get("/api/analytics/product-quadrant", params={"page": 3, "page_size": 2})
+
+    assert first.status_code == second.status_code == beyond.status_code == 200
+    first_body, second_body, beyond_body = first.json(), second.json(), beyond.json()
+    assert first_body["page"] == 1
+    assert first_body["page_size"] == second_body["page_size"] == 2
+    assert first_body["total"] == second_body["total"] == beyond_body["total"] == 3
+    assert len(first_body["items"]) == 2
+    assert len(second_body["items"]) == 1
+    assert beyond_body["items"] == []
+    assert {item["sku_id"] for item in first_body["items"]}.isdisjoint(
+        {item["sku_id"] for item in second_body["items"]}
+    )
+    assert first_body["summary"] == second_body["summary"] == beyond_body["summary"]
+    assert first_body["meta"] == second_body["meta"] == beyond_body["meta"]
+
+
+def test_product_quadrant_pagination_contract_is_in_openapi(client):
+    c, _db, _ws, _wh, _ids = client
+    schema = c.get("/openapi.json").json()["components"]["schemas"]["ProductQuadrantResponse"]
+    assert {"items", "page", "page_size", "total"}.issubset(schema["properties"])
+
+
 def test_product_quadrant_invalid_window_rejected(client):
     c, _db, _ws, _wh, _ids = client
     response = c.get("/api/analytics/product-quadrant", params={"growth_window": 5})
