@@ -18,6 +18,9 @@ from app.config import get_settings
 from app.db import engine
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _run_alembic(args: list[str], *, database_url: str) -> subprocess.CompletedProcess:
     """在临时数据库上调用 alembic 子命令。"""
     import os
@@ -31,7 +34,7 @@ def _run_alembic(args: list[str], *, database_url: str) -> subprocess.CompletedP
         encoding="utf-8",
         errors="replace",
         env=env,
-        cwd="D:\\ai\\dianshang",
+        cwd=str(REPO_ROOT),
     )
 
 
@@ -169,7 +172,7 @@ def test_init_db_py_uses_alembic(tmp_path, monkeypatch):
         text=True,
         encoding="utf-8",
         errors="replace",
-        cwd="D:\\ai\\dianshang",
+        cwd=str(REPO_ROOT),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "head" in result.stdout.lower() or "升级" in result.stdout or "upgrade" in result.stdout.lower()
@@ -200,7 +203,7 @@ def test_init_db_py_on_legacy_db_uses_stamp(tmp_path, monkeypatch):
         text=True,
         encoding="utf-8",
         errors="replace",
-        cwd="D:\\ai\\dianshang",
+        cwd=str(REPO_ROOT),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "legacy" in result.stdout.lower() or "stamp" in result.stdout.lower()
@@ -231,7 +234,7 @@ def test_init_db_py_on_migrated_db_is_idempotent(tmp_path, monkeypatch):
         text=True,
         encoding="utf-8",
         errors="replace",
-        cwd="D:\\ai\\dianshang",
+        cwd=str(REPO_ROOT),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "已迁移" in result.stdout or "migrated" in result.stdout.lower() or "幂等" in result.stdout
