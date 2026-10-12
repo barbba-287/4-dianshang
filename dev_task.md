@@ -348,7 +348,7 @@ PYTHONDONTWRITEBYTECODE=1 D:/python/python/python.exe -m pytest -q -p no:cachepr
 | `git reset` | 任何形式（`--hard`/`--soft`/`--mixed`）均禁止 |
 | `git clean` | 任何形式（含 `-fd`/`-fdx`）均禁止 |
 | 删除或覆盖未跟踪文件 | 尤其 `CLAUDE.md`、`app/content_application.py`、`app/sync_application.py`、`app/schemas.recovered.py`、`tests/test_content_application.py`、`tests/test_sync_application.py`、`docs/interview-demo-script.md`、`面试/`、`问题解决资产库/` |
-| `commit` | 禁止提交（分支推进按 `develop → staging → temp-prod → main` 由人工执行） |
+| `commit` | 禁止提交（分支推进由人工执行，模型见 `CLAUDE.md` 与契约 §6.1） |
 | `push` | 禁止推送（含任何远端操作） |
 | 外部平台写入 | 禁止任何平台侧写入；禁止开启真实平台网络 |
 | 其它 | 不安装第三方依赖或 MCP 包；不执行 Alembic 迁移或 `init_db.py` 重建；不改 `.env`；不把 mock/fixture/local Provider 描述为生产能力；不改本文件以外无关区域 |

@@ -248,6 +248,6 @@ PYTHONDONTWRITEBYTECODE=1 D:/python/python/python.exe -m pytest -q -p no:cachepr
 | `git reset` | 任何形式 |
 | `git clean` | 任何形式 |
 | 删除或覆盖未跟踪文件 | 尤其 `docs/review-checklist-20261011.md`、`artifacts/test-full-run-20261011.txt`（本轮待入库） |
-| `commit` / `push` | 由人工按 `develop → staging → temp-prod → main` 推进 |
+| `commit` / `push` | 由人工推进（分支模型见 `CLAUDE.md` 与契约 §6.1） |
 | 外部平台写入 | 禁止任何平台侧写入与真实网络 |
 | 其它 | 不安装依赖/MCP 包；不改 `.env`；不做 Alembic 迁移；不改已核验通过的并发兜底逻辑；不把 mock/fixture/local 描述为生产能力 |

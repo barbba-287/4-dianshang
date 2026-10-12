@@ -1,8 +1,8 @@
 # Claude Code 任务交付契约
 
-- 版本：v1
+- 版本：v1.1
 - 生效日期：2026-10-11
-- 状态：生效（需在 `CLAUDE.md` 登记后对 Claude Code 生效）
+- 状态：生效（已于 2026-10-12 在 `CLAUDE.md` 登记）
 - 适用对象：`D:\ai\dianshang`（电商 AI 长期开发计划，当前 V6.2）
 - 上位依据：`CLAUDE.md`（项目开发执行规范）、`docs/engineering-roadmap.md`（工程长期路线）
 
@@ -140,9 +140,23 @@ cd D:/ai/dianshang && git status --short
 
 ## 6. 环境与工具约定
 
-### 6.1 任务文件的版本控制
+### 6.1 任务文件的版本控制与分支模型
 
-任务文件与契约文件应与代码同版本推进。分支推进顺序遵循 `CLAUDE.md`：`develop → staging → temp-prod → main`。
+任务文件与契约文件应与代码同版本推进。
+
+**分支模型（2026-10-12 更正为实际状态）**，同步登记于 `CLAUDE.md`：
+
+| 分支 | 角色 |
+|---|---|
+| `main` | 主线，仅合并已验证的切片 |
+| `feat/<slice-id>` | 功能分支；当前工作分支为 `feat/warehouse-mvp` |
+
+切片通过「定向测试 + 全量回归 + 复核结论」后合入 `main`。
+
+> **更正说明**：本契约 v1 曾记载推进顺序为 `develop → staging → temp-prod → main`。
+> 2026-10-12 规划方实测（`git rev-parse --verify` 逐个校验）确认该三分支**在仓库中从未建立**：
+> 本地与远程仅有 `feat/warehouse-mvp`、`feat/week2-rag-customer-service`、`main`。
+> 现按实际状态更正。如需引入多环境分支，应作为独立事项先建立分支，再改本表。
 
 ### 6.2 临时目录与产物隔离
 
@@ -187,3 +201,4 @@ cd D:/ai/dianshang && git status --short
 | 日期 | 版本 | 变更 | 来源 |
 |---|---|---|---|
 | 2026-10-11 | v1 | 首版建立，源自 P1 内容导出切片的复核暴露问题 | 本轮复核 |
+| 2026-10-12 | v1.1 | §6.1 分支模型更正为实际状态（功能分支 + `main`；`develop`/`staging`/`temp-prod` 从未建立）；状态更新为已在 `CLAUDE.md` 登记 | 规划方例行核查 |
