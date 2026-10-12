@@ -247,7 +247,37 @@ def cmd_seed_docs(args: list[str]) -> int:
     return 0
 
 
+_DEFAULT_ENQUEUE_CRAWL_WAIT_SECONDS = 60
+
+
+def _parse_enqueue_crawl_timeout(args: list[str], default: int = _DEFAULT_ENQUEUE_CRAWL_WAIT_SECONDS) -> int:
+    """解析 --timeout <seconds>；无效值或缺失时返回默认。
+
+    默认 60 秒用于覆盖其在 Windows 上约 12–17s 的会话建立/拆卸开销，
+    并对慢任务保留 ≥2x 余量。可通过 --timeout 覆盖（无上限检查，由调用方负责）。
+    """
+    if "--timeout" not in args:
+        return default
+    try:
+        idx = args.index("--timeout")
+        parsed = int(args[idx + 1])
+    except (ValueError, IndexError):
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
 def cmd_enqueue_crawl(args: list[str]) -> int:
+    """入队 fixture 采集任务并等待后台执行完成。
+
+    默认等待窗口 60 秒以容纳 Playwright 在 Windows 上 ~12–17s 的会话建立/拆卸
+    开销；可用 ``--timeout <seconds>`` 覆盖。等待超时且任务仍处于 ``running``
+    时会在输出中给出诊断信息，但退出码仍按现有语义"成功 → 0 / 其它 → 1"判定，
+    不允许把超时静默当成成功。
+    """
+    timeout_seconds = _parse_enqueue_crawl_timeout(args)
+
     _ensure_schema()
     fixture = Path(__file__).resolve().parent.parent / "fixtures" / "products.html"
     db = SessionLocal()
@@ -255,13 +285,17 @@ def cmd_enqueue_crawl(args: list[str]) -> int:
         workspace_id = _resolve_cli_workspace(db, args)
         job = submit_crawl_fixture(db, fixture_path=fixture, workspace_id=workspace_id)
         print(f"已入队: job_id={job.id}, status={job.status}")
-        wait_for_jobs(timeout=10)
+        wait_for_jobs(timeout=timeout_seconds)
         db.expire_all()
         final = db.get(CrawlJob, job.id)
         if final is None:
             print(f"任务查询失败: job_id={job.id}")
             return 1
         print(f"任务完成: status={final.status}, attempt={final.attempt}")
+        if final.status == "running":
+            print(
+                f"等待超时（{timeout_seconds}s）: 任务仍在 running。可加大 --timeout 或检查 Playwright 是否正常。"
+            )
         return 0 if final.status == "succeeded" else 1
     finally:
         db.close()
