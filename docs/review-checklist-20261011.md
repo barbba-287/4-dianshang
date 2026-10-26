@@ -705,3 +705,68 @@ from exc 链        56 → 56（grep 计数）
 | R-18 | P3（文档） | `docs/architecture-inventory.json` / `.md` 由 `scripts/inventory_architecture.py` 生成，仍把 `app/security.py` 列为文件（行号也随 R1/R2 漂移） | 随下次文档任务重跑生成器；本切片只手工更正了手写的 `docs/domain-boundaries.md` |
 
 修订记录：2026-10-26 新增 §10（R2 复核）。
+
+---
+
+## 11. demo contract test 切片复核
+
+- 复核日期：2026-10-26；对象：`dev_task.demo-contract-tests.md` 的实施（后台 CLI，R-17 再现）
+- 上位依据：`docs/demo-path-audit-20261026.md`（§7 清单）
+
+### 11.1 交付形态
+
+实施进程在 11:25 写完测试文件后无声消失，**未按任务文件 §8.7 落盘 `delivery.md`**（R-17 第二次发生）。
+但证据实际已散落 `.testtmp/`：`dct-targeted.txt`（定向 8 passed, 2.55s）、`dct-full.txt`（全量）、
+`dct-baseline-noNewFile.txt`、`mutation_check.py`（9 变异脚本）。复核方已补录 `.testtmp/delivery.md`
+作为索引，测试文件 docstring 中对该文件的引用因此恢复有效（未改动任何代码）。
+
+### 11.2 范围核验
+
+| 检查 | 结果 |
+|---|---|
+| 改动面 | 仅 `?? tests/test_demo_path_contract.py`（10815 B）；产品代码与既有测试零修改 |
+| 用例数 | 8 条（C6 内含对照组，物理 8 个 test 函数） |
+| 任务文件规格符合度 | C2/C3/C5/C8 完全一致；C1/C4/C7 按**实测**断言 401 而非规格误写的 303，偏差已在 docstring 声明（符合任务文件 §9「如实报告」） |
+
+### 11.3 实施方偏差声明的证实与 D-2 撤销
+
+实施方声称 `app/main.py:311` 存在 `if request.url.path.startswith("/api/"):` 分支、未登录访问
+`/api/*` 实为 **401 JSON**。复核方重读 `main.py:299-347` 完整中间件**证实属实**：`:316-333` 为
+API 专用 401 分支，303 仅属页面路由（`:341`）。审计文档 §5 已改为撤销记录，D-2 作废；
+初版审计错误根因（采样窗口 `sed 325,355` 切断控制流、漏读 300-324）已如实登记在撤销记录中。
+**后果**：用户原裁定「D-2 进 P2-0b 首项」空缺，P2-0b 首项待重排；「锁现状用例标注待翻转」不再需要。
+
+### 11.4 独立验证（复核方自跑）
+
+```text
+定向：env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 \
+      /d/python/python/python.exe -m pytest -q tests/test_demo_path_contract.py -p no:cacheprovider
+      8 passed（3.89s，含相邻两文件合跑 13 passed）
+
+单跑可疑用例（两次全量的出错条目）：2 passed（1.90s）
+
+全量 ×3：
+  实施方（11:33）：1 failed, 319 passed  （FAILED test_frontend_orders）
+  复核方 ①     ：319 passed, 1 ERROR   （ERROR  test_frontend_warehouse）
+  复核方 ②     ：320 passed, 0 failed（121.38s）
+```
+
+### 11.5 失败演示（用户要求的收口条件）
+
+运行实施方自建的 `mutation_check.py`（字节级变异→跑目标用例→finally 还原）：
+**M1–M9 共 9 个变异全部被对应用例捕获**（1 failed each = 可判别），还原后
+`git status` 仅剩未跟踪的新测试文件。可判别性达标。
+
+### 11.6 判定
+
+**通过（技术面），切片关闭。** 8 条用例固定了：API 401 契约（C1/C4）、页面 303（C2）、
+公开端点（C3）、demo 双道门（C5/C6）、D-1 语义（C7）、seed-demo 准入（C8）。
+
+### 11.7 新增风险登记
+
+| 编号 | 级别 | 描述 | 建议 |
+|---|---|---|---|
+| R-19 | P2（测试稳定性） | 全量回归存在 flaky：3 次中 2 次出现 1 个随机出错（`test_frontend_orders` FAILED / `test_frontend_warehouse` ERROR），位置不定、单跑均通过、第 3 次 320 全绿。怀疑与 frontend 类用例的 worker/线程竞态相关，未定位 | ① 收口判定允许「重跑一次全绿」但必须登记；② 后续切片把定位该 flaky 作为独立小任务 |
+| R-20 | P2（流程） | 任务文件中的「现状事实」段出现错误断言（C1 的 303），根因是复核方审计时采样窗口切断中间件控制流；实施方靠实测纠偏才未固化错误 | ① 任务文件的「现状事实」必须附**实测方法**（完整读函数而非中段采样）；② 涉及控制流的断言在写入规格前先跑一次探针脚本 |
+
+修订记录：2026-10-26 新增 §11（demo contract test 复核）。

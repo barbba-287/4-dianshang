@@ -13,10 +13,10 @@
 |---|---|
 | demo 身份能否绕过鉴权触达业务路由 | **不能**。115 个业务路由全部经过 `require_principal`；未经过的 5 个全是公开端点 |
 | `DEMO_MODE_ENABLED=true` + `EMPLOYEE_AUTH_ENABLED=true` 是否危险 | **不危险，但语义误导**：此组合下 demo 在鉴权上完全无效，唯一实际效果是放行 `seed-demo` CLI 命令（发现 D-1） |
-| 是否发现新的契约缺陷 | **是**。未登录访问 `/api/*` 返回 `303 → /login` 而非 401，且零测试覆盖（发现 D-2） |
+| 是否发现新的契约缺陷 | ~~发现 D-2（未登录访问 `/api/*` 返回 303）~~ **2026-10-26 复核撤销**：中间件 `app/main.py:311` 存在 `/api/` 前缀专用分支，未登录访问 `/api/*` 实际返回 **401 JSON**，契约正确。详见 §5 撤销记录 |
 | 是否发现测试环境问题 | **是**。测试读仓库外 `.env` 的 `SHOPIFY_*` 值，结果随本地环境漂移（发现 D-3） |
 
-处置建议：**不改产品代码**，先补 contract test 固定现状（8 条），再拍 D-1/D-2 的修法。
+处置建议（更新后）：**不改产品代码**，contract test 固定现状（8 条，已实施并复核通过，见 §7）。D-2 无需修复，P2-0b 首项空缺待重排。
 
 ---
 
@@ -95,9 +95,11 @@ else:                                                    # api_auth_enabled = Fa
         request.state.ctx = RequestContext(...)
 ```
 
-即 **demo 只在两种情况被挂到 `state.principal`**：
-1. `employee_auth_enabled=true` **且** 路径是公开路径；
-2. `employee_auth_enabled=false`（本意即"关闭鉴权"）。
+即 **demo 被挂到 `state.principal` 的全部情况**（含 2026-10-26 复核修正）：
+1. `/api/*` 且 `employee_auth_enabled=true`：demo/api_key/None 一律 **401**（`:316-333`），**不会挂载**；
+2. `/api/*` 且 `employee_auth_enabled=false`：`authenticate_api_key` 在 `api_auth_enabled=false` 时返回 demo principal（`identity.py:143`）→ **挂载**，能否过路由由 `require_principal` 第二道门决定；
+3. 页面路由且 `employee_auth_enabled=true`、非公开路径：无 session 时 **303**（`:341`），有 session 时挂 session principal；
+4. 页面路由且 `employee_auth_enabled=false`：demo principal 挂载（`:345`）。
 
 ### 3.3 纵深防御仍然存在
 
@@ -115,7 +117,7 @@ if principal.auth_type == "demo":
     raise DomainError(code="UNAUTHORIZED", message="请先登录", http_status=401)   # :156-161
 ```
 
-**双层结论：中间件是第一道门（303），`require_principal` 是第二道门（401）。** 两道门都依赖 `employee_auth_enabled` 这一开关，因此若该开关被误设为 false，鉴权整体失效——这是设计意图，不是缺陷，但**需要热开关旁的可观测性**（属 P2-0 范围）。
+**双层结论：对 `/api/*`，中间件 API 分支（`:316-333`）是第一道门（401 JSON），`require_principal` 是第二道门（401 DomainError，纵深防御）；对页面路由，第一道门是 303。** 两道门都依赖 `employee_auth_enabled` 这一开关，因此若该开关被误设为 false，鉴权整体失效——这是设计意图，不是缺陷，但**需要热开关旁的可观测性**（属 P2-0 范围）。
 
 ### 3.4 live 入口的守卫
 
@@ -153,19 +155,44 @@ if principal.auth_type == "demo":
 
 ---
 
-## 5. 发现 D-2：未登录访问 `/api/*` 返回 303 而非 401（P1，API 契约）
+## 5. ~~发现 D-2~~ 撤销记录（2026-10-26 复核）
 
-`app/main.py:341` 的 `RedirectResponse(status_code=303)` 对**页面路由与 API 路由一视同仁**，代码中没有任何 `/api/` 前缀判断。
+**原结论作废**：本审计初版称「未登录访问 `/api/*` 返回 303 而非 401」。复核证实该结论**错误**。
 
-因此：`GET /api/inventory` 未登录 → `303 Location: /login?next=/api/inventory`；若客户端跟随重定向，最终得到 **200 + 登录页 HTML**，而不是 401 JSON。
+**事实**：中间件 `app/main.py:299-347` 的完整结构是——
 
-影响面（P2 前需评估）：
-- 任何 API 客户端 / 监控探针 / Canary 脚本会把"未登录"误读为"成功返回 HTML"；
-- 与 R1 建立的统一错误契约（`{"detail": {"code", "message"}}`）不一致——这条路径绕过了 `DomainError` 体系。
+```python
+@app.middleware("http")
+async def request_context_middleware(request, call_next):
+    ...
+    if request.url.path.startswith("/api/"):                 # :311  ← API 专用分支
+        principal = session_principal or authenticate_api_key(...)
+        if settings.employee_auth_enabled and (
+            principal is None or getattr(principal, "auth_type", None) in ("demo", "api_key")
+        ):
+            response = JSONResponse(status_code=401, ...)    # :316-325  401 JSON
+            return response
+        if principal is None:
+            response = JSONResponse(status_code=401, ...)    # :326-333
+            return response
+        request.state.principal = principal
+    else:                                                    # :336  仅页面路由
+        ... 303 重定向逻辑（:341）...
+```
 
-**测试现状：0 覆盖。** `tests/` 下 12 处 `303` 断言全部是**登录成功后**的重定向（`POST /login` → 303），**没有一条测"未登录被拦"**。
+即 **`/api/*` 未登录 → 401 JSON（正确契约）；303 只属于页面路由**。
 
-已登记为待拍板项，本审计**不主张立即改产品代码**——先用 contract test 锁定现状，避免修复时误伤。
+**错误根因（如实登记）**：初版调研用 `sed -n '325,355p'` 采样中间件，窗口恰好从 `/api/` 分支的
+**尾部**（401 JSONResponse）开始，**漏读了 300-324**，把 `:326-333` 的 401 误认为
+`api_auth_enabled` 分支的一部分、把 `:336` 的 `else:` 当作整个非 API 路径的开头——控制流被采样窗口切断。
+教训：**读中间件这类分支结构必须从函数定义行读到函数尾，不能用中段窗口推断**。
+
+**下游修正**：
+- contract test（`tests/test_demo_path_contract.py`）C1/C4/C7 按**实测**断言 401 JSON，正确；实施方在交付说明中如实声明了偏差（任务文件 §4 规格写的是 303）。
+- §8 待拍板表中 D-2 行撤销；原「D-2 进 P2-0b 首项」的用户裁定随之空缺，P2-0b 首项待重排（候选：live 响应原样留存提前）。
+- 「锁现状的用例标注待翻转」不再需要——401 即正确行为，无翻转计划。
+
+**仍然成立的相邻事实**：303 语义只影响页面路由（浏览器 UX，合理）；`/api/*` 的 401 契约此前**零测试覆盖**，现由 C1/C4 固定。
 
 ---
 
@@ -195,13 +222,13 @@ os.environ["DEMO_MODE_ENABLED"] = "true"
 
 | # | 固定对象 | 类型 |
 |---|---|---|
-| 1 | 未登录 `GET /api/inventory` → 303 + `Location: /login?next=` | D-2 现状 |
+| 1 | 未登录 `GET /api/inventory` → **401 JSON**（原判 303，已按实测更正） | API 契约基线 |
 | 2 | 未登录 `GET /dashboard` → 303 | 页面路由基线 |
-| 3 | `/health`、`/ready` 未登录 → 200 | 公开端点基线 |
-| 4 | 未登录 `GET /api/external/shopify/capabilities` → 303 | live 入口匿名不可达 |
+| 3 | `/health`、`/ready` 未登录 → 200 / 非 303 | 公开端点基线 |
+| 4 | 未登录 `GET /api/external/shopify/capabilities` → 401；demo 身份（鉴权关）→ 第二道门 401 | live 入口匿名不可达 |
 | 5 | demo principal + `employee_auth_enabled=true` → `require_principal` 抛 401 | 第二道门 |
-| 6 | demo principal + `employee_auth_enabled=false` → `require_principal` 放行 | 第一道门 |
-| 7 | `DEMO_MODE_ENABLED=true` + `employee_auth_enabled=true` → 仍 303 | D-1 语义 |
+| 6 | demo principal + `employee_auth_enabled=false` + demo_mode → 放行；demo_mode 关 → 401 | 第一道门 |
+| 7 | `DEMO_MODE_ENABLED=true` + `employee_auth_enabled=true` → `/api` 401、页面 303 | D-1 语义 |
 | 8 | `cmd_seed_demo`：demo_mode=false → 2；workspace 无 `demo-` 前缀 → 2 | D-1 唯一真实作用 |
 
 ---
@@ -211,7 +238,7 @@ os.environ["DEMO_MODE_ENABLED"] = "true"
 | 编号 | 问题 | 选项 |
 |---|---|---|
 | D-1 | `DEMO_MODE_ENABLED` 与 `EMPLOYEE_AUTH_ENABLED` 并存语义 | A 启动告警 / B 拆分开关 |
-| D-2 | 未登录访问 `/api/*` 应 303 还是 401 | A 保持 303（前端无感）/ B API 前缀改 401 JSON（与错误契约一致） |
+| ~~D-2~~ | ~~未登录访问 `/api/*` 应 303 还是 401~~ | **撤销**（实测已是 401，契约正确） |
 | D-3 | 测试是否补齐 `SHOPIFY_*` 等开关 | A 补齐 / B 保持现状并记入 CI 说明 |
 
 ---
@@ -221,3 +248,4 @@ os.environ["DEMO_MODE_ENABLED"] = "true"
 | 日期 | 变更 |
 |---|---|
 | 2026-10-26 | 首版。依据 HEAD `632d1ab`；含 `.env` 泄露排查、店铺性质确认、demo 暴露面量化、D-1/D-2/D-3 三项发现 |
+| 2026-10-26 | **复核更正**：D-2 撤销（`main.py:311` 存在 `/api/` 前缀分支，未登录 API 实为 401 JSON）；初版因采样窗口切断控制流漏读 `:300-324`。§0/§3/§5/§7/§8 同步更正；contract test C1/C4/C7 按实测断言 401 |
