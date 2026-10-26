@@ -8,12 +8,13 @@ from hashlib import sha256
 import hmac
 import secrets
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import AuthSession, UserAccount, Warehouse, WarehouseAccess, WorkspaceMembership, Workspace
+from app.errors import DomainError
 
 ROLE_ADMIN = "admin"
 ROLE_OPERATIONS = "operations"
@@ -262,25 +263,25 @@ def require_principal(request: Request, *, permission: str | None = None, roles:
     if principal is None or (
         employee_auth_enabled and principal.auth_type in ("demo", "api_key")
     ):
-        raise HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": "请先登录"})
+        raise DomainError(code="UNAUTHORIZED", message="请先登录", http_status=401)
     if principal.workspace_id is None and principal.auth_type != "demo":
-        raise HTTPException(status_code=401, detail={"code": "WORKSPACE_CONTEXT_REQUIRED", "message": "工作空间上下文缺失"})
+        raise DomainError(code="WORKSPACE_CONTEXT_REQUIRED", message="工作空间上下文缺失", http_status=401)
     if principal.auth_type == "demo":
         if get_settings().demo_mode_enabled and not employee_auth_enabled:
             if roles:
-                raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "演示模式不可访问员工管理功能"})
+                raise DomainError(code="FORBIDDEN", message="演示模式不可访问员工管理功能", http_status=403)
             return principal
-        raise HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": "请先登录"})
+        raise DomainError(code="UNAUTHORIZED", message="请先登录", http_status=401)
     if principal.auth_type == "api_key" and not employee_auth_enabled:
         if permission and not principal.can(permission):
-            raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "API key scope 不足"})
+            raise DomainError(code="FORBIDDEN", message="API key scope 不足", http_status=403)
         if roles:
-            raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "API key 不能执行员工角色管理"})
+            raise DomainError(code="FORBIDDEN", message="API key 不能执行员工角色管理", http_status=403)
         return principal
     if permission and not principal.can(permission):
-        raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "没有执行此操作的权限"})
+        raise DomainError(code="FORBIDDEN", message="没有执行此操作的权限", http_status=403)
     if roles and not principal.has_role(*roles):
-        raise HTTPException(status_code=403, detail={"code": "FORBIDDEN", "message": "当前角色无权执行此操作"})
+        raise DomainError(code="FORBIDDEN", message="当前角色无权执行此操作", http_status=403)
     return principal
 
 
@@ -292,10 +293,10 @@ def validate_csrf(request: Request, db: Session) -> None:
     token = request.headers.get("X-CSRF-Token")
     cookie_token = request.cookies.get("dianshang_csrf")
     if not token or not cookie_token or not hmac.compare_digest(token, cookie_token):
-        raise HTTPException(status_code=403, detail={"code": "CSRF_INVALID", "message": "CSRF 校验失败"})
+        raise DomainError(code="CSRF_INVALID", message="CSRF 校验失败", http_status=403)
     session = db.get(AuthSession, principal.session_id) if principal.session_id else None
     if session is None or not hmac.compare_digest(_digest(token), session.csrf_token_hash):
-        raise HTTPException(status_code=403, detail={"code": "CSRF_INVALID", "message": "CSRF 校验失败"})
+        raise DomainError(code="CSRF_INVALID", message="CSRF 校验失败", http_status=403)
 
 
 def require_warehouse_access(
@@ -312,9 +313,10 @@ def require_warehouse_access(
     if principal.auth_type in ("demo", "api_key"):
         return
     if principal.workspace_id is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "WAREHOUSE_NOT_FOUND", "message": "仓库不存在"},
+        raise DomainError(
+            code="WAREHOUSE_NOT_FOUND",
+            message="仓库不存在",
+            http_status=404,
         )
     if db is not None:
         warehouse = db.get(Warehouse, warehouse_id)
@@ -323,15 +325,17 @@ def require_warehouse_access(
             or not warehouse.is_active
             or warehouse.workspace_id != principal.workspace_id
         ):
-            raise HTTPException(
-                status_code=404,
-                detail={"code": "WAREHOUSE_NOT_FOUND", "message": "仓库不存在"},
+            raise DomainError(
+                code="WAREHOUSE_NOT_FOUND",
+                message="仓库不存在",
+                http_status=404,
             )
     if principal.has_role(ROLE_ADMIN, ROLE_OPERATIONS):
         return
     if warehouse_id in principal.warehouse_ids:
         return
-    raise HTTPException(
-        status_code=404,
-        detail={"code": "WAREHOUSE_NOT_FOUND", "message": "仓库不存在"},
+    raise DomainError(
+        code="WAREHOUSE_NOT_FOUND",
+        message="仓库不存在",
+        http_status=404,
     )

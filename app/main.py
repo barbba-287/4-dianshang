@@ -19,7 +19,7 @@ import re
 import uuid
 from urllib.parse import quote
 
-from fastapi import Body, Depends, File, Form, FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi import Body, Depends, File, Form, FastAPI, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -57,6 +57,7 @@ from app.db import (
     get_db,
     init_db,
 )
+from app.errors import DomainError
 from app.importers import ParserError, detect_source_type
 from app.jobs import JobStatus
 from app.repository import (
@@ -347,8 +348,11 @@ async def request_context_middleware(request: Request, call_next):
         try:
             with get_db_session_for_health() as csrf_db:
                 validate_csrf(request, csrf_db)
-        except HTTPException as exc:
-            response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        except DomainError as exc:
+            response = JSONResponse(
+                status_code=exc.http_status,
+                content={"detail": {"code": exc.code, "message": exc.message}},
+            )
             response.headers["X-Request-ID"] = request_id
             return response
     try:
@@ -368,22 +372,36 @@ async def validation_exception_handler(_request: Request, exc: RequestValidation
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
+@app.exception_handler(DomainError)
+async def domain_error_handler(_request: Request, exc: DomainError):
+    """把领域异常映射为统一错误体：{"detail": {"code", "message"}}。
+
+    响应外形与迁移前 FastAPI 对 HTTPException 的默认处理逐字节一致。
+    """
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={"detail": {"code": exc.code, "message": exc.message}},
+    )
+
+
 @app.get("/ready")
 def ready() -> dict[str, str]:
     """依赖就绪检查，与只表示进程存活的 /health 分离。"""
     if not is_accepting_jobs():
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "WORKER_NOT_READY", "message": "后台任务服务未就绪"},
+        raise DomainError(
+            code="WORKER_NOT_READY",
+            message="后台任务服务未就绪",
+            http_status=503,
         )
     try:
         with get_db_session_for_health() as db:
             db.execute(text("SELECT 1"))
     except Exception:
         logger.exception("readiness database check failed")
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "DATABASE_NOT_READY", "message": "数据库未就绪"},
+        raise DomainError(
+            code="DATABASE_NOT_READY",
+            message="数据库未就绪",
+            http_status=503,
         )
     return {"status": "ready"}
 
@@ -441,9 +459,9 @@ def login(request: Request, login: str = Form(...), password: str = Form(...), w
             .order_by(WorkspaceMembership.id)
         ).all()
     if user is None or user.status != "active" or not verify_password(password, user.password_hash):
-        raise HTTPException(status_code=401, detail={"code": "INVALID_CREDENTIALS", "message": "账户或密码错误"})
+        raise DomainError(code="INVALID_CREDENTIALS", message="账户或密码错误", http_status=401)
     if len(memberships) == 0:
-        raise HTTPException(status_code=401, detail={"code": "WORKSPACE_NOT_AVAILABLE", "message": "账户没有可用工作空间"})
+        raise DomainError(code="WORKSPACE_NOT_AVAILABLE", message="账户没有可用工作空间", http_status=401)
     workspace = workspace.strip()
     if workspace:
         selected = [item for item in memberships if str(item.workspace_id) == workspace]
@@ -459,12 +477,12 @@ def login(request: Request, login: str = Form(...), password: str = Form(...), w
                 )
             ).all()
         if len(selected) != 1:
-            raise HTTPException(status_code=401, detail={"code": "INVALID_WORKSPACE", "message": "工作空间选择无效"})
+            raise DomainError(code="INVALID_WORKSPACE", message="工作空间选择无效", http_status=401)
         membership = selected[0]
     elif len(memberships) == 1:
         membership = memberships[0]
     else:
-        raise HTTPException(status_code=409, detail={"code": "WORKSPACE_SELECTION_REQUIRED", "message": "多工作空间账户必须明确选择工作空间"})
+        raise DomainError(code="WORKSPACE_SELECTION_REQUIRED", message="多工作空间账户必须明确选择工作空间", http_status=409)
     from app.db import backfill_legacy_workspace
     active_workspace_ids = db.scalars(
         select(Workspace.id).where(Workspace.status == "active").order_by(Workspace.id)
@@ -553,7 +571,7 @@ def admin_create_user(payload: AdminUserCreate, request: Request, db: Session = 
     try:
         return create_workspace_user(db, workspace_id=principal.workspace_id, login=payload.login, display_name=payload.display_name, password=payload.password, role=payload.role, warehouse_ids=payload.warehouse_ids)
     except ValueError as exc:
-        raise HTTPException(status_code=409 if str(exc).endswith("EXISTS") else 422, detail={"code": str(exc), "message": "账户或仓库范围无效"}) from exc
+        raise DomainError(code=str(exc), message="账户或仓库范围无效", http_status=409 if str(exc).endswith("EXISTS") else 422) from exc
 
 
 @app.post("/api/admin/users/{user_id}/warehouses/{warehouse_id}", status_code=204)
@@ -563,7 +581,7 @@ def admin_grant_warehouse(user_id: int, warehouse_id: int, request: Request, db:
     try:
         set_warehouse_access(db, workspace_id=principal.workspace_id, user_id=user_id, warehouse_id=warehouse_id, active=True)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": str(exc), "message": "账户或仓库不属于当前工作空间"}) from exc
+        raise DomainError(code=str(exc), message="账户或仓库不属于当前工作空间", http_status=422) from exc
 
 
 @app.delete("/api/admin/users/{user_id}/warehouses/{warehouse_id}", status_code=204)
@@ -573,7 +591,7 @@ def admin_revoke_warehouse(user_id: int, warehouse_id: int, request: Request, db
     try:
         set_warehouse_access(db, workspace_id=principal.workspace_id, user_id=user_id, warehouse_id=warehouse_id, active=False)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": str(exc), "message": "账户或仓库不属于当前工作空间"}) from exc
+        raise DomainError(code=str(exc), message="账户或仓库不属于当前工作空间", http_status=422) from exc
 
 @app.get("/api/admin/warehouses", response_model=list[WarehouseResponse])
 def admin_list_warehouses(request: Request, db: Session = Depends(get_db)):
@@ -591,7 +609,7 @@ def admin_bind_warehouse(warehouse_id: int, request: Request, db: Session = Depe
     except ValueError as exc:
         code = str(exc)
         status = 409 if code == "WAREHOUSE_ALREADY_BOUND" else 404
-        raise HTTPException(status_code=status, detail={"code": code, "message": "旧仓库绑定失败"}) from exc
+        raise DomainError(code=code, message="旧仓库绑定失败", http_status=status) from exc
 
 
 @app.get("/api/roles")
@@ -632,14 +650,14 @@ def admin_users_page(request: Request) -> HTMLResponse:
 def admin_deactivate_user(user_id: int, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, roles=(ROLE_ADMIN,))
     if principal.user_id == user_id:
-        raise HTTPException(status_code=409, detail={"code": "SELF_DEACTIVATE_FORBIDDEN", "message": "不能停用当前登录账户"})
+        raise DomainError(code="SELF_DEACTIVATE_FORBIDDEN", message="不能停用当前登录账户", http_status=409)
     from app.account_admin import set_user_status
     try:
         set_user_status(db, workspace_id=principal.workspace_id, user_id=user_id, active=False)
     except ValueError as exc:
         code = str(exc)
         status = 409 if code == "LAST_ADMIN_FORBIDDEN" else 404
-        raise HTTPException(status_code=status, detail={"code": code, "message": "账户状态更新失败"}) from exc
+        raise DomainError(code=code, message="账户状态更新失败", http_status=status) from exc
 
 
 @app.patch("/api/admin/users/{user_id}", response_model=AdminUserResponse)
@@ -651,7 +669,7 @@ def admin_update_user(user_id: int, payload: AdminUserPatch, request: Request, d
     except ValueError as exc:
         code = str(exc)
         status = 409 if code == "LAST_ADMIN_FORBIDDEN" else 422 if code in {"INVALID_USER_INPUT", "INVALID_ROLE"} else 404
-        raise HTTPException(status_code=status, detail={"code": code, "message": "账户或角色更新失败"}) from exc
+        raise DomainError(code=code, message="账户或角色更新失败", http_status=status) from exc
 
 
 @app.post("/api/admin/users/{user_id}/activate", status_code=204)
@@ -661,7 +679,7 @@ def admin_activate_user(user_id: int, request: Request, db: Session = Depends(ge
     try:
         set_user_status(db, workspace_id=principal.workspace_id, user_id=user_id, active=True)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail={"code": str(exc), "message": "账户不存在"}) from exc
+        raise DomainError(code=str(exc), message="账户不存在", http_status=404) from exc
 
 
 @app.post("/api/admin/users/{user_id}/reset-password", status_code=204)
@@ -671,7 +689,7 @@ def admin_reset_password(user_id: int, payload: AdminUserPasswordReset, request:
     try:
         reset_user_password(db, workspace_id=principal.workspace_id, user_id=user_id, password=payload.password)
     except ValueError as exc:
-        raise HTTPException(status_code=422 if str(exc).endswith("SHORT") else 404, detail={"code": str(exc), "message": "密码或账户无效"}) from exc
+        raise DomainError(code=str(exc), message="密码或账户无效", http_status=422 if str(exc).endswith("SHORT") else 404) from exc
 
 
 
@@ -682,7 +700,7 @@ def enqueue_crawl(
 ) -> CrawlJob:
     principal = require_principal(request, permission="catalog.write")
     if principal.workspace_id is None:
-        raise HTTPException(status_code=503, detail={"code": "WORKSPACE_CONTEXT_REQUIRED", "message": "工作空间上下文缺失"})
+        raise DomainError(code="WORKSPACE_CONTEXT_REQUIRED", message="工作空间上下文缺失", http_status=503)
     fixture = Path(__file__).resolve().parent.parent / "fixtures" / "products.html"
     job = submit_crawl_fixture(db, fixture_path=fixture, keyword="fixture", workspace_id=principal.workspace_id)
     return job
@@ -704,7 +722,7 @@ def get_crawl_job(job_id: int, request: Request, db: Session = Depends(get_db)) 
     principal = require_principal(request, permission="catalog.read")
     job = db.scalar(select(CrawlJob).where(CrawlJob.id == job_id, CrawlJob.workspace_id == principal.workspace_id))
     if job is None:
-        raise HTTPException(status_code=404, detail={"code": "JOB_NOT_FOUND", "message": "任务不存在"})
+        raise DomainError(code="JOB_NOT_FOUND", message="任务不存在", http_status=404)
     return job
 
 
@@ -713,7 +731,7 @@ def cancel_crawl_job(job_id: int, request: Request, db: Session = Depends(get_db
     principal = require_principal(request, permission="catalog.write")
     job = request_cancel_job(db, job_id=job_id, workspace_id=principal.workspace_id)
     if job is None:
-        raise HTTPException(status_code=404, detail={"code": "JOB_NOT_FOUND", "message": "任务不存在"})
+        raise DomainError(code="JOB_NOT_FOUND", message="任务不存在", http_status=404)
     return job
 
 
@@ -737,14 +755,15 @@ async def upload_document(
     立即返回任务 ID，实际解析在后台 executor 中执行。
     """
     if file is None:
-        raise HTTPException(status_code=400, detail={"code": "NO_FILE", "message": "未提供文件"})
+        raise DomainError(code="NO_FILE", message="未提供文件", http_status=400)
 
     try:
         source_type = detect_source_type(file.filename, file.content_type)
     except ParserError as exc:
-        raise HTTPException(
-            status_code=415,
-            detail={"code": exc.code, "message": exc.message},
+        raise DomainError(
+            code=exc.code,
+            message=exc.message,
+            http_status=415,
         ) from exc
 
     content = await file.read()
@@ -760,9 +779,10 @@ async def upload_document(
         )
     except (StorageError, ParserError) as exc:
         status_code = 413 if getattr(exc, "code", "") == "FILE_TOO_LARGE" else 415
-        raise HTTPException(
-            status_code=status_code,
-            detail={"code": exc.code, "message": exc.message},
+        raise DomainError(
+            code=exc.code,
+            message=exc.message,
+            http_status=status_code,
         ) from exc
 
     sha = content_sha256(content)
@@ -841,8 +861,10 @@ def list_document_versions(
     principal = require_principal(request, permission="knowledge.read")
     document = db.scalar(select(Document).where(Document.id == document_id, Document.workspace_id == principal.workspace_id))
     if document is None:
-        raise HTTPException(
-            status_code=404, detail={"code": "DOCUMENT_NOT_FOUND", "message": "文档不存在"}
+        raise DomainError(
+            code="DOCUMENT_NOT_FOUND",
+            message="文档不存在",
+            http_status=404,
         )
     versions = list_versions_for_document(db, document_id=document_id, workspace_id=principal.workspace_id)
     items: list[DocumentVersionResponse] = []
@@ -1085,7 +1107,7 @@ def operator_assistant(payload: AgentAssistantRequest, request: Request) -> Agen
         traces=[AgentAssistantTrace(tool=t.tool, input=t.input, ok=t.result.ok, output=t.result.output, error_code=t.result.error_code, duration_ms=t.result.duration_ms) for t in result.traces],
     )
 
-def _warehouse_error(exc: ValueError) -> HTTPException:
+def _warehouse_error(exc: ValueError) -> DomainError:
     code = str(exc)
     status = 404 if code.endswith("NOT_FOUND") else 409 if code.endswith(("EXISTS", "RECEIVED", "STATE")) else 422
     messages = {
@@ -1103,7 +1125,7 @@ def _warehouse_error(exc: ValueError) -> HTTPException:
         "IDEMPOTENCY_KEY_REQUIRED": "必须提供 Idempotency-Key",
         "INVALID_INBOUND_STATE": "当前入库单状态不允许此操作",
     }
-    return HTTPException(status_code=status, detail={"code": code, "message": messages.get(code, "仓储操作失败")})
+    return DomainError(code=code, message=messages.get(code, "仓储操作失败"), http_status=status)
 
 
 @app.post("/api/skus", response_model=ProductSkuResponse, status_code=201)
@@ -1304,7 +1326,7 @@ def save_inventory_policy(payload: InventoryPolicyCreate, request: Request, db: 
     except ValueError as exc:
         code = str(exc)
         status = 404 if code.endswith("NOT_FOUND") else 422
-        raise HTTPException(status_code=status, detail={"code": code, "message": "库存策略无效"}) from exc
+        raise DomainError(code=code, message="库存策略无效", http_status=status) from exc
 
 
 @app.post("/api/inventory/alerts/refresh", response_model=list[AlertResponse])
@@ -1331,7 +1353,7 @@ def acknowledge_inventory_alert(alert_id: int, request: Request, db: Session = D
     from app.alerts import acknowledge_alert
     alert = acknowledge_alert(db, workspace_id=principal.workspace_id, alert_id=alert_id)
     if alert is None:
-        raise HTTPException(status_code=404, detail={"code": "ALERT_NOT_FOUND", "message": "告警不存在"})
+        raise DomainError(code="ALERT_NOT_FOUND", message="告警不存在", http_status=404)
     return alert
 
 
@@ -1339,7 +1361,7 @@ def acknowledge_inventory_alert(alert_id: int, request: Request, db: Session = D
 def crawl_fixture(request: Request, db: Session = Depends(get_db)) -> CrawlJob:
     principal = require_principal(request, permission="catalog.write")
     if principal.workspace_id is None:
-        raise HTTPException(status_code=503, detail={"code": "WORKSPACE_CONTEXT_REQUIRED", "message": "工作空间上下文缺失"})
+        raise DomainError(code="WORKSPACE_CONTEXT_REQUIRED", message="工作空间上下文缺失", http_status=503)
     """第一周同步入口：直接执行 fixture 采集并写入。保留用于演示。"""
     job = start_job(db, source="fixture", keyword="fixture", workspace_id=principal.workspace_id)
     try:
@@ -1351,9 +1373,10 @@ def crawl_fixture(request: Request, db: Session = Depends(get_db)) -> CrawlJob:
         job = db.get(CrawlJob, job.id)
         if job is not None:
             fail_job(db, job, error_code=exc.code, message=exc.message)
-        raise HTTPException(
-            status_code=422,
-            detail={"code": exc.code, "message": exc.message},
+        raise DomainError(
+            code=exc.code,
+            message=exc.message,
+            http_status=422,
         ) from exc
 
 
@@ -1384,7 +1407,7 @@ def operations_today(
     except ValueError as exc:
         code = str(exc)
         status = 404 if code == "WORKSPACE_NOT_FOUND" else 422
-        raise HTTPException(status_code=status, detail={"code": code, "message": "运营待办查询参数无效"}) from exc
+        raise DomainError(code=code, message="运营待办查询参数无效", http_status=status) from exc
 
 
 @app.get("/api/operations/today/export")
@@ -1414,7 +1437,7 @@ def export_operations_today(
     except ValueError as exc:
         code = str(exc)
         status = 404 if code == "WORKSPACE_NOT_FOUND" else 422
-        raise HTTPException(status_code=status, detail={"code": code, "message": "运营待办导出参数无效"}) from exc
+        raise DomainError(code=code, message="运营待办导出参数无效", http_status=status) from exc
 
     def values(raw: str | None) -> set[str] | None:
         if raw is None or not raw.strip():
@@ -1470,14 +1493,14 @@ def export_operations_today_xlsx(
     try:
         from app.exports import operations_todo_xlsx
     except ImportError as exc:
-        raise HTTPException(status_code=503, detail={"code": "EXPORT_XLSX_UNAVAILABLE", "message": "Excel 导出依赖不可用，请联系管理员"}) from exc
+        raise DomainError(code="EXPORT_XLSX_UNAVAILABLE", message="Excel 导出依赖不可用，请联系管理员", http_status=503) from exc
 
     try:
         body = build_operations_today(db, workspace_id=principal.workspace_id, warehouse_ids=warehouse_ids, limit=limit)
     except ValueError as exc:
         code = str(exc)
         status = 404 if code == "WORKSPACE_NOT_FOUND" else 422
-        raise HTTPException(status_code=status, detail={"code": code, "message": "运营待办导出参数无效"}) from exc
+        raise DomainError(code=code, message="运营待办导出参数无效", http_status=status) from exc
 
     def values(raw: str | None) -> set[str] | None:
         if raw is None or not raw.strip():
@@ -1498,7 +1521,7 @@ def export_operations_today_xlsx(
         content, export_meta = operations_todo_xlsx(items)
     except Exception as exc:
         logger.exception("operations XLSX export generation failed")
-        raise HTTPException(status_code=500, detail={"code": "EXPORT_XLSX_FAILED", "message": "Excel 文件生成失败，请稍后重试"}) from exc
+        raise DomainError(code="EXPORT_XLSX_FAILED", message="Excel 文件生成失败，请稍后重试", http_status=500) from exc
     filename = f"今日待办清单-{body['as_of']:%Y.%m.%d}.xlsx"
     filename_ascii = f"operations-today-{body['as_of']:%Y.%m.%d}.xlsx"
     from fastapi.responses import Response
@@ -1543,7 +1566,7 @@ def list_external_orders(
         return list_orders(db, workspace_id=principal.workspace_id, page=page, page_size=page_size, platform=platform, account_ref=account_ref, store_ref=store_ref, order_status=order_status, fulfillment_view=fulfillment_view, keyword=keyword, date_from=date_from, date_to=date_to)
     except ValueError as exc:
         code = str(exc)
-        raise HTTPException(status_code=422, detail={"code": code, "message": "订单查询参数无效"}) from exc
+        raise DomainError(code=code, message="订单查询参数无效", http_status=422) from exc
 
 
 @app.get("/api/orders/fulfillment-proposal.xlsx")
@@ -1562,13 +1585,13 @@ def export_fulfillment_proposal(
     """Export paid external-order facts as a manual-only fulfillment proposal."""
     principal = require_principal(request, permission="inventory.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     if order_status not in (None, "paid"):
-        raise HTTPException(status_code=422, detail={"code": "FULFILLMENT_PROPOSAL_STATUS_INVALID", "message": "待发清单只接受外部已支付订单"})
+        raise DomainError(code="FULFILLMENT_PROPOSAL_STATUS_INVALID", message="待发清单只接受外部已支付订单", http_status=422)
     from app.order_workbench import get_orders_with_lines
     from app.exports import fulfillment_proposal_xlsx
     try:
         result = get_orders_with_lines(db, workspace_id=principal.workspace_id, order_status="paid", platform=platform, account_ref=account_ref, store_ref=store_ref, keyword=keyword, date_from=date_from, date_to=date_to, limit=page_size)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": str(exc), "message": "订单导出筛选参数无效"}) from exc
+        raise DomainError(code=str(exc), message="订单导出筛选参数无效", http_status=422) from exc
     orders = result["items"]
     sources = {order["source_mode"] for order in orders}
     completeness = "unknown" if not orders else "complete" if all(order["data_completeness"] == "complete" for order in orders) else "partial"
@@ -1578,7 +1601,7 @@ def export_fulfillment_proposal(
         content, export_meta = fulfillment_proposal_xlsx(orders, meta=meta)
     except Exception as exc:
         logger.exception("fulfillment proposal XLSX generation failed")
-        raise HTTPException(status_code=500, detail={"code": "FULFILLMENT_PROPOSAL_EXPORT_FAILED", "message": "待发清单生成失败，请稍后重试"}) from exc
+        raise DomainError(code="FULFILLMENT_PROPOSAL_EXPORT_FAILED", message="待发清单生成失败，请稍后重试", http_status=500) from exc
     filename = f"待发清单-人工履约-{datetime.utcnow():%Y.%m.%d}.xlsx"
     filename_ascii = f"fulfillment-proposal-{datetime.utcnow():%Y.%m.%d}.xlsx"
     from fastapi.responses import Response
@@ -1602,7 +1625,7 @@ def get_external_order(order_id: int, request: Request, db: Session = Depends(ge
     from app.order_workbench import get_order
     result = get_order(db, workspace_id=principal.workspace_id, order_id=order_id)
     if result is None:
-        raise HTTPException(status_code=404, detail={"code": "ORDER_NOT_FOUND", "message": "订单不存在"})
+        raise DomainError(code="ORDER_NOT_FOUND", message="订单不存在", http_status=404)
     result["lines"] = [ExternalOrderLineResponse.model_validate(line) for line in result["lines"]]
     return result
 
@@ -1623,7 +1646,7 @@ def create_ticket_api(payload: TicketCreateRequest, request: Request, db: Sessio
         ticket = create_ticket(db, workspace_id=principal.workspace_id, subject=payload.subject, priority=payload.priority, issue_type=payload.issue_type, description=payload.description, sku_ref=payload.sku_ref, customer_ref=payload.customer_ref, external_order_ref=payload.external_order_ref, actor=principal.subject, idempotency_key=request.headers.get("Idempotency-Key"))
         return ticket
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": str(exc), "message": "工单创建失败"}) from exc
+        raise DomainError(code=str(exc), message="工单创建失败", http_status=422) from exc
 
 
 @app.get("/api/tickets/{ticket_id}")
@@ -1631,7 +1654,7 @@ def get_ticket_api(ticket_id: int, request: Request, db: Session = Depends(get_d
     principal = require_principal(request, permission="knowledge.read")
     from app.tickets import ticket_detail
     result = ticket_detail(db, workspace_id=principal.workspace_id, ticket_id=ticket_id)
-    if result is None: raise HTTPException(status_code=404, detail={"code":"TICKET_NOT_FOUND","message":"工单不存在"})
+    if result is None: raise DomainError(code="TICKET_NOT_FOUND", message="工单不存在", http_status=404)
     return {"ticket": TicketResponse.model_validate(result["ticket"]), "events": [{"id": e.id, "event_type": e.event_type, "body": e.body, "author": e.author, "created_at": e.created_at, "source_mode": e.source_mode, "simulated": e.simulated} for e in result["events"]], "assignments": [{"assignee": a.assignee, "actor": a.actor, "created_at": a.created_at, "ended_at": a.ended_at} for a in result["assignments"]], "links": [{"entity_type": l.entity_type, "entity_id": l.entity_id, "relation": l.relation} for l in result["links"]]}
 
 
@@ -1642,7 +1665,7 @@ def add_ticket_event_api(ticket_id: int, payload: TicketEventRequest, request: R
     try:
         event = add_event(db, workspace_id=principal.workspace_id, ticket_id=ticket_id, body=payload.body, author=principal.subject, idempotency_key=request.headers.get("Idempotency-Key"))
         return {"id": event.id, "event_type": event.event_type, "body": event.body, "created_at": event.created_at}
-    except ValueError as exc: raise HTTPException(status_code=422, detail={"code":str(exc),"message":"工单事件失败"}) from exc
+    except ValueError as exc: raise DomainError(code=str(exc), message="工单事件失败", http_status=422) from exc
 
 
 @app.post("/api/tickets/{ticket_id}/transition", response_model=TicketResponse)
@@ -1650,7 +1673,7 @@ def transition_ticket_api(ticket_id: int, payload: TicketTransitionRequest, requ
     principal = require_principal(request, permission="knowledge.write", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     from app.tickets import transition_ticket
     try: return transition_ticket(db, workspace_id=principal.workspace_id, ticket_id=ticket_id, target=payload.target, actor=principal.subject, expected_version=payload.expected_version, idempotency_key=request.headers.get("Idempotency-Key") or "")
-    except ValueError as exc: raise HTTPException(status_code=409 if "CONFLICT" in str(exc) or "TRANSITION" in str(exc) else 422, detail={"code":str(exc),"message":"工单状态更新失败"}) from exc
+    except ValueError as exc: raise DomainError(code=str(exc), message="工单状态更新失败", http_status=409 if "CONFLICT" in str(exc) or "TRANSITION" in str(exc) else 422) from exc
 
 
 @app.post("/api/tickets/{ticket_id}/assign", response_model=TicketResponse)
@@ -1658,7 +1681,7 @@ def assign_ticket_api(ticket_id: int, payload: TicketAssignRequest, request: Req
     principal = require_principal(request, permission="knowledge.write", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     from app.tickets import assign_ticket
     try: return assign_ticket(db, workspace_id=principal.workspace_id, ticket_id=ticket_id, assignee=payload.assignee, actor=principal.subject, expected_version=payload.expected_version, idempotency_key=request.headers.get("Idempotency-Key") or "")
-    except ValueError as exc: raise HTTPException(status_code=409 if "CONFLICT" in str(exc) else 422, detail={"code":str(exc),"message":"工单分配失败"}) from exc
+    except ValueError as exc: raise DomainError(code=str(exc), message="工单分配失败", http_status=409 if "CONFLICT" in str(exc) else 422) from exc
 
 
 @app.get("/api/dashboard/summary", response_model=DashboardSummaryResponse)
@@ -1678,7 +1701,7 @@ def dashboard_summary(
         from app.db import ProductSku
         sku = db.scalar(select(ProductSku).where(ProductSku.id == sku_id, ProductSku.workspace_id == principal.workspace_id, ProductSku.is_active.is_(True)))
         if sku is None:
-            raise HTTPException(status_code=404, detail={"code": "SKU_NOT_FOUND", "message": "SKU 不存在"})
+            raise DomainError(code="SKU_NOT_FOUND", message="SKU 不存在", http_status=404)
     from app.analytics_queries import AnalyticsQueryService
     return AnalyticsQueryService(db).dashboard_summary(
         workspace_id=principal.workspace_id,
@@ -1713,7 +1736,7 @@ def shopify_preview(payload: ShopifyPreviewRequest, request: Request):
     from app.platform_adapters.shopify import ShopifyFixtureTransport, ShopifyLiveTransport, ShopifyReadOnlyAdapter
     if payload.live:
         if not (settings.shopify_live_enabled and settings.shopify_store_domain and settings.shopify_access_token):
-            raise HTTPException(status_code=409, detail={"code": "SHOPIFY_LIVE_NOT_CONFIGURED", "message": "Shopify live 未配置店铺、Token 或启用开关"})
+            raise DomainError(code="SHOPIFY_LIVE_NOT_CONFIGURED", message="Shopify live 未配置店铺、Token 或启用开关", http_status=409)
         transport = ShopifyLiveTransport(settings.shopify_store_domain, settings.shopify_access_token, settings.shopify_api_version, settings.shopify_request_timeout_seconds, settings.shopify_max_retries)
         adapter = ShopifyReadOnlyAdapter(transport, live_enabled=True, simulated=False, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
     else:
@@ -1728,14 +1751,14 @@ def shopify_sync(request: Request, db: Session = Depends(get_db), resources: str
     principal = require_principal(request, permission="inventory.write")
     settings = get_settings()
     if not (settings.shopify_live_enabled and settings.shopify_store_domain and settings.shopify_access_token):
-        raise HTTPException(status_code=409, detail={"code": "SHOPIFY_LIVE_NOT_CONFIGURED", "message": "Shopify live 未配置"})
+        raise DomainError(code="SHOPIFY_LIVE_NOT_CONFIGURED", message="Shopify live 未配置", http_status=409)
     from app.platform_adapters.shopify import ShopifyLiveTransport, ShopifyReadOnlyAdapter
     from app.external_orders import ensure_external_account, ingest_orders
     from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, ImportStats, ingest_inventory
     selected = [item.strip() for item in resources.split(",") if item.strip()]
     allowed = {"orders", "inventory"}
     if not selected or not set(selected).issubset(allowed):
-        raise HTTPException(status_code=422, detail={"code": "SHOPIFY_RESOURCE_INVALID", "message": "当前同步只支持 orders/inventory"})
+        raise DomainError(code="SHOPIFY_RESOURCE_INVALID", message="当前同步只支持 orders/inventory", http_status=422)
     transport = ShopifyLiveTransport(settings.shopify_store_domain, settings.shopify_access_token, settings.shopify_api_version, settings.shopify_request_timeout_seconds, settings.shopify_max_retries)
     adapter = ShopifyReadOnlyAdapter(transport, live_enabled=True, simulated=False, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
     account_ref = settings.shopify_store_domain
@@ -1821,7 +1844,7 @@ def external_orders_preview(payload: ExternalOrderPreviewRequest, request: Reque
     try:
         records = load_orders(payload.content, platform=payload.platform, source_mode=payload.source_mode)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
     return ExternalOrderPreviewResponse(
         platform=payload.platform, source_mode=payload.source_mode, simulated=True,
         live_enabled=False, normalized_rows=[record.as_dict() for record in records],
@@ -1849,11 +1872,11 @@ def external_orders_ingest(payload: ExternalOrderIngestRequest, request: Request
     except ValueError as exc:
         if run is not None:
             fail_sync_run(db, run, exc)
-        raise HTTPException(status_code=422, detail={"code": str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
     except Exception as exc:
         if run is not None:
             fail_sync_run(db, run, exc)
-        raise HTTPException(status_code=500, detail={"code": "EXTERNAL_SYNC_FAILED", "message": "外部订单同步失败"}) from exc
+        raise DomainError(code="EXTERNAL_SYNC_FAILED", message="外部订单同步失败", http_status=500) from exc
     return ExternalOrderIngestResponse(
         platform=payload.platform, source_mode=payload.source_mode, simulated=True, live_enabled=False,
         total=result.total, inserted=result.inserted, updated=result.updated, no_op=result.no_op,
@@ -1888,7 +1911,7 @@ def save_external_product_mapping(payload: ExternalProductMappingRequest, reques
     except ValueError as exc:
         code = str(exc)
         status = 404 if code.endswith("NOT_FOUND") else 422
-        raise HTTPException(status_code=status, detail={"code": code, "message": "外部 SKU 映射无效"}) from exc
+        raise DomainError(code=code, message="外部 SKU 映射无效", http_status=status) from exc
 
 
 @app.get("/api/external/sales/daily", response_model=DailySkuSalePage)
@@ -1907,21 +1930,21 @@ def external_daily_sales(
 ):
     principal = require_principal(request, permission="inventory.read")
     if date_from and date_to and date_from > date_to:
-        raise HTTPException(status_code=422, detail={"code": "INVALID_DATE_RANGE", "message": "起始日期不能晚于结束日期"})
+        raise DomainError(code="INVALID_DATE_RANGE", message="起始日期不能晚于结束日期", http_status=422)
     from app.external_orders import list_daily_sales
     rows, total = list_daily_sales(db, workspace_id=principal.workspace_id, platform=platform, account_ref=account_ref, store_ref=store_ref, external_sku=external_sku, internal_sku_id=internal_sku_id, start=date_from, end=date_to, limit=page_size, offset=(page - 1) * page_size)
     return DailySkuSalePage(items=rows, page=page, page_size=page_size, total=total)
 
 
-def _replenishment_error(exc: ValueError) -> HTTPException:
+def _replenishment_error(exc: ValueError) -> DomainError:
     code = str(exc)
     if str(exc) == "IDEMPOTENCY_KEY_REQUIRED":
-        return HTTPException(status_code=422, detail={"code": str(exc), "message": "必须提供 Idempotency-Key"})
+        return DomainError(code=str(exc), message="必须提供 Idempotency-Key", http_status=422)
     special = {"OPEN_SUGGESTION_EXISTS", "IDEMPOTENCY_KEY_REUSE", "SUGGESTION_VERSION_CONFLICT", "INVALID_SUGGESTION_STATE", "SUGGESTION_NOT_READY", "MIXED_WAREHOUSE", "SUGGESTION_ALREADY_SUBMITTED", "SUGGESTION_ALREADY_IN_PURCHASE_REQUEST", "INVALID_PURCHASE_REQUEST_STATE", "PURCHASE_REQUEST_VERSION_CONFLICT", "SUGGESTION_STALE"}
     status = 404 if code.endswith("NOT_FOUND") else 409 if code in special else 422
     if code in {"INVALID_EVALUATION_WINDOW", "EVALUATION_WINDOW_BEFORE_SUGGESTION", "SUGGESTION_DATA_INCOMPLETE"}:
         status = 422
-    return HTTPException(status_code=status, detail={"code": code, "message": "补货决策操作失败"})
+    return DomainError(code=code, message="补货决策操作失败", http_status=status)
 
 
 def _purchase_request_response(db: Session, request_record):
@@ -2052,7 +2075,7 @@ def product_quadrant(
     except AnalyticsQueryError as exc:
         code = exc.code
         status = 422 if code.endswith("WINDOW") or code.endswith("RANGE") else 404
-        raise HTTPException(status_code=status, detail={"code": code, "message": "商品四象限参数无效"}) from exc
+        raise DomainError(code=code, message="商品四象限参数无效", http_status=status) from exc
     return ProductQuadrantResponse(
         items=[ProductQuadrantItem.model_validate(item) for item in summary.pop("items")],
         **summary,
@@ -2204,7 +2227,7 @@ def get_purchase_request(request_id: int, request: Request, db: Session = Depend
     principal = require_principal(request, permission="purchase.read")
     from app.db import PurchaseRequest
     result = db.scalar(select(PurchaseRequest).where(PurchaseRequest.id == request_id, PurchaseRequest.workspace_id == principal.workspace_id))
-    if result is None: raise HTTPException(status_code=404, detail={"code": "PURCHASE_REQUEST_NOT_FOUND", "message": "采购申请不存在"})
+    if result is None: raise DomainError(code="PURCHASE_REQUEST_NOT_FOUND", message="采购申请不存在", http_status=404)
     require_warehouse_access(principal, result.warehouse_id, db=db)
     return _purchase_request_response(db, result)
 
@@ -2241,7 +2264,7 @@ def external_fixture_sync(payload: FixtureSyncRequest, request: Request, db: Ses
             source_mode=payload.source_mode,
         )
     except SyncApplicationError as exc:
-        raise HTTPException(status_code=422, detail={"code": exc.code, "message": exc.message}) from exc
+        raise DomainError(code=exc.code, message=exc.message, http_status=422) from exc
 
     return FixtureSyncResponse(
         platform=payload.platform,
@@ -2260,7 +2283,7 @@ def get_external_sync_run(run_id: str, request: Request, db: Session = Depends(g
     from app.external_sync import resource_status, retryable_resources
     run = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.run_id == run_id, ExternalSyncRun.workspace_id == principal.workspace_id))
     if run is None:
-        raise HTTPException(status_code=404, detail={"code": "SYNC_RUN_NOT_FOUND", "message": "同步运行不存在"})
+        raise DomainError(code="SYNC_RUN_NOT_FOUND", message="同步运行不存在", http_status=404)
     return _external_sync_run_response(run)
 
 
@@ -2288,9 +2311,9 @@ def retry_external_sync_run(run_id: str, payload: ExternalSyncRetryRequest, requ
     principal = require_principal(request, permission="catalog.write")
     key = request.headers.get("Idempotency-Key")
     if not key:
-        raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供 Idempotency-Key"})
+        raise DomainError(code="IDEMPOTENCY_KEY_REQUIRED", message="必须提供 Idempotency-Key", http_status=422)
     if len(key) > 128:
-        raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_TOO_LONG", "message": "Idempotency-Key 超过长度限制"})
+        raise DomainError(code="IDEMPOTENCY_KEY_TOO_LONG", message="Idempotency-Key 超过长度限制", http_status=422)
     from app.sync_application import SyncApplicationError, SyncApplicationService
 
     try:
@@ -2311,7 +2334,7 @@ def retry_external_sync_run(run_id: str, payload: ExternalSyncRetryRequest, requ
             "SYNC_RETRY_PERSIST_FAILED": 500,
         }
         status_code = status_by_code.get(exc.code, 422)
-        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": exc.message}) from exc
+        raise DomainError(code=exc.code, message=exc.message, http_status=status_code) from exc
 
     response = _external_sync_run_response(result["run"])
     if result["replayed"]:
@@ -2375,9 +2398,9 @@ def taobao_preview(payload: TaobaoPreviewRequest, request: Request):
         adapter.live_enabled = True
         result = preview_adapter(adapter, account_ref=payload.account_ref, store_ref=payload.store_ref, resource=payload.resource, max_pages=payload.max_pages)
     except AdapterError as exc:
-        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
+        raise DomainError(code=exc.code, message=str(exc), http_status=422) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": "TAOBAO_FIELD_INVALID", "message": str(exc)}) from exc
+        raise DomainError(code="TAOBAO_FIELD_INVALID", message=str(exc), http_status=422) from exc
     return TaobaoPreviewResponse(
         platform="taobao", resource=payload.resource, read_only=True,
         live_enabled=False, simulated=True, total=result["total"],
@@ -2392,7 +2415,7 @@ def external_inventory_preview(payload: ExternalInventoryPreviewRequest, request
     try:
         records = load_records(payload.content, platform=payload.platform, source_mode=payload.source_mode)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
     return ExternalInventoryPreviewResponse(
         platform=payload.platform,
         source_mode=payload.source_mode,
@@ -2419,7 +2442,7 @@ def external_inventory_ingest(payload: ExternalInventoryIngestRequest, request: 
         )
     except SyncApplicationError as exc:
         status_code = 500 if exc.code == "EXTERNAL_SYNC_FAILED" else 422
-        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": exc.message}) from exc
+        raise DomainError(code=exc.code, message=exc.message, http_status=status_code) from exc
     return ExternalInventoryIngestResponse(**inventory_response_data(result))
 
 
@@ -2438,11 +2461,11 @@ def external_events_ingest(payload: ExternalEventIngestRequest, request: Request
     except ValueError as exc:
         if 'run' in locals() and run is not None:
             fail_sync_run(db, run, exc)
-        raise HTTPException(status_code=422, detail={"code": str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", "message": str(exc)}) from exc
+        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
     except Exception as exc:
         if 'run' in locals() and run is not None:
             fail_sync_run(db, run, exc)
-        raise HTTPException(status_code=500, detail={"code": "EXTERNAL_SYNC_FAILED", "message": "外部事件同步失败"}) from exc
+        raise DomainError(code="EXTERNAL_SYNC_FAILED", message="外部事件同步失败", http_status=500) from exc
     return ExternalEventIngestResponse(platform=payload.platform, inserted=result.inserted, no_op=result.no_op, conflict=result.conflict, total=result.total, sync_run_id=result.sync_run_id, sync_status=result.sync_status)
 
 
@@ -2453,7 +2476,7 @@ def external_reconciliation(snapshot_id: int, request: Request, db: Session = De
     try:
         return {"snapshot_id": snapshot_id, "items": reconcile_inventory(db, snapshot_id, workspace_id=principal.workspace_id)}
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail={"code": str(exc), "message": "外部快照不存在"}) from exc
+        raise DomainError(code=str(exc), message="外部快照不存在", http_status=404) from exc
 
 
 
@@ -2476,7 +2499,7 @@ def get_content_workflow(workflow_key: str, request: Request):
         graph = workflow.graph()
         return workflow.plan() | {"workflow_hash": workflow_hash(graph), "nodes": graph["nodes"], "edges": graph["edges"]}
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail={"code": "WORKFLOW_NOT_FOUND", "message": "工作流不存在"}) from exc
+        raise DomainError(code="WORKFLOW_NOT_FOUND", message="工作流不存在", http_status=404) from exc
 
 
 @app.post("/api/content/runs", response_model=ContentJobResponse, status_code=202)
@@ -2484,7 +2507,7 @@ def create_content_run(payload: ContentJobCreate, request: Request, db: Session 
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     key = request.headers.get("Idempotency-Key") or ""
     if not key or len(key) > 128:
-        raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供有效的 Idempotency-Key"})
+        raise DomainError(code="IDEMPOTENCY_KEY_REQUIRED", message="必须提供有效的 Idempotency-Key", http_status=422)
     from app.content_application import ContentApplicationError, ContentApplicationService
 
     try:
@@ -2500,7 +2523,7 @@ def create_content_run(payload: ContentJobCreate, request: Request, db: Session 
             "SKU_NOT_FOUND": 404,
             "IDEMPOTENCY_KEY_REUSE": 409,
         }
-        raise HTTPException(status_code=status_by_code.get(exc.code, 422), detail={"code": exc.code, "message": exc.message}) from exc
+        raise DomainError(code=exc.code, message=exc.message, http_status=status_by_code.get(exc.code, 422)) from exc
 
     revision = result["revision"]
     job = result["job"]
@@ -2523,7 +2546,7 @@ def get_content_job(job_id: int, request: Request, db: Session = Depends(get_db)
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     job = db.scalar(select(CrawlJob).where(CrawlJob.id == job_id, CrawlJob.workspace_id == principal.workspace_id, CrawlJob.type == "content_generate"))
     if job is None:
-        raise HTTPException(status_code=404, detail={"code": "CONTENT_JOB_NOT_FOUND", "message": "内容任务不存在"})
+        raise DomainError(code="CONTENT_JOB_NOT_FOUND", message="内容任务不存在", http_status=404)
     revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.generation_job_id == job.id, ProductContentRevision.workspace_id == principal.workspace_id))
     return {"job_id": job.id, "run_id": job.run_id, "job_status": job.status, "revision_status": revision.status if revision else "unknown", "revision_id": revision.id if revision else None, "simulated": revision.simulated if revision else True, "provider": revision.provider if revision else job.source}
 
@@ -2547,10 +2570,10 @@ def get_content_run(job_id: int, request: Request, db: Session = Depends(get_db)
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     job = db.scalar(select(CrawlJob).where(CrawlJob.id == job_id, CrawlJob.workspace_id == principal.workspace_id, CrawlJob.type == "content_generate"))
     if job is None:
-        raise HTTPException(status_code=404, detail={"code": "CONTENT_JOB_NOT_FOUND", "message": "内容任务不存在"})
+        raise DomainError(code="CONTENT_JOB_NOT_FOUND", message="内容任务不存在", http_status=404)
     revision = db.scalar(select(ProductContentRevision).where(ProductContentRevision.generation_job_id == job.id, ProductContentRevision.workspace_id == principal.workspace_id))
     if revision is None:
-        raise HTTPException(status_code=404, detail={"code": "CONTENT_REVISION_NOT_FOUND", "message": "内容版本不存在"})
+        raise DomainError(code="CONTENT_REVISION_NOT_FOUND", message="内容版本不存在", http_status=404)
     assets = db.scalars(select(ProductMediaAsset).where(ProductMediaAsset.revision_id == revision.id, ProductMediaAsset.workspace_id == principal.workspace_id).order_by(ProductMediaAsset.id)).all()
     return {"job_id": job.id, "job_status": job.status, "revision": {**ContentRevisionResponse.model_validate(revision).model_dump(mode="json"), "assets": [ContentAssetResponse.model_validate(x).model_dump(mode="json") for x in assets]}}
 
@@ -2559,7 +2582,7 @@ def get_content_run(job_id: int, request: Request, db: Session = Depends(get_db)
 def list_product_media(product_id: int, request: Request, db: Session = Depends(get_db)):
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     if db.scalar(select(Product.id).where(Product.id == product_id, Product.workspace_id == principal.workspace_id)) is None:
-        raise HTTPException(status_code=404, detail={"code": "PRODUCT_NOT_FOUND", "message": "商品不存在"})
+        raise DomainError(code="PRODUCT_NOT_FOUND", message="商品不存在", http_status=404)
     return db.scalars(select(ProductMediaAsset).where(ProductMediaAsset.product_id == product_id, ProductMediaAsset.workspace_id == principal.workspace_id).order_by(ProductMediaAsset.id.desc())).all()
 
 
@@ -2568,11 +2591,11 @@ async def upload_product_media(product_id: int, request: Request, file: UploadFi
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     product = db.scalar(select(Product).where(Product.id == product_id, Product.workspace_id == principal.workspace_id))
     if product is None:
-        raise HTTPException(status_code=404, detail={"code": "PRODUCT_NOT_FOUND", "message": "商品不存在"})
+        raise DomainError(code="PRODUCT_NOT_FOUND", message="商品不存在", http_status=404)
     content = await file.read()
     limit = get_settings().aigc_max_upload_bytes
     if not content or len(content) > limit:
-        raise HTTPException(status_code=413, detail={"code": "MEDIA_TOO_LARGE", "message": "基础图为空或超过大小限制"})
+        raise DomainError(code="MEDIA_TOO_LARGE", message="基础图为空或超过大小限制", http_status=413)
     from app.content_production import _artifact_root, save_asset_bytes
     import io
     try:
@@ -2582,7 +2605,7 @@ async def upload_product_media(product_id: int, request: Request, file: UploadFi
             width, height = checked.size
             mime = checked.get_format_mimetype() or file.content_type or "image/png"
     except Exception as exc:
-        raise HTTPException(status_code=415, detail={"code": "MEDIA_INVALID", "message": "基础图不是有效图片"}) from exc
+        raise DomainError(code="MEDIA_INVALID", message="基础图不是有效图片", http_status=415) from exc
     digest = sha256(content).hexdigest()
     asset = db.scalar(select(ProductMediaAsset).where(ProductMediaAsset.workspace_id == principal.workspace_id, ProductMediaAsset.product_id == product_id, ProductMediaAsset.role == "source", ProductMediaAsset.content_sha256 == digest))
     if asset is not None:
@@ -2601,14 +2624,14 @@ def download_content_asset(asset_id: int, request: Request, db: Session = Depend
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     asset = db.scalar(select(ProductMediaAsset).where(ProductMediaAsset.id == asset_id, ProductMediaAsset.workspace_id == principal.workspace_id))
     if asset is None:
-        raise HTTPException(status_code=404, detail={"code": "CONTENT_ASSET_NOT_FOUND", "message": "素材不存在"})
+        raise DomainError(code="CONTENT_ASSET_NOT_FOUND", message="素材不存在", http_status=404)
     root = get_settings().resolve_path(get_settings().artifacts_dir) / "content"
     try:
         path = safe_storage_path(root, asset.storage_uri)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail={"code": "CONTENT_ASSET_NOT_FOUND", "message": "素材不存在"}) from exc
+        raise DomainError(code="CONTENT_ASSET_NOT_FOUND", message="素材不存在", http_status=404) from exc
     if not path.is_file():
-        raise HTTPException(status_code=404, detail={"code": "CONTENT_ASSET_NOT_FOUND", "message": "素材文件不存在"})
+        raise DomainError(code="CONTENT_ASSET_NOT_FOUND", message="素材文件不存在", http_status=404)
     return FileResponse(path, media_type=asset.mime_type)
 
 
@@ -2637,7 +2660,7 @@ def review_content_revision(revision_id: int, payload: ContentReviewRequest, req
             "CONTENT_INVALID_STATE": 409,
             "IDEMPOTENCY_KEY_REUSE": 409,
         }
-        raise HTTPException(status_code=status_by_code.get(exc.code, 422), detail={"code": exc.code, "message": exc.message}) from exc
+        raise DomainError(code=exc.code, message=exc.message, http_status=status_by_code.get(exc.code, 422)) from exc
     revision = result["revision"]
     return {"id": revision.id, "status": revision.status, "version": revision.version, "reviewed_by": revision.reviewed_by, "replayed": result["replayed"]}
 
@@ -2647,7 +2670,7 @@ def export_content_revision(revision_id: int, payload: ContentExportRequest, req
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     key = request.headers.get("Idempotency-Key") or ""
     if not key or len(key) > 128:
-        raise HTTPException(status_code=422, detail={"code": "IDEMPOTENCY_KEY_REQUIRED", "message": "必须提供 Idempotency-Key"})
+        raise DomainError(code="IDEMPOTENCY_KEY_REQUIRED", message="必须提供 Idempotency-Key", http_status=422)
     from app.content_application import ContentApplicationError, ContentApplicationService
 
     try:
@@ -2671,7 +2694,7 @@ def export_content_revision(revision_id: int, payload: ContentExportRequest, req
                 "内容导出持久化失败 code=%s workspace_id=%s revision_id=%s",
                 exc.code, principal.workspace_id, revision_id,
             )
-        raise HTTPException(status_code=status_by_code.get(exc.code, 422), detail={"code": exc.code, "message": exc.message}) from exc
+        raise DomainError(code=exc.code, message=exc.message, http_status=status_by_code.get(exc.code, 422)) from exc
 
     export = result["export"]
     if not result["replayed"]:
@@ -2685,7 +2708,7 @@ def get_content_export(export_id: int, request: Request, db: Session = Depends(g
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     export = db.scalar(select(ProductContentExport).where(ProductContentExport.id == export_id, ProductContentExport.workspace_id == principal.workspace_id))
     if export is None:
-        raise HTTPException(status_code=404, detail={"code": "CONTENT_EXPORT_NOT_FOUND", "message": "导出任务不存在"})
+        raise DomainError(code="CONTENT_EXPORT_NOT_FOUND", message="导出任务不存在", http_status=404)
     return export
 
 
@@ -2720,7 +2743,7 @@ def get_product(product_id: int, request: Request, db: Session = Depends(get_db)
     principal = require_principal(request, permission="catalog.read")
     product = db.scalar(select(Product).where(Product.id == product_id, Product.workspace_id == principal.workspace_id))
     if product is None:
-        raise HTTPException(status_code=404, detail={"code": "PRODUCT_NOT_FOUND", "message": "商品不存在"})
+        raise DomainError(code="PRODUCT_NOT_FOUND", message="商品不存在", http_status=404)
     return product
 
 
@@ -2728,7 +2751,7 @@ def get_product(product_id: int, request: Request, db: Session = Depends(get_db)
 def price_history(product_id: int, request: Request, db: Session = Depends(get_db)) -> list[ProductPriceHistory]:
     principal = require_principal(request, permission="catalog.read")
     if db.scalar(select(Product.id).where(Product.id == product_id, Product.workspace_id == principal.workspace_id)) is None:
-        raise HTTPException(status_code=404, detail={"code": "PRODUCT_NOT_FOUND", "message": "商品不存在"})
+        raise DomainError(code="PRODUCT_NOT_FOUND", message="商品不存在", http_status=404)
     return db.scalars(
         select(ProductPriceHistory)
         .where(ProductPriceHistory.product_id == product_id, ProductPriceHistory.workspace_id == principal.workspace_id)
