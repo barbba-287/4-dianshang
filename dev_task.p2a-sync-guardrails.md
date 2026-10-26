@@ -225,3 +225,36 @@ env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 \
 | 验证证据 | 定向 + 全量完整原始 stdout（同时写入 `.testtmp/delivery.md`） |
 | 真实/模拟/未知 | 测试真实执行=真实；未调真实 Shopify API=事实；未知单列 |
 | 已知限制 | 单进程假设（多 worker 部署时内存开关/取消失效）；重启后热开关回落 |
+
+---
+
+## 10. 复工说明（2026-10-26 14:30 复核方追加，第一次实施进程 R-17 消失）
+
+第一次实施进程只落盘了 1 个文件后无声消失（后台任务 `6ag60f` 已不存在，且未写交付说明）。
+
+### 10.1 已完成（经复核方读过全文，视为合格，保留不动）
+
+- `app/runtime_flags.py`（27 行）：`threading.Event` 存储运行期 live 开关，
+  `set_live_enabled()` / `live_enabled()`，默认放行（不额外拦截，真正放行与否仍由
+  `settings.shopify_live_enabled` 决定）。**本文件不需要改动。**
+
+### 10.2 尚未开始（本此复工的全部剩余范围）
+
+1. `app/config.py`：新增 `shopify_sync_budget_seconds`（默认 300）。
+2. `app/main.py`：`POST /api/admin/live-switch`（过 `require_principal`，body 为
+   `{"live_enabled": bool}`，调 `runtime_flags.set_live_enabled`）。
+3. 同步服务（`app/services/shopify_sync.py` 或实际所在模块）：
+   - run 级 wall-clock 预算：每页循环间检查 elapsed，超预算即置
+     `failed + error_code=SHOPIFY_SYNC_BUDGET_EXCEEDED`；
+   - 取消 token（进程内 dict：run_id -> Event，run 结束注销）；检查点与预算相同（页间）；
+     触发置 `failed + error_code=SHOPIFY_SYNC_CANCELLED`。
+4. `app/main.py`：`POST /api/external/sync/runs/{run_id}/cancel`（取消 token 置位；
+   run 不存在或已终态返回 404/409，语义自行判断并在交付说明写明）。
+5. `tests/test_p2a_sync_guardrails.py`：§5 全部用例。
+
+### 10.3 复工硬要求
+
+- 不得重写或删除 `app/runtime_flags.py`（已完成物，改动需在交付说明声明理由）。
+- 其余约束（§1 边界、§3 允许清单、§6 排除项、§7 验证命令、§8 完成标准）全部不变。
+- **完成即把交付说明写到 `.testtmp/delivery.md`（覆盖旧内容），落盘，不要依赖进程 stdout 存活**
+  —— 前两次实施进程均在写完代码后无声消失，落盘文件是复核的唯一入口。
