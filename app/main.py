@@ -16,6 +16,8 @@ import html
 import json
 import logging
 import re
+import threading
+import time
 import uuid
 from urllib.parse import quote
 
@@ -23,6 +25,7 @@ from fastapi import Body, Depends, File, Form, FastAPI, Query, Request, UploadFi
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
@@ -191,6 +194,8 @@ from app.employee_auth import (
     verify_password,
 )
 from app.request_context import RequestContext
+from app.runtime_flags import live_enabled as runtime_live_enabled
+from app.runtime_flags import set_live_enabled as set_runtime_live_enabled
 
 
 logger = logging.getLogger(__name__)
@@ -692,6 +697,29 @@ def admin_reset_password(user_id: int, payload: AdminUserPasswordReset, request:
     except ValueError as exc:
         raise DomainError(code=str(exc), message="密码或账户无效", http_status=422 if str(exc).endswith("SHORT") else 404) from exc
 
+
+class LiveSwitchRequest(BaseModel):
+    """运行期 Shopify live 热开关的请求体（仅进程内生效，不落库）。"""
+
+    live_enabled: bool
+
+
+@app.post("/api/admin/live-switch")
+def admin_set_live_switch(payload: LiveSwitchRequest, request: Request):
+    """切换运行期 Shopify live 热开关。
+
+    仅 admin 可调用；状态只保存在进程内存（app/runtime_flags.py），不落库、
+    不写 .env，进程重启后回落 settings.shopify_live_enabled。
+    """
+    principal = require_principal(request, roles=(ROLE_ADMIN,))
+    set_runtime_live_enabled(payload.live_enabled)
+    current = runtime_live_enabled()
+    logger.info(
+        "shopify live 运行期开关切换: live_enabled=%s by user=%s",
+        current,
+        principal.user_id,
+    )
+    return {"live_enabled": current, "source": "runtime_flag"}
 
 
 @app.post("/api/crawl", response_model=CrawlJobDetailResponse, status_code=202)
@@ -1727,7 +1755,11 @@ def dashboard_page(request: Request) -> HTMLResponse:
 def shopify_capabilities(request: Request):
     require_principal(request, permission="inventory.read")
     settings = get_settings()
-    return {"platform": "shopify", "read_only": True, "live_enabled": bool(settings.shopify_live_enabled and settings.shopify_store_domain and settings.shopify_access_token), "simulated": not settings.shopify_live_enabled, "store_domain": settings.shopify_store_domain or None, "api_version": settings.shopify_api_version, "granted_scopes": ["read_customers", "read_inventory", "read_orders", "read_products"], "limitations": ["当前只读，不执行 Shopify mutation", "订单历史范围受 granted scopes 和 Shopify 规则限制", "库存 GraphQL 字段以当前店铺 schema 为准"]}
+    # 热开关（运行期开关）与 .env 配置共同决定是否放行 live 通道；
+    # 运行时被关掉时 live_enabled=false 且 simulated=true。
+    live_allowed = bool(settings.shopify_live_enabled and runtime_live_enabled())
+    live_ready = bool(live_allowed and settings.shopify_store_domain and settings.shopify_access_token)
+    return {"platform": "shopify", "read_only": True, "live_enabled": live_ready, "simulated": not live_allowed, "store_domain": settings.shopify_store_domain or None, "api_version": settings.shopify_api_version, "granted_scopes": ["read_customers", "read_inventory", "read_orders", "read_products"], "limitations": ["当前只读，不执行 Shopify mutation", "订单历史范围受 granted scopes 和 Shopify 规则限制", "库存 GraphQL 字段以当前店铺 schema 为准"]}
 
 
 @app.post("/api/external/shopify/preview", response_model=ShopifyPreviewResponse)
@@ -1736,7 +1768,7 @@ def shopify_preview(payload: ShopifyPreviewRequest, request: Request):
     settings = get_settings()
     from app.platform_adapters.shopify import ShopifyFixtureTransport, ShopifyLiveTransport, ShopifyReadOnlyAdapter
     if payload.live:
-        if not (settings.shopify_live_enabled and settings.shopify_store_domain and settings.shopify_access_token):
+        if not (settings.shopify_live_enabled and runtime_live_enabled() and settings.shopify_store_domain and settings.shopify_access_token):
             raise DomainError(code="SHOPIFY_LIVE_NOT_CONFIGURED", message="Shopify live 未配置店铺、Token 或启用开关", http_status=409)
         transport = ShopifyLiveTransport(settings.shopify_store_domain, settings.shopify_access_token, settings.shopify_api_version, settings.shopify_request_timeout_seconds, settings.shopify_max_retries)
         adapter = ShopifyReadOnlyAdapter(transport, live_enabled=True, simulated=False, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
@@ -1747,28 +1779,96 @@ def shopify_preview(payload: ShopifyPreviewRequest, request: Request):
     return ShopifyPreviewResponse(resource=payload.resource, live_enabled=adapter.live_enabled, simulated=adapter.simulated, store_domain=settings.shopify_store_domain or None, total=len(records), records=records, request_ids=[], limitations=["Preview 不写入内部事实层；使用 sync 入口才会写入订单/库存外部事实"])
 
 
-@app.post("/api/external/shopify/sync")
-def shopify_sync(request: Request, db: Session = Depends(get_db), resources: str = "orders,inventory"):
+# ---------------------------------------------------------------------------
+# Shopify live sync 的运行期护栏：取消 token（进程内）
+#
+# 单进程假设与 app/background.py 一致：取消标记只保存在本进程内存中；
+# 进程重启或多 worker 部署时不可跨进程生效（已知限制见交付说明）。
+# ---------------------------------------------------------------------------
+_sync_cancel_tokens: dict[str, threading.Event] = {}
+_sync_cancel_lock = threading.Lock()
+# 记录当前线程登记的 run_id，保证请求结束时能精确注销自己的 token。
+_sync_token_local = threading.local()
+
+# 护栏类错误码：走既有错误码体系（AdapterError.code → resource_status_json
+# 与 run.error_code），不新增 run 终态，也不改响应模型。
+GUARDRAIL_ERROR_CODES = {"SHOPIFY_SYNC_BUDGET_EXCEEDED", "SHOPIFY_SYNC_CANCELLED"}
+
+
+def _register_sync_cancel_token(run_id: str, *, track_current: bool = True) -> threading.Event:
+    """注册（或复用）某个 run 的取消 token。
+
+    复用而非覆盖：取消请求可能先于同步线程登记到达，先到的取消标记
+    不能被后到的登记动作清掉。
+
+    track_current=True 时把 run_id 记到线程局部变量，供同步路由结束时
+    精确注销自己的 token；取消路由用 track_current=False，避免把别人的
+    run 记成"当前线程的 token"。
+    """
+    with _sync_cancel_lock:
+        token = _sync_cancel_tokens.get(run_id)
+        if token is None:
+            token = threading.Event()
+            _sync_cancel_tokens[run_id] = token
+    if track_current:
+        _sync_token_local.run_id = run_id
+    return token
+
+
+def _unregister_sync_cancel_token(run_id: str) -> None:
+    """run 结束（成功/失败/取消/异常）后注销取消 token，避免内存泄漏。"""
+    with _sync_cancel_lock:
+        _sync_cancel_tokens.pop(run_id, None)
+    if getattr(_sync_token_local, "run_id", None) == run_id:
+        _sync_token_local.run_id = None
+
+
+def _shopify_sync_impl(request: Request, db: Session = Depends(get_db), resources: str = "orders,inventory"):
+    """Shopify live 同步的内部实现（路由壳见 _shopify_sync_route）。
+
+    拆成 impl + 壳的原因：壳负责在请求结束时（含异常路径）注销取消 token，
+    因此同步执行体必须能整体放进一个 try/finally。
+    """
     principal = require_principal(request, permission="inventory.write")
     settings = get_settings()
-    if not (settings.shopify_live_enabled and settings.shopify_store_domain and settings.shopify_access_token):
+    if not (settings.shopify_live_enabled and runtime_live_enabled() and settings.shopify_store_domain and settings.shopify_access_token):
         raise DomainError(code="SHOPIFY_LIVE_NOT_CONFIGURED", message="Shopify live 未配置", http_status=409)
+    from app.platform_adapters.base import AdapterError
     from app.platform_adapters.shopify import ShopifyLiveTransport, ShopifyReadOnlyAdapter
     from app.external_orders import ensure_external_account, ingest_orders
-    from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, ImportStats, ingest_inventory
+    from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, ImportStats, ingest_inventory
     selected = [item.strip() for item in resources.split(",") if item.strip()]
     allowed = {"orders", "inventory"}
     if not selected or not set(selected).issubset(allowed):
         raise DomainError(code="SHOPIFY_RESOURCE_INVALID", message="当前同步只支持 orders/inventory", http_status=422)
+    # run 级 wall-clock 预算：进入路由即开始计时，覆盖 transport 等待与入库。
+    budget_seconds = int(settings.shopify_sync_budget_seconds)
+    deadline = time.monotonic() + budget_seconds
     transport = ShopifyLiveTransport(settings.shopify_store_domain, settings.shopify_access_token, settings.shopify_api_version, settings.shopify_request_timeout_seconds, settings.shopify_max_retries)
-    adapter = ShopifyReadOnlyAdapter(transport, live_enabled=True, simulated=False, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
     account_ref = settings.shopify_store_domain
     run = begin_sync_run(db, workspace_id=principal.workspace_id, platform="shopify", sync_type="shopify_live", account_ref=account_ref, store_ref=settings.shopify_store_domain, source_mode="shopify_live", simulated=False)
+    # 取消 token：run 建立后立即登记，run 结束（成功/失败/取消/异常）后注销。
+    cancel_token = _register_sync_cancel_token(run.run_id)
+    adapter = ShopifyReadOnlyAdapter(
+        transport,
+        live_enabled=True,
+        simulated=False,
+        page_size=settings.shopify_max_page_size,
+        max_pages=settings.shopify_max_pages,
+        deadline=deadline,
+        cancel_check=cancel_token.is_set,
+    )
     initialize_resources(db, run, selected)
     result = {"run_id": run.run_id, "platform": "shopify", "source_mode": "shopify_live", "simulated": False, "resources": {}}
+    guardrail_error = None
     for resource in selected:
         mark_resource_running(db, run, resource)
         try:
+            # 资源级检查点：资源之间不翻页时也能被取消/预算中止。
+            if cancel_token.is_set():
+                raise AdapterError("SHOPIFY_SYNC_CANCELLED", "同步已被请求取消")
+            if time.monotonic() > deadline:
+                raise AdapterError("SHOPIFY_SYNC_BUDGET_EXCEEDED", "同步超出 wall-clock 预算")
             records = adapter.fetch_orders() if resource == "orders" else adapter.fetch_inventory()
             if resource == "orders":
                 account = ensure_external_account(db, workspace_id=principal.workspace_id, platform="shopify", account_ref=account_ref, store_ref=settings.shopify_store_domain, source_mode="shopify_live", simulated=False)
@@ -1831,12 +1931,78 @@ def shopify_sync(request: Request, db: Session = Depends(get_db), resources: str
                 stats = ingest_inventory(db, canonical, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
                 mark_resource_succeeded(db, run, resource, ImportStats(total=stats.total, inserted=stats.inserted, no_op=stats.no_op, conflict=stats.conflict, snapshot_ids=stats.snapshot_ids))
                 result["resources"][resource] = {"total": stats.total, "inserted": stats.inserted, "no_op": stats.no_op, "conflict": stats.conflict, "snapshot_ids": stats.snapshot_ids or [], "stored": True, "data_completeness": "complete"}
+            # 页数预算留痕：实际消耗页数 + 本次 wall-clock 预算，写入 resource_status_json。
+            record_resource_metadata(db, run, resource, {"pages_used": adapter.pages_used, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages})
+            result["resources"][resource]["pages_used"] = adapter.pages_used
         except Exception as exc:
             mark_resource_failed(db, run, resource, exc)
-            result["resources"][resource] = {"error_code": getattr(exc, "code", type(exc).__name__), "error": str(exc)}
-    finalize_resource_run(db, run)
+            record_resource_metadata(db, run, resource, {"pages_used": adapter.pages_used, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages})
+            result["resources"][resource] = {"error_code": getattr(exc, "code", type(exc).__name__), "error": str(exc), "pages_used": adapter.pages_used}
+            if getattr(exc, "code", "") in GUARDRAIL_ERROR_CODES:
+                # 护栏终止：不再处理后续资源，run 终态为 failed + 对应错误码。
+                guardrail_error = exc
+                break
+    if guardrail_error is not None:
+        # 尚未开始的资源记为同一护栏错误码，保证 run 终态为 failed。
+        for resource in selected:
+            if resource in result["resources"]:
+                continue
+            mark_resource_failed(db, run, resource, guardrail_error)
+            record_resource_metadata(db, run, resource, {"pages_used": 0, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages})
+            result["resources"][resource] = {"error_code": getattr(guardrail_error, "code", type(guardrail_error).__name__), "error": str(guardrail_error), "pages_used": 0}
+        finalize_resource_run(db, run, error=guardrail_error)
+        # 护栏终止的 run 一律为 failed（即使部分资源此前已成功）。
+        if run.status != "failed":
+            run.status = "failed"
+            db.commit()
+            db.refresh(run)
+    else:
+        finalize_resource_run(db, run)
     result["status"] = run.status
+    result["error_code"] = run.error_code
     return result
+
+
+@app.post("/api/external/shopify/sync")
+def shopify_sync(request: Request, db: Session = Depends(get_db), resources: str = "orders,inventory"):
+    """Shopify live 同步入口（同步执行；护栏 = wall-clock 预算 + 取消 token）。"""
+    try:
+        return _shopify_sync_impl(request, db, resources)
+    finally:
+        # run 结束（成功/失败/取消/异常）即注销本线程登记的取消 token。
+        run_id = getattr(_sync_token_local, "run_id", None)
+        if run_id:
+            _unregister_sync_cancel_token(run_id)
+
+
+@app.post("/api/external/sync/runs/{run_id}/cancel", status_code=202)
+def cancel_external_sync_run(run_id: str, request: Request, db: Session = Depends(get_db)):
+    """请求取消运行中的同步 run（当前只有 Shopify live sync 消费该取消标记）。
+
+    语义：
+    - run 不存在或不属于当前 workspace → 404 SYNC_RUN_NOT_FOUND；
+    - run 已是终态（succeeded/partial/failed）→ 409 SYNC_RUN_NOT_CANCELLABLE；
+    - 运行中 → 202，实际终止由同步路径在下一个分页/资源检查点完成。
+    """
+    principal = require_principal(request, permission="inventory.write")
+    from app.db import ExternalSyncRun
+    run = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.run_id == run_id, ExternalSyncRun.workspace_id == principal.workspace_id))
+    if run is None:
+        raise DomainError(code="SYNC_RUN_NOT_FOUND", message="同步运行不存在", http_status=404)
+    if run.status != "running":
+        raise DomainError(code="SYNC_RUN_NOT_CANCELLABLE", message="同步运行已结束，无法取消", http_status=409)
+    effective = bool(run.platform == "shopify" and run.source_mode == "shopify_live")
+    if effective:
+        token = _register_sync_cancel_token(run.run_id)
+        token.set()
+    logger.info("shopify sync 取消请求已登记: run_id=%s effective=%s by user=%s", run.run_id, effective, principal.user_id)
+    return {
+        "run_id": run.run_id,
+        "cancel_requested": True,
+        "effective": effective,
+        "status": run.status,
+        "note": "取消将在下一个分页/资源检查点生效" if effective else "该 run 不是 Shopify live 同步，取消标记不会被消费",
+    }
 
 
 def external_orders_preview(payload: ExternalOrderPreviewRequest, request: Request):

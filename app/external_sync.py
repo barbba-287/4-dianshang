@@ -142,6 +142,21 @@ def mark_resource_succeeded(db: Session, run: ExternalSyncRun, resource: str, st
     return run
 
 
+def record_resource_metadata(db: Session, run: ExternalSyncRun, resource: str, metadata: dict) -> ExternalSyncRun:
+    """在 resource_status_json 的条目上追加护栏留痕字段（不改变 status/error_code）。
+
+    用于把页数预算消耗、wall-clock 预算等运行期事实写进台账，
+    供预算执行可审计；不改 DB schema，也不改既有终态语义。
+    """
+    statuses = resource_status(run)
+    entry = dict(statuses.get(resource) or _resource_entry())
+    for key, value in (metadata or {}).items():
+        entry[key] = value
+    statuses[resource] = entry
+    _save_resource_status(db, run, statuses)
+    return run
+
+
 def is_retryable_error(exc: Exception) -> bool:
     if hasattr(exc, "retryable"):
         return bool(getattr(exc, "retryable"))

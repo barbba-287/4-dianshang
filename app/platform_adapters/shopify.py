@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
 import httpx
@@ -102,31 +102,62 @@ class ShopifyReadOnlyAdapter:
     live_enabled = False
     simulated = True
 
-    def __init__(self, transport: ShopifyTransport, *, live_enabled=False, simulated=True, page_size=50, max_pages=100):
+    def __init__(
+        self,
+        transport: ShopifyTransport,
+        *,
+        live_enabled=False,
+        simulated=True,
+        page_size=50,
+        max_pages=100,
+        deadline: float | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+    ):
         self._transport = transport
         self.live_enabled = bool(live_enabled and not simulated)
         self.simulated = simulated
         self.page_size = min(page_size, 100)
         self.max_pages = max_pages
+        # 运行期护栏（可选）：run 级 wall-clock 预算与取消检查点。
+        # 两者都缺省时 _pages() 的行为与引入护栏前完全一致。
+        self._deadline = deadline
+        self._cancel_check = cancel_check
+        # 本次（最后一次）分页实际消耗的页数，供 run 留痕；见 pages_used。
+        self.pages_used = 0
+
+    def _check_guardrails(self) -> None:
+        """分页检查点：取消优先，其次 wall-clock 预算。"""
+        if self._cancel_check is not None and self._cancel_check():
+            raise AdapterError("SHOPIFY_SYNC_CANCELLED", "同步已被请求取消")
+        if self._deadline is not None and time.monotonic() > self._deadline:
+            raise AdapterError("SHOPIFY_SYNC_BUDGET_EXCEEDED", "同步超出 wall-clock 预算")
 
     def _pages(self, query: str, data_key: str, variables: dict | None = None) -> list[dict]:
         cursor = None
         seen: set[str] = set()
         records: list[dict] = []
-        for _ in range(self.max_pages):
-            request_id = f"shopify-{uuid.uuid4().hex[:12]}"
-            response = self._transport.query(query=query, variables={"first": self.page_size, "after": cursor, **(variables or {})}, request_id=request_id)
-            connection = ((response.get("data") or {}).get(data_key) or {})
-            records.extend(edge.get("node") for edge in connection.get("edges", []) if isinstance(edge, dict) and isinstance(edge.get("node"), dict))
-            page_info = connection.get("pageInfo") or {}
-            if not page_info.get("hasNextPage"):
-                return records
-            next_cursor = page_info.get("endCursor")
-            if not next_cursor or next_cursor in seen:
-                raise AdapterError("SHOPIFY_CURSOR_LOOP", "Shopify 分页游标未前进")
-            seen.add(next_cursor)
-            cursor = next_cursor
-        raise AdapterError("SHOPIFY_PAGE_LIMIT", "Shopify 分页超过上限")
+        pages_used = 0
+        try:
+            for _ in range(self.max_pages):
+                # 每页一次检查点：取消与 wall-clock 预算都在这里生效。
+                self._check_guardrails()
+                request_id = f"shopify-{uuid.uuid4().hex[:12]}"
+                response = self._transport.query(query=query, variables={"first": self.page_size, "after": cursor, **(variables or {})}, request_id=request_id)
+                pages_used += 1
+                connection = ((response.get("data") or {}).get(data_key) or {})
+                records.extend(edge.get("node") for edge in connection.get("edges", []) if isinstance(edge, dict) and isinstance(edge.get("node"), dict))
+                page_info = connection.get("pageInfo") or {}
+                if not page_info.get("hasNextPage"):
+                    return records
+                next_cursor = page_info.get("endCursor")
+                if not next_cursor or next_cursor in seen:
+                    raise AdapterError("SHOPIFY_CURSOR_LOOP", "Shopify 分页游标未前进")
+                seen.add(next_cursor)
+                cursor = next_cursor
+            raise AdapterError("SHOPIFY_PAGE_LIMIT", "Shopify 分页超过上限")
+        finally:
+            # 成功、失败、取消都留痕，避免预算/取消路径下页数丢失。
+            self.pages_used = pages_used
 
     def fetch_products(self):
         return self._pages(PRODUCTS_QUERY, "products")

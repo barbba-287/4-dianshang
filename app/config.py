@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     shopify_max_retries: int = 2
     shopify_max_page_size: int = 50
     shopify_max_pages: int = 100
+    # 单次 Shopify sync run 的 wall-clock 预算（秒）；超限即终止该 run
+    shopify_sync_budget_seconds: int = 300
 
     api_auth_enabled: bool = False
     api_key: str = ""

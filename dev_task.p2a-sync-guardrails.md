@@ -258,3 +258,46 @@ env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 \
 - 其余约束（§1 边界、§3 允许清单、§6 排除项、§7 验证命令、§8 完成标准）全部不变。
 - **完成即把交付说明写到 `.testtmp/delivery.md`（覆盖旧内容），落盘，不要依赖进程 stdout 存活**
   —— 前两次实施进程均在写完代码后无声消失，落盘文件是复核的唯一入口。
+
+---
+
+## 11. 复核结论（2026-10-26 18:40，WorkBuddy）
+
+**判定：通过（实现 + 测试均达标，全量 330 passed / 0 failed）。**
+
+### 11.1 实施过程：R-17 根因查明（R-21）
+
+本切片经历 6 次实施进程中断（1 次只写 1 文件、1 次零产出、2 次写一半、2 次写完未落盘说明）。
+根因：Claude Code CLI 在 Windows 内部调用 `reg.exe`，被 WorkBuddy 安全中心程序黑名单 SIGTERM，
+关沙箱也绕不开；用户移除黑名单后，长会话仍偶发被杀但已能产出。**处置经验：分块小任务 +
+每块落盘产物**，死一块只损失一块。另：`reg.exe` 放行后仍有间歇性 SIGTERM（未定位，登记 R-22）。
+
+### 11.2 结论正确性复核（我独立执行）
+
+| 项 | 方法 | 结果 |
+|---|---|---|
+| 语法 | `py_compile` 5 文件 | 通过 |
+| 路由注册 | 导入冒烟（`/api/admin/live-switch`、`/api/external/sync/runs/{run_id}/cancel`、`/api/external/shopify/sync`） | 3/3 True |
+| 预算默认 | `Settings().shopify_sync_budget_seconds` | 300 |
+| 热开关默认 | `runtime_flags.live_enabled()` | True（只提供"关"能力，真放行仍看 settings） |
+| 定向测试 | `tests/test_p2a_sync_guardrails.py` | 10 passed（6.56s） |
+| 全量 | `pytest -q`（含 R-19 规则：首跑 319+1 flaky → 单跑过 → 复跑 320 全绿） | **330 passed / 0 failed**（125.87s） |
+| 既有构造点 | `ShopifyReadOnlyAdapter(` 三处，仅 sync 传新参数 | 默认行为不变（T7b 覆盖） |
+
+### 11.3 复核发现并已修正的问题（1 处）
+
+测试文件三处 `monkeypatch.setenv("SHOPIFY_SYNC_BUDGET_SECONDS"/"SHOPIFY_MAX_PAGES")` 后缺
+`get_settings.cache_clear()`，缓存导致预算不生效、跑满 100 页报 PAGE_LIMIT（3 红，245s）。
+修法：三处各补一行 `cfg.get_settings.cache_clear()`，断言零改动 → 10 绿、6.56s。
+
+### 11.4 清理
+
+删除实施进程遗留的临时探针 `tests/test_zz_probe_p2a.py`（自述"非交付文件，跑完即删"，
+8 用例中 4 红且失败均为探针自身问题，与产品无关；正式测试文件已覆盖同样行为）。
+
+### 11.5 残留风险（登记，不阻塞）
+
+- **R-22**：`reg.exe` 放行后 claude CLI 长会话仍偶发 SIGTERM（无拦截提示、位置随机）。缓解：分块 + 落盘产物。
+- **单进程假设**：热开关与取消 token 均为进程内存态，多 worker/多副本部署时失效（交付说明已列为已知限制）。
+- **取消延迟**：取消在下一页/下一资源检查点生效，当前页 transport 等待不可中断（P0 第 2 项"同步阻塞不可取消"仅部分缓解：可从"跑完才停"提升为"页间可停"）。
+- **页数留痕字段**：写入 `resource_status_json`（`pages_used`/`budget_seconds`/`max_pages`），未改 DB schema。
