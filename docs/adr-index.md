@@ -17,6 +17,11 @@
 | ADR-0009 | 结算事实与订单事实分离 | proposed | settlement |
 | ADR-0010 | 退货必须经过质检和处置确认后才能影响可售库存 | proposed | after_sales/inventory |
 | ADR-0011 | 活动事实先于营销执行引擎 | proposed | campaign/analytics |
+| ADR-0012 | 身份上下文与错误映射的统一 | accepted | identity / 错误映射 / HTTP 边界 |
+
+## ADR-0012 摘要：身份上下文与错误映射的统一
+
+领域/应用层业务错误统一为 `DomainError`，HTTP 形态只由 `app/main.py` 的单一 exception_handler 产生，对外 `{"detail": {"code", "message"}}` 外形与错误码词表不变（R1）。请求上下文收敛为单一类型，身份模型收敛为 `employee_auth.Principal` 一个，删除 `security.py` 重复定义与 `_as_employee_principal` 适配层（R2）。`main.py` 路由拆分冻结移出本轮。`source_mode` 之名保留给数据级来源字段，请求级上下文不得复用。全文：`docs/adr-0012-identity-context-and-error-mapping.md`。
 
 ## ADR-0001 摘要：模块化单体优先
 
