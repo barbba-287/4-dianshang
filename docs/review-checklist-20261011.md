@@ -568,3 +568,67 @@ $ cd D:/ai/dianshang && PYTHONDONTWRITEBYTECODE=1 "D:/python/python/python.exe" 
 - 本节不改变 §6.11 / §7.10 已声明的任何既有边界。
 
 修订记录：2026-10-12 首次填写。来源：2026-10-12 交付说明送达后的 H1 / H2 核验。
+
+---
+
+## 9. R1 切片复核（错误体系统一，DomainError）
+
+- 复核日期：2026-10-26；对象：Claude Code 对 `dev_task.r1-domain-error.md` 的实施（经 CLI 直接调起，用时 20m41s）
+- 上位依据：ADR-0012 决策 1 / `docs/p1-boundary-audit-20261012.md` §5
+
+### 9.1 范围核验
+
+| 检查 | 结果 |
+|---|---|
+| 改动面 | `app/main.py`（+149/−122 区间内含迁移）、`app/employee_auth.py`、新增 `app/errors.py`、新增 `tests/test_domain_error.py` —— 与任务「允许修改的文件」**完全一致** |
+| 既有测试零修改 | ✅ `git diff --stat tests/` 为空（仅新增未跟踪文件） |
+| 临时垫片 `pytest/` | ✅ 已删除（交付说明 §6.6 属实），`git status` 无残留 |
+| 残留检查 | `raise HTTPException` 全仓 **0**；`HTTPException` 仅剩 2 处**注释**；两文件导入行已移除 `HTTPException`；`employee_auth.py` 保留 `Request`（R2 范围） |
+
+### 9.2 关键改造点核验（逐点对照任务文件）
+
+| 点 | 位置 | 判定 |
+|---|---|---|
+| `DomainError` 定义 | `app/errors.py`（无 fastapi 导入，字段 code/message/http_status，默认 400） | ✅ 与任务规格一致 |
+| 唯一 handler | `app/main.py:375-384`，输出 `{"detail": {"code", "message"}}` | ✅ |
+| 中间件 CSRF 分支 | `app/main.py:351` `except DomainError`，保留 `X-Request-ID` 回写 | ✅ |
+| 错误工厂 | `_warehouse_error`→`:1110`、`_replenishment_error`→`:1939`，均改返回 `DomainError`，status 推导与 messages 字典原样保留 | ✅ |
+| 500 兜底 / 401 直接 JSONResponse | `:354-361` 与 `:319-333` 未触碰 | ✅ |
+
+### 9.3 独立对拍（复核方脚本，仓库外解析，2026-10-26）
+
+以 `git show HEAD:` 提取迁移前文本，与工作树逐点解析 `(status, code, message, from-chain)` 四元组：
+
+```text
+app/main.py        raise 点  83 → 83   顺序+取值全一致
+app/employee_auth.py raise 点 13 → 13   顺序+取值全一致
+app/main.py        工厂 return 3 → 3    一致
+from exc 链        56 → 56（grep 计数）
+```
+
+结论：迁移为**纯机械改写**，未发现任何一处语义漂移。
+
+### 9.4 独立全量回归（复核方自跑，非引用交付方数据）
+
+```text
+命令：env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 \
+      /d/python/python/python.exe -m pytest -q -p no:cacheprovider   （仓库内）
+结果：288 passed, 4354 warnings in 116.41s（283 既有 + 5 新增）
+```
+
+交付方四份 stdout 证据（`.testtmp/`，被 `.gitignore` 忽略、不入库）：before `283 passed in 114.28s` / after `288 passed in 116.60s` / 定向 `28 passed` / 新用例 `5 passed`；sha256 前 16 位 `f6845ba198602b80` / `44a6f867a4401816` / `d1de713c88fc900f` / `0a5c05bf8746d501`。复核方实测与交付一致。
+
+### 9.5 判定
+
+**通过（技术面），R1 关闭；P1 项 7（统一 DomainError 映射）达成。** P1 现为 **4.5 / 7**（项 5 仍 ◐，待 R2）。
+
+### 9.6 新增风险登记
+
+| 编号 | 级别 | 描述 | 建议 |
+|---|---|---|---|
+| R-15 | P2（环境） | WorkBuddy 会话向子进程注入 `PYTHONPATH=…\cli\vendor\shim`，其 `sitecustomize` 会在 pytest 清理阶段触发 `_check_bulk_delete_guard` 并 `SystemExit(1)`，**表现为测试被劫持而非测试失败**；实现方与复核方均需 `env -u PYTHONPATH` 才能跑通 | ① 契约「验证命令」节统一加上 `env -u PYTHONPATH` 前缀；② 后续任务文件的验证命令照此书写 |
+| R-16 | P3（记录） | 仓库**外**消费者是否 `except fastapi.HTTPException` 捕获业务错误属 Unknown（仓库内 0 处），迁移后此类捕获将不再命中 | 随 ADR-0012 的 Unknown 项跟踪；无仓库内处置动作 |
+
+（编号说明：`docs/p1-boundary-audit-20261012.md` §11 已预占 R-11…R-14，待并入本登记时再统一排序。）
+
+修订记录：2026-10-26 新增 §9（R1 复核）。
