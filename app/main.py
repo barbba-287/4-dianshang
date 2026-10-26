@@ -173,22 +173,24 @@ from app.schemas import (
 from app.storage import StorageError, enforce_size_limit, save_upload
 from app.versioning import content_sha256
 from app.upload_security import validate_content, safe_storage_path
-from app.security import Principal as ApiPrincipal, authenticate_api_key
 from app.employee_auth import (
     ROLE_ADMIN,
     ROLE_CUSTOMER_SERVICE,
     ROLE_OPERATIONS,
     ROLE_READONLY,
     ROLE_WAREHOUSE,
+    authenticate_api_key,
     create_session,
+    demo_principal,
     hash_password,
     principal_from_session,
     require_principal,
     require_warehouse_access,
+    validate_auth_config,
     validate_csrf,
     verify_password,
-    validate_auth_config as validate_employee_auth_config,
 )
+from app.request_context import RequestContext
 
 
 logger = logging.getLogger(__name__)
@@ -196,11 +198,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    from app.security import validate_auth_config
-
     init_db()
     validate_auth_config(get_settings())
-    validate_employee_auth_config(get_settings())
     start_background_workers()
     try:
         yield
@@ -333,17 +332,19 @@ async def request_context_middleware(request: Request, call_next):
             response.headers["X-Request-ID"] = request_id
             return response
         request.state.principal = principal
+        request.state.ctx = RequestContext(request_id=request_id, principal=principal)
     else:
-        from app.security import demo_principal
-
         public_paths = {"/login", "/health", "/ready", "/docs", "/openapi.json", "/redoc"}
         is_public_path = request.url.path in public_paths or request.url.path.startswith("/static/")
         if settings.employee_auth_enabled and not is_public_path:
             if session_principal is None:
                 return RedirectResponse(url=f"/login?next={request.url.path}", status_code=303)
             request.state.principal = session_principal
+            request.state.ctx = RequestContext(request_id=request_id, principal=session_principal)
         else:
-            request.state.principal = session_principal or demo_principal(settings)
+            principal = session_principal or demo_principal(settings)
+            request.state.principal = principal
+            request.state.ctx = RequestContext(request_id=request_id, principal=principal)
     if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/login":
         try:
             with get_db_session_for_health() as csrf_db:
