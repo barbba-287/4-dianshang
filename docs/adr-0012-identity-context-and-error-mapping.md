@@ -82,7 +82,22 @@
 
 ## 关联代码、测试、Runbook
 
-- 代码：`app/errors.py`（新增）、`app/main.py`、`app/employee_auth.py`
-- 测试：`tests/test_domain_error.py`（新增）、既有 53 个测试文件（零修改）
-- 任务文件：`dev_task.r1-domain-error.md`（R1）、R2 任务文件待 R1 验收后另立
+- 代码：`app/errors.py`（新增）、`app/identity.py`（新增）、`app/request_context.py`（新增）、`app/main.py`、`app/employee_auth.py`；`app/security.py`（已删除）
+- 测试：`tests/test_domain_error.py`（R1，新增 5 例）、`tests/test_identity.py`（R2，新增 24 例）、既有 53 个测试文件（零修改）
+- 任务文件：`dev_task.r1-domain-error.md`（R1）、`dev_task.r2-identity-context.md`（R2）
 - 来源文档：`docs/p1-boundary-audit-20261012.md`
+
+## 实施记录
+
+### R1（2026-10-26，已完成）
+
+按决策 1 落地，复核结论见 `docs/review-checklist-20261011.md` §9：96 处抛错点 + 3 处工厂 return 的三元组与 `from exc` 链逐点对拍一致，全量 288 passed。
+
+### R2（2026-10-26，已完成）
+
+按决策 2 落地，但与决策原文有**一处偏离**，在此留痕：
+
+- 决策 2 写的「R2 前置：补 `app/security.py` 与适配层的 contract test（先固定现状行为，再收敛）」**未照办**。原因是收敛方向在盘点阶段被证据改写了：`app/security.py` 的 `_resolve_workspace` 是**旧宽松版**（零工作区时自动创建 workspace、多工作区按 `tenant_key or api_tenant_id` 匹配），而 `employee_auth` 侧是维护中的严格版。若先给 `security.py` 写 contract test 固定现状，等于把即将废弃的宽松行为固化成期望值。
+- 替代做法：**以 `employee_auth` 语义为基准**，contract test 直接写在收敛后的唯一实现（`tests/test_identity.py`，24 例），并显式断言「`import app.security` 抛 ImportError」「identity / request_context 不含 fastapi 导入」「employee_auth 已无适配层」。
+- 行为影响：中间件 API/demo 路径的 `authenticate_api_key` 由宽松版切为严格版（零工作区不再静默创建 workspace、多工作区只认 `api_tenant_id`、demo 不复活停用空间）。属**安全收紧**，已在 `dev_task.r2-identity-context.md` §2.6 列表登记，全量回归 312 passed 未见既有用例受损。
+- 决策 2 原文的「以类型化 `RequestContext` 取代裸 `request.state` 透传」在本轮只做到**供给侧**：中间件三个成功分支构造 `request.state.ctx`，120 个路由仍读旧字段。替换读取随决策 3 的路由拆分一并做。

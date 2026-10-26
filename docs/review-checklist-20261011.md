@@ -632,3 +632,76 @@ from exc 链        56 → 56（grep 计数）
 （编号说明：`docs/p1-boundary-audit-20261012.md` §11 已预占 R-11…R-14，待并入本登记时再统一排序。）
 
 修订记录：2026-10-26 新增 §9（R1 复核）。
+
+---
+
+## 10. R2 切片复核（身份上下文统一，去双 Principal）
+
+- 复核日期：2026-10-26；对象：`dev_task.r2-identity-context.md` 的实施
+- 上位依据：ADR-0012 决策 2（含「实施记录」中的偏离说明）
+
+### 10.1 交付形态异常（先记事实）
+
+实施经后台 CLI 启动，**进程在 09:47 写完最后一个文件后消失**（任务列表报 `No task found`），**未产出交付说明**，也未清理其自建的临时垫片 `pytest/`（顶部注释自称 "deleted before delivery"，内容为转发到项目解释器的 2 文件 wrapper，非仓库内容）。因此本节**不存在可核验的交付方 stdout**，全部结论由复核方独立取得 → 登记 R-17。
+
+### 10.2 范围核验
+
+| 检查 | 结果 |
+|---|---|
+| 改动面 | `app/employee_auth.py`（−166/+37）、`app/main.py`（+17/−6）、`app/security.py`（删除 89 行）、新增 `app/identity.py`（5984 B）、`app/request_context.py`（720 B）、`tests/test_identity.py`（19020 B）—— 与任务「允许修改/新建/删除」清单**完全一致** |
+| 既有测试零修改 | ✅ `git status tests/` 仅 `?? tests/test_identity.py` |
+| 越界改动 | 无（cli/account_admin/demo_seed/config 均未动，靠 re-export 保持路径） |
+
+### 10.3 迁移不变式（逐条）
+
+| # | 不变式 | 实测 |
+|---|---|---|
+| 1 | 既有测试零修改 | ✅ |
+| 2 | identity / request_context 不含 fastapi | ✅ 两文件 `^from fastapi` / `^import fastapi` 均 0（`grep fastapi` 的 2 处命中都是**注释**里的说明文字） |
+| 3 | `app.security` 残留 0、`app/security.py` 不存在 | ✅ 代码 0 处；仅 `tests/test_identity.py` 内断言 `import app.security` 抛 ImportError |
+| 4 | `_as_employee_principal` 残留 0 | ✅ |
+| 5 | `ApiPrincipal` 残留 0 | ✅ |
+| 6 | `raise HTTPException` 全仓 0 | ✅（R1 成果未回退） |
+| 7 | re-export 路径可用 | ✅ `test_employee_auth_reexports_identity_names` 通过 |
+| 8 | 三条有意行为变更生效且登记 | ✅ 见 10.5 |
+| 9 | 中间件成功路径 ctx 齐备 | ✅ 三个分支各有用例 |
+| 10 | 全量 ≥ 288 全绿 | ✅ 312 |
+
+### 10.4 独立验证（复核方自跑，非引用）
+
+```text
+定向：env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 \
+      /d/python/python/python.exe -m pytest -q tests/test_identity.py -p no:cacheprovider
+      24 passed, 59 warnings in 2.51s
+
+全量：同前缀，-q -p no:cacheprovider
+      312 passed, 4410 warnings in 122.96s   （288 既有 + 24 新增，0 failed）
+```
+
+`tests/test_identity.py` 24 例覆盖：`can` 四态（demo 恒 False / api_key scope 与通配 / admin 全权 / 角色表）、`has_role`、`is_employee`、`ROLE_LABELS` 与 `ROLE_PERMISSIONS` **值不变**（表完整性断言）、`authenticate_api_key` 四分支（auth 关闭→demo、错 key→None、workspace 缺失→None 即不自动建、按 tenant 命中 active）、`validate_auth_config`、`demo_principal`、`_resolve_compat_workspace` 不复活停用空间、`app.security` 已删、两模块无 fastapi、re-export、无适配层、`get_request_context` 缺失抛 `DomainError`/存在返回/冻结不可变、中间件三条成功路径挂 ctx。
+
+### 10.5 有意行为变更核验
+
+| 变更 | 判定 |
+|---|---|
+| 零工作区不再自动创建 workspace（401） | 生效，且有 `test_authenticate_api_key_returns_none_when_workspace_missing` 固定 |
+| 多工作区只认 `api_tenant_id` | 生效，`test_authenticate_api_key_matches_active_workspace_by_tenant_id` 固定 |
+| demo 不复活停用空间 | 生效，`test_resolve_compat_workspace_does_not_revive_disabled_workspace` 固定 |
+| lifespan 两次 `validate_auth_config` 合并为一次 | 生效；employee_auth 版是 security 版的严格超集（同两项 API 校验 + SESSION_TTL），无校验丢失 |
+
+既有 288 例全绿说明上述收紧**没有依赖旧宽松行为的用例**。
+
+### 10.6 判定
+
+**通过（技术面）。R2 关闭。** P1 进度：项 5 由 ◐ → ✓（身份模型本体脱离 FastAPI，`employee_auth.py` 仅存 HTTP 适配层，符合 ADR-0012 边界）、项 6 以「单一类型 + 中间件单点供给 + contract test」形态达成；项 1 已裁定冻结移出。**P1 本轮按 2026-10-26 裁定收官（6/7 达成，1 项冻结）。**
+
+保留意见（不阻断）：交付说明缺失（R-17）；`RequestContext` 只做到供给侧，读取侧替换随项 1 解冻再做。
+
+### 10.7 新增风险登记
+
+| 编号 | 级别 | 描述 | 建议 |
+|---|---|---|---|
+| R-17 | P2（流程） | 后台 CLI 实施进程在写完代码后**无交付说明即消失**，`pytest/` 垫片残留。技术面可独立复核（本次已复核通过），但 H1 硬闸门在实际流程中失效 | 后台调用改为「完成即写交付说明到 `.testtmp/delivery.md`」的落盘式交付，不依赖进程 stdout 存活；任务文件「完成标准」增加该条 |
+| R-18 | P3（文档） | `docs/architecture-inventory.json` / `.md` 由 `scripts/inventory_architecture.py` 生成，仍把 `app/security.py` 列为文件（行号也随 R1/R2 漂移） | 随下次文档任务重跑生成器；本切片只手工更正了手写的 `docs/domain-boundaries.md` |
+
+修订记录：2026-10-26 新增 §10（R2 复核）。

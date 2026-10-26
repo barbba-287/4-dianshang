@@ -8,7 +8,7 @@
 
 | 领域 | 当前入口/代码 | 权威数据 | 状态 | 关键风险 |
 |---|---|---|---|---|
-| Identity/RBAC | `app/employee_auth.py`、`app/account_admin.py`、`app/security.py` | `Workspace`、成员、session、仓库授权 | 已有底座 | API、页面、MCP 和后台任务必须统一 scope；凭证治理仍未生产化 |
+| Identity/RBAC | `app/identity.py`、`app/employee_auth.py`、`app/account_admin.py` | `Workspace`、成员、session、仓库授权 | 已有底座 | API、页面、MCP 和后台任务必须统一 scope；凭证治理仍未生产化 |
 | Catalog | `app/repository.py`、`app/crawler.py`、`Product`/`ProductSku` | 商品/SKU 主数据 | 已有底座 | PIM 属性、媒体、渠道字段和版本尚未完整 |
 | Platform Facts | `app/connectors.py`、`app/external_orders.py`、`app/external_sync.py`、`app/platform_sync.py` | 外部订单、销量、库存观察、同步运行 | 已有/过渡 | 连接器、授权、来源批次、原始 payload 和生产观测需统一 |
 | OMS | 规划领域；当前以 `ExternalOrder` 为输入 | `UnifiedOrder`、审单 proposal、履约计划/事实 | 未实现 | 外部渠道订单不能直接当内部履约订单 |
