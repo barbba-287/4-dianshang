@@ -412,6 +412,9 @@ class ExternalSyncRun(Base):
     retryable_resources_json: Mapped[str] = mapped_column(Text, default="[]")
     retry_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     retry_payload_hash: Mapped[str | None] = mapped_column(String(72), nullable=True)
+    # R6：分页游标持久化（独立列，不塞进 resource_status_json）。
+    # 空串 "{}" 是"未开始分页"的合法初始态；读取端 resume_plan 负责区分它与损坏值。
+    cursor_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
     total: Mapped[int] = mapped_column(Integer, default=0)
     inserted: Mapped[int] = mapped_column(Integer, default=0)
     updated: Mapped[int] = mapped_column(Integer, default=0)

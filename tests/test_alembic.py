@@ -102,7 +102,8 @@ def test_alembic_current_shows_head(tmp_path):
 
     current = _run_alembic(["current"], database_url=db_url)
     assert current.returncode == 0
-    assert "0018_repair_service_ticket_schema" in current.stdout
+    # 该断言必须跟随仓库当前的唯一 head（R6 新增 0019_external_sync_run_cursor 后更新）。
+    assert "0019_external_sync_run_cursor" in current.stdout
     assert "head" in current.stdout
 
 

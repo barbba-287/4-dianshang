@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,6 +15,19 @@ from app.db import ExternalEventInbox, ExternalInventorySnapshot, ExternalSyncRu
 
 
 RESOURCE_SCHEMA_VERSION = 1
+
+# R6：cursor_json 的 schema 版本（键名一经确定不得漂移）。
+# {"schema_version": 1, "resources": {"orders": {"cursor": ..., "pages": N, "fetched": M, "complete": bool}}, "updated_at": "<UTC ISO8601>"}
+CURSOR_SCHEMA_VERSION = 1
+
+# R6：续跑判定的拒绝原因码（R4 的 /resume 直接透出）。
+CURSOR_REASON_NO_CURSOR = "NO_CURSOR"
+CURSOR_REASON_UNSUPPORTED_SCHEMA = "UNSUPPORTED_CURSOR_SCHEMA"
+
+# R6：单资源续跑动作。
+CURSOR_ACTION_RESTART = "restart"
+CURSOR_ACTION_RESUME = "resume"
+CURSOR_ACTION_SKIP = "skip"
 
 
 @dataclass
@@ -157,6 +170,225 @@ def record_resource_metadata(db: Session, run: ExternalSyncRun, resource: str, m
     return run
 
 
+def _as_int(value, default: int = 0) -> int:
+    """把 JSON 里可能出现的脏值收敛成整数（不猜业务含义，只保证类型安全）。"""
+    try:
+        if isinstance(value, bool):
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _cursor_payload(raw: str | None) -> dict:
+    """读出 cursor_json 的既有内容。
+
+    损坏值一律退回空壳（不猜内容）；读取端的判定由 resume_plan 负责。
+    """
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
+    resources = value.get("resources")
+    if not isinstance(resources, dict):
+        resources = {}
+    return {
+        "schema_version": CURSOR_SCHEMA_VERSION,
+        "resources": {name: item for name, item in resources.items() if isinstance(item, dict)},
+    }
+
+
+def _cursor_delta(run: ExternalSyncRun, resource: str, pages: int, fetched: int) -> tuple[int, int]:
+    """把"本次 run 内累计页数/条数"换算成"相对上次落库的增量"。
+
+    pages/fetched 语义是**累计值**（跨续跑从源 run 起算、不归零）。落库时若直接
+    覆盖，续跑会把源 run 的累计值冲掉；因此这里按增量累加到列里已有的基数上。
+    上一次观测值挂在 run 实例上（不入库、不进 schema），避免污染 cursor_json 的键集合。
+    """
+    counters = getattr(run, "_cursor_counters", None)
+    if counters is None:
+        counters = {}
+        setattr(run, "_cursor_counters", counters)
+    last_pages, last_fetched = counters.get(resource, (0, 0))
+    current_pages = max(0, _as_int(pages))
+    current_fetched = max(0, _as_int(fetched))
+    counters[resource] = (current_pages, current_fetched)
+    return (
+        max(0, current_pages - last_pages),
+        max(0, current_fetched - last_fetched),
+    )
+
+
+def record_sync_cursor(
+    db: Session,
+    run: ExternalSyncRun,
+    resource: str,
+    cursor: str | None,
+    pages: int,
+    fetched: int,
+    complete: bool = False,
+) -> ExternalSyncRun:
+    """把分页游标与累计计数写进 run.cursor_json（每页一次，独立于 resource_status_json）。
+
+    - `cursor`：本页的 endCursor；资源取完时为 None（此时 complete=True）。
+    - `pages` / `fetched`：本次 run 内到本页为止的累计页数 / 累计条数。
+    - `complete`：该资源是否已取到末页（hasNextPage=false）。
+
+    不动 resource_status_json（cursor 独立成列，见 R6 红线 3）。
+    """
+    payload = _cursor_payload(run.cursor_json)
+    entry = dict(payload["resources"].get(resource) or {})
+    delta_pages, delta_fetched = _cursor_delta(run, resource, pages, fetched)
+    payload["resources"][resource] = {
+        "cursor": cursor,
+        "pages": _as_int(entry.get("pages")) + delta_pages,
+        "fetched": _as_int(entry.get("fetched")) + delta_fetched,
+        "complete": bool(complete),
+    }
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    run.cursor_json = json.dumps(payload, ensure_ascii=False)
+    run.heartbeat_at = datetime.utcnow()
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@dataclass(frozen=True)
+class ResourceResume:
+    """单个目标资源的续跑判定结果。"""
+
+    resource: str
+    action: str
+    cursor: str | None = None
+    pages: int = 0
+    fetched: int = 0
+    complete: bool = False
+
+
+@dataclass(frozen=True)
+class ResumePlan:
+    """续跑计划的单一出口（R4 的 /resume 读取端）。
+
+    - allowed=False 时 reason 必填，HTTP 语义为 409。
+    - allowed=True 且 full_restart=True 时：所有目标资源都没有已取页记录，等同全量重拉。
+    """
+
+    allowed: bool
+    reason: str | None = None
+    full_restart: bool = False
+    resources: dict[str, ResourceResume] = field(default_factory=dict)
+
+    @property
+    def empty(self) -> bool:
+        """没有任何目标资源已取页（⇒ 允许续跑但走全量重拉）。"""
+        return self.full_restart
+
+    @property
+    def http_status(self) -> int | None:
+        return None if self.allowed else 409
+
+
+def _restart_plan(targets: list[str]) -> ResumePlan:
+    """全量重拉计划：所有目标资源从第 1 页开始。"""
+    return ResumePlan(
+        allowed=True,
+        reason=None,
+        full_restart=True,
+        resources={
+            name: ResourceResume(resource=name, action=CURSOR_ACTION_RESTART)
+            for name in targets
+        },
+    )
+
+
+def resume_plan(cursor_json_str: str | None, target_resources) -> ResumePlan:
+    """判定"能否续跑、从哪续"（R6 的单一出口，R4 的 /resume 直接消费）。
+
+    判定表（dev_task.r6-cursor-persistence.md §2.2）：
+
+    | 输入 | 判定 |
+    |---|---|
+    | 列值 NULL / 非 JSON 字符串（损坏） | 拒绝，reason=NO_CURSOR |
+    | JSON 合法但缺 schema_version 键 | 拒绝，reason=UNSUPPORTED_CURSOR_SCHEMA |
+    | schema_version 存在且非 1 | 拒绝，reason=UNSUPPORTED_CURSOR_SCHEMA |
+    | 字符串恰为 "{}"（未开始分页） | 允许，全量重拉（**不是** 409） |
+    | schema_version==1 且目标资源无条目 | 允许，该资源从第 1 页开始 |
+    | schema_version==1 且目标资源 complete=false | 允许，从该资源 cursor 继续 |
+    | schema_version==1 且目标资源 complete=true | 允许，但该资源**跳过**（不再重拉） |
+
+    注意：判定"是否可续"的最终依据是**每个目标资源都没有已取页记录**，
+    而不是 `cursor_json == "{}"` 的字符串比较（字符串等值只能当"未开始"的快速通道）。
+    """
+    targets = [name for name in (target_resources or []) if isinstance(name, str) and name]
+    if cursor_json_str is None or not isinstance(cursor_json_str, str):
+        return ResumePlan(allowed=False, reason=CURSOR_REASON_NO_CURSOR)
+    text = cursor_json_str.strip()
+    if not text:
+        return ResumePlan(allowed=False, reason=CURSOR_REASON_NO_CURSOR)
+    if text == "{}":
+        # 快速通道：字面 "{}" 是"未开始分页"的合法初始态 → 允许续跑，等同全量重拉。
+        return _restart_plan(targets)
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return ResumePlan(allowed=False, reason=CURSOR_REASON_NO_CURSOR)
+    if not isinstance(value, dict):
+        return ResumePlan(allowed=False, reason=CURSOR_REASON_NO_CURSOR)
+    if "schema_version" not in value:
+        # 缺失 ≠ 默认 v1：不得猜测。
+        return ResumePlan(allowed=False, reason=CURSOR_REASON_UNSUPPORTED_SCHEMA)
+    version = value.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version != CURSOR_SCHEMA_VERSION:
+        return ResumePlan(allowed=False, reason=CURSOR_REASON_UNSUPPORTED_SCHEMA)
+    resources = value.get("resources")
+    if not isinstance(resources, dict):
+        # 结构不可识别但版本可识别：按"没有已取页记录"处理（最坏结果是全量重拉，安全）。
+        resources = {}
+    plan: dict[str, ResourceResume] = {}
+    progressed = False
+    for name in targets:
+        entry = resources.get(name)
+        if not isinstance(entry, dict):
+            plan[name] = ResourceResume(resource=name, action=CURSOR_ACTION_RESTART)
+            continue
+        pages = max(0, _as_int(entry.get("pages")))
+        fetched = max(0, _as_int(entry.get("fetched")))
+        complete = bool(entry.get("complete"))
+        raw_cursor = entry.get("cursor")
+        cursor = raw_cursor if isinstance(raw_cursor, str) and raw_cursor else None
+        if complete:
+            # 已取到末页：续跑时跳过该资源（R4-3 语义，plan 层就体现）。
+            # 注意它**不是**全量重拉：该资源确实取过页，不能从头再来一遍。
+            progressed = True
+            plan[name] = ResourceResume(
+                resource=name,
+                action=CURSOR_ACTION_SKIP,
+                cursor=None,
+                pages=pages,
+                fetched=fetched,
+                complete=True,
+            )
+            continue
+        if pages > 0 or cursor is not None:
+            progressed = True
+        plan[name] = ResourceResume(
+            resource=name,
+            action=CURSOR_ACTION_RESUME,
+            cursor=cursor,
+            pages=pages,
+            fetched=fetched,
+            complete=False,
+        )
+    return ResumePlan(
+        allowed=True,
+        reason=None,
+        full_restart=not progressed,
+        resources=plan,
+    )
+
+
 def is_retryable_error(exc: Exception) -> bool:
     if hasattr(exc, "retryable"):
         return bool(getattr(exc, "retryable"))
@@ -255,6 +487,8 @@ def begin_sync_run(
         retry_payload_hash=retry_payload_hash,
         resource_status_json=json.dumps({"schema_version": RESOURCE_SCHEMA_VERSION}),
         retryable_resources_json="[]",
+        # R6：显式写死初始值 "{}"（"未开始分页"的合法初始态，R6-8 的判定依据）。
+        cursor_json="{}",
         heartbeat_at=datetime.utcnow(),
     )
     db.add(run)

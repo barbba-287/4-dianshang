@@ -1903,7 +1903,7 @@ def _shopify_sync_run(request: Request, db: Session, resources: str):
     from app.platform_adapters.base import AdapterError
     from app.platform_adapters.shopify import ShopifyLiveTransport, ShopifyReadOnlyAdapter, canonical_store_domain
     from app.external_orders import ensure_external_account, ingest_orders
-    from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, ImportStats, ingest_inventory
+    from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, record_sync_cursor, ImportStats, ingest_inventory
     selected = [item.strip() for item in resources.split(",") if item.strip()]
     allowed = {"orders", "inventory"}
     if not selected or not set(selected).issubset(allowed):
@@ -1946,6 +1946,12 @@ def _shopify_sync_run(request: Request, db: Session, resources: str):
     guardrail_error = None
     for resource in selected:
         mark_resource_running(db, run, resource)
+        # R6：每页成功后把游标与累计计数写进 run.cursor_json（独立列，不塞进台账 JSON）。
+        # 适配器的不变式：cursor 为 None ⇔ 该页是末页（hasNextPage=false），
+        # 因此 complete 由 cursor 是否为 None 推出；非 None 一律表示"还有后续页"。
+        adapter.on_page_done = lambda cursor, pages, fetched, _resource=resource: record_sync_cursor(
+            db, run, _resource, cursor, pages, fetched, complete=(cursor is None)
+        )
         try:
             # 资源级检查点：资源之间不翻页时也能被取消/预算中止。
             if cancel_token.is_set():

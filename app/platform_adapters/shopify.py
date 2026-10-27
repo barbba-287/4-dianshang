@@ -214,6 +214,8 @@ class ShopifyReadOnlyAdapter:
         max_pages=100,
         deadline: float | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        start_cursor: str | None = None,
+        on_page_done: Callable[[str | None, int, int], None] | None = None,
     ):
         self._transport = transport
         self.live_enabled = bool(live_enabled and not simulated)
@@ -224,6 +226,12 @@ class ShopifyReadOnlyAdapter:
         # 两者都缺省时 _pages() 的行为与引入护栏前完全一致。
         self._deadline = deadline
         self._cancel_check = cancel_check
+        # R6：断点续跑的起点游标与"每页成功后"回调。两者都缺省时 _pages() 的
+        # 行为与引入它们之前完全一致（沿用 P2-0a deadline/cancel_check 的兼容手法）。
+        # on_page_done(cursor, pages, fetched)：cursor 是本页的 endCursor，
+        # **取完时（hasNextPage=false）为 None**；pages/fetched 是本次分页的累计值。
+        self.start_cursor = start_cursor
+        self.on_page_done = on_page_done
         # 本次（最后一次）分页实际消耗的页数，供 run 留痕；见 pages_used。
         self.pages_used = 0
 
@@ -234,11 +242,27 @@ class ShopifyReadOnlyAdapter:
         if self._deadline is not None and time.monotonic() > self._deadline:
             raise AdapterError("SHOPIFY_SYNC_BUDGET_EXCEEDED", "同步超出 wall-clock 预算")
 
+    def _notify_page_done(self, cursor: str | None, pages: int, fetched: int) -> None:
+        """每页成功后回调（R6 的游标落库钩子）。
+
+        回调异常**不吞**：游标写不进去就是同步事实没落库，必须让本次同步失败，
+        而不是假装成功。回调缺省时不做任何事（既有行为零变化）。
+        """
+        callback = self.on_page_done
+        if callback is None:
+            return
+        callback(cursor, pages, fetched)
+
     def _pages(self, query: str, data_key: str, variables: dict | None = None) -> list[dict]:
-        cursor = None
+        # start_cursor 是续跑起点（None = 从第一页开始，既有行为）。
+        cursor = self.start_cursor
         seen: set[str] = set()
+        if cursor:
+            # 起点游标也计入已见集合：续跑时若上游把游标指回起点，能立刻判成环。
+            seen.add(cursor)
         records: list[dict] = []
         pages_used = 0
+        fetched = 0
         # 留存用的资源名（如 orders/inventory）；fixture transport 没有该属性也不报错。
         self._set_transport_resource(_RESOURCE_BY_DATA_KEY.get(data_key, data_key))
         try:
@@ -249,15 +273,24 @@ class ShopifyReadOnlyAdapter:
                 response = self._transport.query(query=query, variables={"first": self.page_size, "after": cursor, **(variables or {})}, request_id=request_id)
                 pages_used += 1
                 connection = ((response.get("data") or {}).get(data_key) or {})
-                records.extend(edge.get("node") for edge in connection.get("edges", []) if isinstance(edge, dict) and isinstance(edge.get("node"), dict))
+                page_records = [
+                    edge.get("node")
+                    for edge in connection.get("edges", [])
+                    if isinstance(edge, dict) and isinstance(edge.get("node"), dict)
+                ]
+                records.extend(page_records)
+                fetched += len(page_records)
                 page_info = connection.get("pageInfo") or {}
                 if not page_info.get("hasNextPage"):
+                    # 取完：游标为 null（complete=true），末页信息就此落库。
+                    self._notify_page_done(None, pages_used, fetched)
                     return records
                 next_cursor = page_info.get("endCursor")
                 if not next_cursor or next_cursor in seen:
                     raise AdapterError("SHOPIFY_CURSOR_LOOP", "Shopify 分页游标未前进")
                 seen.add(next_cursor)
                 cursor = next_cursor
+                self._notify_page_done(next_cursor, pages_used, fetched)
             raise AdapterError("SHOPIFY_PAGE_LIMIT", "Shopify 分页超过上限")
         finally:
             # 成功、失败、取消都留痕，避免预算/取消路径下页数丢失。
