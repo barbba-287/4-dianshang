@@ -89,7 +89,7 @@ R6 交付 `resume_plan(cursor_json_str, target_resources) -> ResumePlan`（建�
 | 层 | 判据 | 阻断 |
 |---|---|---|
 | 基线 | R6 开工前全量 **351 passed / 0 failed / EXIT=0**（已达成，见 §3b） | — |
-| **主判据 ①** | **全量 0 failed**（R6 交付后的全量；R-19 已关闭，全量恢复为阻断项，`§14.2` 清单分支已失效） | **是** |
+| **主判据 ①** | **全量 0 failed**（R6 交付后的全量；R-19 已关闭，全量恢复为阻断项，`§14.2` 清单分支已失效）；数字口径 **351 + 本任务新增用例数 N**（§6 定向若 N 例则期望 `351+N passed`；若实施方实际用例数与 §6 有出入，以交付说明声明数为准并说明理由） | **是** |
 | **主判据 ②** | **定向全绿**：`tests/test_r6_cursor_persistence.py`（新建）全部通过 | **是** |
 | **主判据 ③** | **相关零回退**：`test_p2a_sync_guardrails.py`（10 例）+ `test_s4_sync_gate.py`（5 例）+ `test_r19_worker_leak.py`（7 例）全绿 | **是** |
 | 规模 | P7：`git diff --cached --numstat` 与 §5 预期一致；**删除数非 0 必须解释** | 是 |
@@ -103,8 +103,14 @@ R6 交付 `resume_plan(cursor_json_str, target_resources) -> ResumePlan`（建�
 1. **downgrade 只允许一条 `op.drop_column("external_sync_runs", "cursor_json")`**——只丢
    cursor 列，`external_sync_runs` 其余字段**零变化**（不重建表、不改既有列的类型/默认值/
    索引/约束、不动其他表）。up 填充默认 `"{}"`，既有行回填。
-2. **禁止 `op.batch_alter_table` 整表重建**。若某方言必须重建表才能 drop column，**停下报告**，
-   不得自行改道。
+2. **默认禁止 `op.batch_alter_table` 整表重建；SQLite 兼容性例外（用户 2026-10-27 裁定）**：
+   若实施方实测确认当前 Alembic/SQLite 组合下 `op.drop_column` 无法直接工作（或需要
+   `render_as_batch` 才能生效），**允许使用 batch 路线**，但必须同时满足三条件：
+   ① delivery 说明里写明"为什么必须 batch"（附实测报错或方言限制原文）；
+   ② down 后仍按 R6-4 做**逐列断言**（inspector/PRAGMA），证明除 cursor_json 外全表零变化
+   （batch 重建最容易悄悄改掉的：列顺序、默认值表达、约束名——断言必须覆盖）；
+   ③ 已知限制登记 **R-33**（见 §7）。三者缺一，复核退回。
+   其余方言（若必须重建表才能 drop column 且无 batch 机制）仍按原规则**停下报告**。
 3. **不改** `resource_status_json` 既有结构（cursor 独立成列，不塞进 JSON 台账）。
 4. **不动** `CrawlJob.cursor`（F2，另一条链路）。
 5. **不实现**自动续跑（那是 R4）；R6 只保证"游标被持久化、可被读到、`resume_plan` 可判"。
@@ -143,6 +149,7 @@ R6 交付 `resume_plan(cursor_json_str, target_resources) -> ResumePlan`（建�
 |---|---|
 | R-31 | `seen` 防环集合不持久化：跨续跑的环检测不完整（只恢复末游标）。R6 交付说明必须声明该取舍及理由。**兜底**：数据层既有 `payload_hash`/`idempotency_key` 去重不受续跑影响，环导致的重复拉取会被入库层去重吸收——即环检测退化的最坏后果是"多翻几页"，不是"重复写数"；此句即去重兜底说明，R4 交付时复核仍成立 |
 | R-32（若适用） | `_pages()` 每页落库 = 每页一次额外 commit。**触发阈值**：定向套件总耗时较改前增幅 >10%，或任一单用例耗时增幅 >2s，即升级 R-32 为正式登记并附前后对比数据；未触阈值则在交付说明记"已测、未触发、数字如下"后关闭 |
+| R-33（若走 batch） | migration 使用了 `op.batch_alter_table`（SQLite 兼容性例外）：跨方言移植时 batch 重建表的行为差异是隐患；交付说明必须含"为何必须 batch"的证据 + R6-4 逐列断言覆盖列顺序/默认值/约束名 |
 | — | 多 worker 下"单飞闸门 + cursor 持久化"仍是进程内语义（R-26/R-27 已登记的同源限制，不重复编号） |
 
 ## 8. 交付说明（R-17）
