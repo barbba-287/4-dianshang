@@ -804,3 +804,32 @@ API 专用 401 分支，303 仅属页面路由（`:341`）。审计文档 §5 �
 | R-25 | P2（运维可用性） | live 热开关无前端调用点，只能走 API；且状态仅存进程内存，多 worker 不共享 | ① 已在 runbook 披露并给出操作例；② 补 UI 归入 P3；③ 多副本部署前必须先解决跨进程状态同步（否则「关」只在单 worker 生效） |
 
 修订记录：2026-10-27 新增 §12（R-25 复核登记）。
+
+---
+
+## 13. R-18 闭环结论与 R-26 登记（2026-10-27）
+
+### 13.1 R-18 追问结论：条件可复现，不重开
+
+R-18（`docs/architecture-inventory.json` 追平）已由 `f8958b9` 独立提交闭环。2026-10-27 10:44 按「先过 4 项确认」的要求补跑了一次生成器核对，实测结果：
+
+```text
+env -u PYTHONPATH python scripts/inventory_architecture.py
+→ routes=125, models=43, app_files=71, untracked=2
+```
+
+与提交时记录的 `untracked=0` **不一致**，差异仅为 `untracked_classification` 中出现两个当时刚创建的未跟踪文件（`dev_task.template.md`、`docs/ui-reference-checklist.md`）。
+
+**结论**：生成器产出的 `routes` / `orm_models` / `app_imports` 三部分可复现；`untracked_classification` 随工作区未跟踪文件变化。R-18 的追平成果有效，**不重开**；该行为差异转登记为 R-26。
+
+> 取证方式（R-20 合规）：跑生成器前后各一次 `git status` 对照，跑完立即 `git checkout -- docs/architecture-inventory.json` 还原，未留改动。
+
+### 13.2 新增风险登记
+
+| 编号 | 级别 | 描述 | 建议 |
+|---|---|---|---|
+| R-26 | P3（工具可复现性） | `scripts/inventory_architecture.py` 的 `untracked_classification` 用 `git ls-files --others --exclude-standard` 采集，**随工作区未跟踪文件实时变化**。同一提交的代码，在有未跟踪文件的工作区里重跑，会产出不同快照（本次实测 `untracked` 0→2）。后果：生成器不是纯函数，"重跑即追平"这个动作会被误判为"又漂移了"；也解释了历史上 `untracked 92→0` 里有一部分来自 gitignore 而非代码变化 | ① **不要以"重跑结果是否与提交一致"作为漂移判据**，改以 `git diff` 是否为空为准；② 需要可复现快照时，在干净工作区（或 `git stash -u` 后）再跑；③ 可选改进：`--tracked-only` 开关，或在输出里明写 `untracked` 段是工作区态、不参与版本对齐 |
+
+补充事实：该字段的历史基线 `92→0` 已在 `f8958b9` 提交信息中归因为"gitignore 排除私人目录"，与本次观察一致——不是生成器逻辑变化，是采集口径依赖工作区状态。
+
+修订记录：2026-10-27 新增 §13（R-18 追问结论 + R-26）。
