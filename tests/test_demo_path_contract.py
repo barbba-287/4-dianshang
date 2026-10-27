@@ -1,15 +1,22 @@
-"""demo / 未登录身份路径的契约测试（现状锁定）。
+"""demo / 未登录身份路径的契约测试（规格锁定）。
 
-本文件固定的是 2026-10-26 的**现状**，不等于"期望行为"。已登记待拍板项：
-- D-1：DEMO_MODE_ENABLED 与 EMPLOYEE_AUTH_ENABLED 并存时，前者对鉴权零影响
-- D-2：**未能复现**。任务文件 `dev_task.demo-contract-tests.md` §2.2 称
-  "代码中没有 `/api/` 前缀判断，未登录访问 `/api/*` 返回 303"；但 `app/main.py:311`
-  存在显式的 `if request.url.path.startswith("/api/"):` 分支，未登录访问 `/api/*`
-  实际返回 **401 JSON**（`{"detail": {"code": "UNAUTHORIZED", "message": "认证失败"}}`）。
-  本文件按**实测现状**编写：C1/C4/C7 断言 401 JSON（而非任务文件写的 303），
-  303 只出现在**页面路由**（C2）。详见 `.testtmp/delivery.md` 的偏差说明。
+本文件锁定的是**规格**，而非对实现偶然行为的记录。规格来源：
 
-拍板后修改产品代码时，对应用例需同步更新并注明变更依据。
+- **D-2 裁定（2026-10-27 用户裁定，P2-0b 项 1）**：未登录访问 `/api/*` 返回 **401 JSON**、
+  页面路由返回 **303**，此即规格语义。裁定依据：API 语义应 401 而非 302/303（浏览器跳转语义
+  只适用页面路由），API 客户端才能解析到稳定错误码 `UNAUTHORIZED` 而非 HTML 重定向。
+  正式裁定全文见 `docs/demo-path-audit-20261026.md` §5。
+- 中间件实现依据 `app/main.py:316` 的 `if request.url.path.startswith("/api/"):` 分支：
+  API 分支产出 401 JSON，`:341` `else:` 页面分支产出 303。
+
+据此：C1/C4/C7 断言 401 JSON，C2 断言页面 303，C9 锁定 `/api/` 前缀的精确边界
+（`/apifoo` 无尾斜杠 → 走页面分支 303，不被 401 分支误伤）。
+
+其余未裁定项（**不在本文件的裁定范围内**）：
+- D-1：`DEMO_MODE_ENABLED` 与 `EMPLOYEE_AUTH_ENABLED` 并存时，前者对鉴权零影响
+  （见 `docs/demo-path-audit-20261026.md` §8，尚未裁定；本文件仅按当前规格断言，不预判结论）
+
+本文件不锁定实现细节以外的行为；产品规格变更须先更新裁定文档，再同步对应用例并注明依据。
 """
 
 import importlib
@@ -117,7 +124,7 @@ def _make_request(path: str = "/x") -> Request:
 
 
 # --------------------------------------------------------------------------
-# C1：未登录访问 /api/* —— 实测为 401 JSON（任务文件写的 303 未能复现）
+# C1：未登录访问 /api/* —— 规格为 401 JSON（2026-10-27 D-2 裁定）
 # --------------------------------------------------------------------------
 
 
@@ -267,3 +274,21 @@ def test_seed_demo_is_the_only_effect_of_demo_mode(monkeypatch):
     monkeypatch.setenv("DEMO_MODE_ENABLED", "true")
     cfg.get_settings.cache_clear()
     assert cmd_seed_demo(["--workspace", "prod-shop"]) == 2
+
+
+# --------------------------------------------------------------------------
+# C9：`/api/` 前缀的精确边界 —— `/apifoo` 不进 401 分支
+# --------------------------------------------------------------------------
+
+
+def test_api_prefix_requires_trailing_slash(anonymous_client):
+    """`/apifoo`（无尾斜杠）按页面路由处理：303，不是 401。
+
+    中间件的 API 分支条件是 `startswith("/api/")`（含尾斜杠），因此 `/apifoo`
+    不被 401 分支误伤，落入页面分支 → 303 → `/login?next=/apifoo`。
+    2026-10-27 实测确认（`.testtmp/probe_apifoo_test.py`），与 D-2 裁定一致。
+    """
+    r = anonymous_client.get("/apifoo", follow_redirects=False)
+
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login?next=/apifoo"
