@@ -766,7 +766,7 @@ API 专用 401 分支，303 仅属页面路由（`:341`）。审计文档 §5 �
 
 | 编号 | 级别 | 描述 | 建议 |
 |---|---|---|---|
-| R-19 | P2（测试稳定性） | 全量回归存在 flaky：3 次中 2 次出现 1 个随机出错（`test_frontend_orders` FAILED / `test_frontend_warehouse` ERROR），位置不定、单跑均通过、第 3 次 320 全绿。怀疑与 frontend 类用例的 worker/线程竞态相关，未定位 | ① 收口判定允许「重跑一次全绿」但必须登记；② 后续切片把定位该 flaky 作为独立小任务 |
+| R-19 | P2（测试稳定性） | ~~全量回归存在 flaky~~ **已修复关闭（2026-10-27，提交 `f2e7684`）**。原描述：3 次中 2 次出现 1 个随机出错（`test_frontend_orders` FAILED / `test_frontend_warehouse` ERROR），位置不定、单跑均通过。**实际根因**：非随机 flaky，是确定性的测试间顺序污染——`reload(app.background)` 重置模块级 `_dispatch_thread`/`_dispatch_stop`，旧 `ds-dispatcher` 线程仍存活且只认旧模块的 `stop_event`，`stop_background_workers()` 永远停不掉它；旧线程继续用旧 engine 扫库，`tmp_path` 清理后写入父目录不存在的路径 → `attempt to write a readonly database` | 已按 §14.7 修复：新增 `app/_worker_registry.py` 进程级登记表 + `background.py` 两处登记/反登记 + `conftest.py` autouse 收口 + `tests/test_r19_worker_leak.py` 固化。验收：全量 `350 passed` ×3，0 failed |
 | R-20 | P2（流程） | 任务文件中的「现状事实」段出现错误断言（C1 的 303），根因是复核方审计时采样窗口切断中间件控制流；实施方靠实测纠偏才未固化错误 | ① 任务文件的「现状事实」必须附**实测方法**（完整读函数而非中段采样）；② 涉及控制流的断言在写入规格前先跑一次探针脚本 |
 
 修订记录：2026-10-26 新增 §11（demo contract test 复核）。
@@ -972,5 +972,75 @@ WAL 只是**放大器**（让连接更早建立、更持久），**真正根因�
 - §3b 红线新增两条：P5 发现 AI CLI → 按 R-29 处理；P7 删除数非 0 → 查换行符污染；
 - 附件固化条款表新增 R-29 一行。
 
-修订记录：2026-10-27 新增 §14（R-19 验收口径定稿 + R-29 并行 AI CLI 写者登记）。
+### 14.7 R-19 已修复并关闭（2026-10-27）
+
+**结论：R-19 关闭，验收口径回调为「全量 0 failed」。** 提交 `f2e7684`。
+
+修复内容（详见 `.testtmp/delivery.r19fix.md`）：
+
+- 新增 `app/_worker_registry.py`：进程级登记表存 `(thread, stop_event)`，独立模块
+  **不随 `reload(background)` 丢失**，因此测试侧始终拿得到旧线程的 `stop_event`。
+  该模块只记账、不创建线程，产品行为零改变。
+- `app/background.py` 两处（11 insertions / 0 deletions）：`start_background_workers()`
+  在 `start()` 前 `register(...)`；`stop_background_workers()` 在 `join()` 后线程已死则
+  `unregister(...)`。`_dispatch_loop` 一行未动。
+- `tests/conftest.py` 追加 autouse fixture `_reap_background_workers`，用例前后各调
+  `reap_all()` 收口。
+- 新增 `tests/test_r19_worker_leak.py`（6 例）固化。
+
+为什么选 A（登记表）而不是"在 teardown 里多调一次 stop"：探针实测
+
+```
+新模块 stop 后: 1          ← 线程仍存活
+旧 stop_event.set() 后: 0  ← 只有旧 event 能停掉它
+```
+
+**不是调用次数不够，是引用的对象不对**。所以任何"加超时 / 多调几次 stop"的方案
+都治不了；必须能触达旧 `stop_event`。
+
+验收结果：
+
+| # | 判据 | 结果 |
+|---|---|---|
+| A1 | 顺序对两种都绿 | 污染者在前 `14 passed`（修复前 `1 failed, 13 passed`）；受害者在前 `14 passed` |
+| A2 | 全量 3 次稳定 | `350 passed` ×3，0 failed / 0 error（单次约 133–140s） |
+| A3 | 回归用例能失败 | 两方向回退均变红，见 14.8 |
+| A5 | 基线不回退 | `test_p2a_sync_guardrails.py` + `test_s4_sync_gate.py` = `15 passed` |
+
+### 14.8 A3 的一次假绿与修正（方法学教训）
+
+**第一次做 A3 是假绿**：回退 `conftest.py` 的 fixture 后，`test_r19_worker_leak.py`
+仍 `4 passed`。原因：那 4 个用例都自己调 `reap_all()` / `clear()`，**根本不依赖
+conftest fixture**——把 fixture 删掉它们照样绿。
+
+**这是"回归用例"的通用陷阱**：只断言"当前状态正确"的用例，其正确性来自它自己，
+不来自修复；修复被删掉后它依然正确。**A3 的价值全在"回退必红"，做不到这一点的
+用例是装饰品。**
+
+修正方式：加一对自己**不做任何清理**的用例，把收口完全交给 fixture。
+
+- `test_a3_stage1_leaks_one_registered_worker`：登记一个存活线程后不清理，主动"漏"；
+- `test_a3_stage2_previous_leak_already_reaped`：断言上一步那个线程已经死了。
+
+实测：
+
+| 回退对象 | 变红的用例 | 输出 |
+|---|---|---|
+| `conftest.py` 的 autouse fixture | `test_a3_stage2_previous_leak_already_reaped` | `assert not True`；`1 failed, 5 passed` |
+| `background.py` 的 `register()` | `test_no_dispatcher_left_after_testclient_case`、`test_pollution_source_does_not_break_following_test` | `2 failed, 4 passed` |
+
+**推广到后续所有"回归固化"类任务**：交付前必须做一次回退验证，并记录
+"回退谁 → 哪个用例变红"。做不到的，不算固化。
+
+### 14.9 已知 flaky 清单 v1 的处置
+
+§14.3 的 F-1..F-5 清单**保留但标记为历史**：R-19 关闭后，该清单**不再作为开 R6
+的前置条件**，仅作排障参考。§14.2 的三层判据中，"全量辅助（清单内不阻断）"
+这一分支随之失效——全量恢复为**阻断项**，判据即「全量 0 failed」。
+
+修订记录：
+
+- 2026-10-27 新增 §14（R-19 验收口径定稿 + R-29 并行 AI CLI 写者登记）。
+- 2026-10-27 新增 §14.7–14.9（R-19 修复关闭、A3 假绿教训、flaky 清单降级）。
+
 

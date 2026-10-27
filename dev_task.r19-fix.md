@@ -197,9 +197,53 @@ PowerShell 等价：`$env:PYTHONPATH=""; $env:PYTHONDONTWRITEBYTECODE="1"; & "D:
 
 ## 10. 复核清单
 
-- [ ] A1 顺序双向全绿（附两次命令与结果）
-- [ ] A2 全量 3 次全绿（附三次 tail 输出）
-- [ ] A3 回归用例存在且能失败（回退验证：临时回退修复看是否变红）
-- [ ] A4 delivery 五项齐全
-- [ ] A5 基线 15 例全绿
-- [ ] 产品代码改动仅限 `background.py` 两个函数各 1-2 行
+- [x] A1 顺序双向全绿（附两次命令与结果）
+- [x] A2 全量 3 次全绿（附三次 tail 输出）
+- [x] A3 回归用例存在且能失败（回退验证：临时回退修复看是否变红）
+- [x] A4 delivery 五项齐全
+- [x] A5 基线 15 例全绿
+- [x] 产品代码改动仅限 `background.py` 两个函数各 1-2 行
+
+---
+
+## 11. 执行记录（2026-10-27 完成）
+
+**提交**：`f2e7684` — 4 files changed, 389 insertions(+), 1 deletion(-)
+
+| 文件 | 规模 | 说明 |
+|---|---|---|
+| `app/_worker_registry.py` | +108 / -0 | 新增，进程级登记表 |
+| `app/background.py` | +11 / -0 | 两处：start 登记、stop 反登记 |
+| `tests/conftest.py` | +42 / -1 | 追加 autouse fixture；1 处删除为补末尾换行 |
+| `tests/test_r19_worker_leak.py` | +228 / -0 | 新增 6 例 |
+
+**A1**
+```
+pytest tests/test_demo_path_contract.py tests/test_domain_error.py  -> 14 passed
+pytest tests/test_domain_error.py tests/test_demo_path_contract.py  -> 14 passed
+```
+修复前：污染者在前 `1 failed, 13 passed`。
+
+**A2**（`pytest tests/ -q -p no:randomly`）
+```
+第1次: 350 passed in 139.78s
+第2次: 350 passed in 139.96s
+第3次: 350 passed in 133.33s
+```
+
+**A3** 6 例通过，且两方向回退均变红：
+
+| 回退对象 | 变红用例 | 输出 |
+|---|---|---|
+| `conftest.py` autouse fixture | `test_a3_stage2_previous_leak_already_reaped` | `1 failed, 5 passed` |
+| `background.py` 的 `register()` | `test_no_dispatcher_left_after_testclient_case`、`test_pollution_source_does_not_break_following_test` | `2 failed, 4 passed` |
+
+> A3 第一次做是假绿（原 4 例自己清理，不依赖 fixture，回退后仍 4 passed）。
+> 已补一对"自己不清理由 fixture 收口"的用例修正，教训见 checklist §14.8。
+
+**A5**：`test_p2a_sync_guardrails.py` + `test_s4_sync_gate.py` = `15 passed`
+
+**R-29 检查**：提交前 P5 无并发写者、无 `.git/*.lock`。
+
+**结论**：R-19 关闭，验收口径回调为「全量 0 failed」。
+
