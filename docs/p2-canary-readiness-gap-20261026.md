@@ -38,9 +38,9 @@
 
 | # | 能力项 | 现状证据 | 缺口 | 级别 |
 |---|---|---|---|---|
-| S1 | 配置级总开关 | `main.py:1754` 三条件与才走 live；`config.py:64` 默认 False | 开关在 `Settings`（进程启动时加载），**改 `.env` 必须重启**；无运行期热开关、无 DB 级 kill switch | P1 |
-| S2 | 单次运行时间预算 | `shopify.py:39-40` 仅**单请求** 20s + 2 次重试；`max_pages=100`、`page_size=50` | **无 wall-clock deadline、无记录数硬上限**。最坏路径 ≈ 100 页 × 60s ≈ 100 分钟/资源，且全在 HTTP 请求线程内 | **P0** |
-| S3 | 运行中取消 | 后台任务有 `request_cancel`（`background.py:351` 等） | 同步是**同步阻塞 HTTP**（`def shopify_sync`），无 job 化、无取消 API；客户端断连不中止上游拉取 | **P0** |
+| S1 | 配置级总开关 | `main.py:1754` 三条件与才走 live；`config.py:64` 默认 False；**P2-0a 新增进程内热开关**（`app/runtime_flags.py` + `POST /api/admin/live-switch`） | 已具备（部分）：热开关为进程内存态，单进程假设成立；多 worker 部署需外部协调 | **已具备（P2-0a）** |
+| S2 | 单次运行时间预算 | **P2-0a**：run 级 wall-clock `shopify_sync_budget_seconds`（默认 300s）+ 页间检查点 + `pages_used` 台账留痕 | 已具备：超预算终态 `failed + SHOPIFY_SYNC_BUDGET_EXCEEDED` | **已具备（P2-0a）** |
+| S3 | 运行中取消 | 后台任务有 `request_cancel`；**P2-0a**：进程内 cancel token + 页间/资源间检查点 + `POST /api/external/sync/runs/{run_id}/cancel`（202/404/409） | 已具备（部分）：取消在检查点生效，**当前页 transport 等待不可中断** | **已具备（部分，P2-0a）** |
 | S4 | 上游退避与限流 | `shopify.py:60-66`：429/5xx 重试、`Retry-After` 优先、指数退避上限 8s | 无并发闸门（多请求同时触发即多路拉取），无令牌桶 | P2 |
 | S5 | 只读保证 | `read_only=True`（`base.py`/`shopify.py:101`），仅 GraphQL query，无 mutation 分支 | 无编译期/静态检查强制"只读"（靠约定） | P2 |
 | S6 | 触发权限门槛 | `main.py:1752` 需 `inventory.write`；`EMPLOYEE_AUTH_ENABLED=true` | 与 `DEMO_MODE_ENABLED=true` 并存，需确认 demo 路径不能触达 live（见 §5-K2） | P1 |
@@ -52,7 +52,7 @@
 |---|---|---|---|---|
 | R1 | 抓取类离线回放 | `app/catalog_replay.py`（manifest → 本地 HTML，不触网）+ CLI `replay-catalog` | 仅覆盖淘宝类目抓取，与平台同步链路无关 | 已具备（范围外） |
 | R2 | fixture 同步与重试 | `/api/external/sync/fixture`（:2252）、`/runs/{run_id}/retry`（:2310）→ `retry_fixture_bundle`，带 `Idempotency-Key`、返回 `replayed` 标记 | **只回放调用方传入的 fixture 内容**，不是"捕获过的真实响应" | 已具备（部分） |
-| R3 | live 响应留存 | `raw_ref` 为**合成字符串**（`shopify://inventory/<id>/<loc>`，`shopify.py:186`），无 payload 正文落盘 | **live 响应无原样留存 → 出问题无法复现同一份数据** | **P0** |
+| R3 | live 响应留存 | **P2-0b 项 4 已落地**：`ShopifyLiveTransport` 逐页原样落盘 `artifacts/shopify_sync/<run_id>/<request_id>.json`（超限 `.json.truncated` + meta），台账 `retention{status,files,dir}` 留痕；CLI `retention list|get` 读取 | 已具备：出问题可按 run 取回同一份数据；`raw_ref` 合成串问题（`shopify.py:217`）不再是回放唯一依据 | **已具备（P2-0b 项 4）** |
 | R4 | live 运行重试 | 重试端点走 fixture 语义（`retry_fixture_bundle`） | live run **不可重试/不可重放**；只能重新拉一次（数据已变） | P1 |
 | R5 | 幂等与去重 | 快照唯一约束含 `payload_hash` + `idempotency_key`；`uq_external_sync_run_retry_idempotency` | 已具备（重复导入安全） | 已具备 |
 | R6 | 断点续跑 | `AdapterPage.next_cursor` 存在于分页循环内 | **cursor 未在 run 级持久化**，中断后只能从首页重来（叠加 S2 的耗时问题） | P1 |
@@ -117,3 +117,15 @@
 | 日期 | 变更 | 说明 |
 |---|---|---|
 | 2026-10-26 | 新建 | P2 入口只读调研 + 缺口矩阵；P0 3 项 / P1 6 项 / 已具备 5 项；建议先做 P2-0 护栏 |
+| 2026-10-27 | **P0 三项全部收口** | S2 预算、S3 取消（P2-0a，`72653ca`）；R3 留存（P2-0b 项 4，`932a0d6`+`d23d54f`）。矩阵行已同步改判，残留降级见下 |
+
+## 9. P0 收口记录（2026-10-27）
+
+| 原 P0 项 | 交付 | 证据 | 残留（已降级，非 P0） |
+|---|---|---|---|
+| S2 无 wall-clock 预算（最坏 ~100 分钟/资源） | P2-0a：`shopify_sync_budget_seconds=300` + 页间检查点 | `tests/test_p2a_sync_guardrails.py` T1×2/T2 绿；错误码 `SHOPIFY_SYNC_BUDGET_EXCEEDED` | 预算只覆盖页间，单页 transport 等待仍受 `timeout×retries` 约束 |
+| S3 同步阻塞不可取消 | P2-0a：cancel token + 页间/资源间检查点 + `POST /api/external/sync/runs/{run_id}/cancel` | T3/T4/T4b 绿；终态 `failed + SHOPIFY_SYNC_CANCELLED` | 取消非即时（页间生效）；单进程假设 |
+| R3 live 响应无原样留存 | P2-0b 项 4：transport 逐页原样落盘（`.json` / 超限 `.json.truncated` + meta）、台账 `retention` 留痕、CLI 读取 | `tests/test_p2b_retention.py` 7 条绿（含截断、凭证零落盘双路径、fixture 零留存）；设计定稿 v1.2 `docs/p2-retention-design-20261027.md` | 无自动清理（策略已定：30 天、整目录删）；无自动重放（本期只保证"人可取回"）；非 Dev Store 接生产前需重审脱敏 |
+
+**结论**：只读 Canary 的"可停 / 可回放"已从 P0 降级为既有能力 + 已登记残留；下一步可进 P2 主体
+（Connector / source batch / 质量 / 补偿），残留项按 §3 表的 P1/P2 级别排期。

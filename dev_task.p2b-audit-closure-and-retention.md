@@ -161,3 +161,29 @@ env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 \
 2. 每项独立提交；提交信息不含 Windows 反斜杠。
 3. 复核方（WorkBuddy）逐项独立复核后再报用户；项 3 后强制停机等评审。
 4. 全局红线：`.env` 的 `SHOPIFY_LIVE_ENABLED` 在项 4 落地并用户确认前**保持 false**。
+
+---
+
+## 8. 复核结论（2026-10-27，WorkBuddy）
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| 1 D-2 收口 + 翻转 | **通过**（`78fa4b5`） | 审计 §5 正式裁定（裁定人/日期/依据/纠正历程齐全）；测试头"规格锁定"；C9 `/apifoo`→303 先实测后断言；`app/` 零改动；定向 9 绿 |
+| 2 D-3 解耦 | **通过**（`ddcbd34`） | conftest 两处固定 Shopify 基线；`tests/test_env_isolation.py` 1 条；干扰态（live=true + LEAK-PROBE）全量 **332/0**；`.env` 逐字节还原（cmp + 计数核验） |
+| 3 留存设计 | **定稿 v1.2**（`0b1b335`） | 6 问裁定落表；②三条硬约束；⑤配置项 + 超限行为 + 两条实现约束（截断文件 `.json.truncated` 防误解析 / 凭证断言覆盖截断场景） |
+| 4a 留存实现 | **通过**（`932a0d6`） | transport 落盘（纯截断、无附加字节）+ meta + 台账 `retention` + 配置项；默认 `None` = 零行为变化；p2a 10 绿 |
+| 4b 测试 + CLI | **通过**（`d23d54f`） | 7 条映射 §2.8 五条 + §2.7 两条；凭证断言覆盖正常/截断双路径（`FAKE_TOKEN not in` 三处）；截断 CLI 拒绝解析；全量 **339/0** |
+
+### 8.1 复核发现
+
+- 实施进程仍在多处被 SIGTERM（R-22），但三块产物均落盘，由复核方补跑验证与补录交付说明；
+  无代码返工（唯一例外：项 4a 实施方主动加了"域名先校验再建 run"避免孤儿 running run，属合理加固）。
+- 台账写入点沿用 P2-0a 的 `record_resource_metadata`，**未动 `app/external_sync.py`**（设计允许改，
+  实现选择不改 = 更小 diff，认可）。
+
+### 8.2 收口状态
+
+- 缺陷矩阵 P0 三项全部收口（`docs/p2-canary-readiness-gap-20261026.md` §9）；
+- 基线 **339 passed / 0 failed**；runbook 增「响应留存（排障用）」一节；
+- 残留：自动清理未实现（策略已定 30 天）、自动重放未实现（本期只保证"人可取回"）、
+  单进程假设（热开关/取消 token）、取消与预算均在页间生效。

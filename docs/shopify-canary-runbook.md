@@ -60,6 +60,21 @@ POST /api/external/shopify/sync?resources=orders,inventory
 - 相同库存 payload 通过稳定 `idempotency_key` + `payload_hash` 去重；
 - 不应产生重复事实记录。
 
+## 响应留存（排障用）
+
+每次 live 同步会把上游原始响应**原样**落盘，出问题可回取同一份数据（不再依赖 `raw_ref` 合成串）：
+
+- 位置：`artifacts/shopify_sync/<run_id>/`，每页一对文件：
+  `<request_id>.json`（原样正文）或 `<request_id>.json.truncated`（超单文件上限，只存前 N 字节）
+  + `<request_id>.meta.json`（request_id / http_status / attempt / elapsed_ms / query / variables / truncated / size）。
+- 上限：`SHOPIFY_RETENTION_MAX_BYTES`（默认 10485760 = 10MB）。
+- 查看：`python -m app.cli retention list --run-id <run_id>`；
+  取正文 `python -m app.cli retention get --run-id <run_id> --request-id <request_id>`。
+  **截断文件会被拒绝解析**（明确报"截断、非完整响应"），不得作为重放基准。
+- 台账可查：`resource_status_json` 的资源条目里有 `retention`（`status=ok|truncated|failed`、`files`、`dir`）。
+- 留存失败**不影响同步成功**（降级为 warning + 台账 failed），但排障时先看台账 `retention` 是否 `ok`。
+- 留存文件含店铺真实业务数据：**不外传**（不进 git / 聊天 / 导出），目录已被 `.gitignore` 覆盖。
+
 ## 面试演示口径
 
 > 这是官方 Dev Store 的真实 API 数据结构验证，不是生产店铺经营数据。我的重点是把第三方 API 适配为只读外部事实层：先做 scope、分页、错误和幂等，再让上层 Skill/MCP 读取统一事实；外部库存观察值和内部库存台账分开，避免同步直接污染业务库存。
