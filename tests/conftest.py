@@ -96,3 +96,44 @@ def _clear_settings_cache():
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# R-19 修复：后台调度线程的测试间收口
+#
+# `app/background.py` 的 `ds-dispatcher` 线程由模块级 `_dispatch_thread` 持有，
+# 停止信号经闭包传入 `_dispatch_loop`。测试里 `importlib.reload(app.background)`
+# 会把这两个全局重置为 None，**但旧线程仍存活**，且只认旧模块的 stop_event；
+# 此后 `stop_background_workers()` 操作的是新模块的 None，永远停不掉旧线程。
+# 旧线程继续用旧 engine 扫库，等其 `tmp_path` 被清理后写不进去 →
+# `sqlite3.OperationalError: attempt to write a readonly database`。
+#
+# 修法：`app/background.py` 启动线程时把 (thread, stop_event) 登记到
+# `app/_worker_registry.py`（独立模块，不随 reload(background) 丢失）；
+# 本 fixture 在每个用例前后调 `reap_all()` 把登记表里的线程全部停掉。
+# 只动测试侧与 worker 登记，不碰任何业务逻辑。
+# ---------------------------------------------------------------------------
+
+
+def _reap_registered_workers() -> None:
+    """停掉所有已登记的后台线程；异常一律吞掉。
+
+    清理发生在 teardown，抛出会把"清理失败"伪装成"用例失败"，
+    掩盖真正的断言结果。清理是否彻底由 `tests/test_r19_worker_leak.py` 断言。
+    """
+    try:
+        from app._worker_registry import reap_all
+    except Exception:  # noqa: BLE001 - 模块异常不应影响用例
+        return
+    try:
+        reap_all(timeout=1.0)
+    except Exception:  # noqa: BLE001
+        return
+
+
+@pytest.fixture(autouse=True)
+def _reap_background_workers():
+    """每个用例前后各收口一次后台线程（R-19）。仅测试侧，不改产品行为。"""
+    _reap_registered_workers()
+    yield
+    _reap_registered_workers()

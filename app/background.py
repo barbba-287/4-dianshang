@@ -150,6 +150,12 @@ def start_background_workers() -> None:
             daemon=True,
             name="ds-dispatcher",
         )
+        # 登记到进程级表：`importlib.reload(本模块)` 会把上面两个全局重置为 None，
+        # 但旧线程仍存活且只认这个 stop_event。登记后测试侧才能在 reload 之后
+        # 依然拿到它并停掉线程（R-19：否则旧线程会一直用旧 engine 扫已删除的库）。
+        from app._worker_registry import register
+
+        register(_dispatch_thread, _dispatch_stop)
         _dispatch_thread.start()
 
 
@@ -167,6 +173,11 @@ def stop_background_workers(timeout: float = 5.0) -> None:
         stop_event.set()
     if dispatch_thread is not None:
         dispatch_thread.join(timeout=timeout)
+        # 已主动停掉：从进程级登记表移除，避免登记表随 reload 累积。
+        from app._worker_registry import unregister
+
+        if not dispatch_thread.is_alive():
+            unregister(dispatch_thread)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with _cancel_futures_lock:
