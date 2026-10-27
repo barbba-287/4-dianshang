@@ -6,7 +6,6 @@
 > 每件独立任务文件另存（`dev_task.s4-concurrency.md` 等），本文件只作总纲与顺序依据。
 
 ## 0. 为什么是这个顺序（用户理由，勿改）
-
 | 序 | 项 | 一句话理由 |
 |---|---|---|
 | 1 | **S4 并发闸门** | 入口控制。当前"单进程假设"必须显式化（锁/单例），否则 R6/R4 会被并发问题污染 |
@@ -16,6 +15,9 @@
 ---
 
 ## 1. S4：并发闸门（第一件）
+
+> **细化版见 `dev_task.s4-concurrency.md`（可直接执行）**；本节保留总纲口径，
+> 含用户 2026-10-27 追加的两条硬约束：**锁释放放 `finally`**、**409 走 R1 错误体**。
 
 ### 1.1 现状（Fact）
 
@@ -107,7 +109,11 @@
   - `pages` / `fetched` 为累计值（跨续跑用：续跑时从源 run 的 `pages` 起算，不归零）；
   - `updated_at` 每次落库更新。
 - **`cursor_json` 列定义定死**：`Text`，`nullable=False`，`default="{}"`，`server_default="{}"`；
-  空 run（未开始分页）也是合法 `"{}"`，读取端按"无可续游标"处理。
+  空 run（未开始分页）也是合法 `"{}"`。
+  **`"{}"` 的读取语义（用户 2026-10-27 裁定）："未开始"，不是"拒绝"。** 即 `{}` 是合法初始态，
+  表示 "尚无任何资源取过页"，续跑端（R4）遇到 `{}` 应当**允许**续跑并等价于从第 1 页全量重拉，
+  而不是返回 409。详见 §3.4 的「`{}` 视为未开始而非拒绝」语义界定表。
+  409 的 `NO_CURSOR` 仅保留给"列值为 NULL / 结构无法识别"的历史脏数据与损坏数据。
 - 不改 `resource_status_json` 既有结构（cursor 独立字段，不塞进 JSON 台账）。
 - 不实现"自动续跑"（那是 R4）；R6 只保证"游标被持久化了，可被读到"。
 - `seen` 集合（防环）也要能恢复：建议存最近 N 个游标（或只存最后游标 + 页数，环检测退化）
@@ -124,6 +130,7 @@
 | R6-6 | `cursor_json` schema 形状 | 写入后 JSON 可解析、`schema_version==1`、键集合恰为 `schema_version/resources/updated_at`；已取完资源 `cursor is None and complete is True` |
 | R6-7 | 未知 schema_version 读取 | 手工写入 `schema_version=99` → R4 的 resume 必须返回 409 而非猜测续跑 |
 | R6-5 | 双资源并发（orders+inventory） | 两个 key 互不覆盖 |
+| R6-8 | 未开始分页的 run 落库 | 新建 run 的 `cursor_json` 读出来是 `"{}"`（不是 NULL、不是 `{"schema_version":1,...}` 空壳）—— 保证 A 情形可被 B 情形区分对待 |
 
 ### 2.5 完成标准
 
@@ -181,8 +188,27 @@
 
 | # | 场景 | 期望 |
 |---|---|---|
-| R4-6 | 源 run 的 `cursor_json` 为 `"{}"`（无游标） | 409 `SYNC_RUN_NOT_RESUMABLE`，reason=`NO_CURSOR` |
+| R4-6 | 源 run 的 `cursor_json` 为 **null 列值 / 缺失键**（schema 存在但该资源无游标条目） | 409 `SYNC_RUN_NOT_RESUMABLE`，reason=`NO_CURSOR` |
+| R4-6b | 源 run 的 `cursor_json` 为 `"{}"`（合法空对象，**未开始分页**） | **不是** 409。`{}` ≡ 无任何资源已取页 ≡ 从第 1 页开始的完整重拉；resume 允许，行为等同新 run（见 §2.5） |
 | R4-7 | 源 run 的 `cursor_json.schema_version=99` | 409，reason=`UNSUPPORTED_CURSOR_SCHEMA`（不得猜测） |
+| R4-8 | 源 run 的 `cursor_json` 缺 `schema_version` 键 | 409，reason=`UNSUPPORTED_CURSOR_SCHEMA`（缺失等同于不识别，**不得**默认按 v1 处理） |
+
+#### 「`{}` 视为未开始而非拒绝」的语义界定（用户 2026-10-27 裁定）
+
+用户原话：**「`{}` 视为未开始而非拒绝」**。落地时必须区分三种"没游标"：
+
+| 情形 | 列值 | 语义 | resume 结果 |
+|---|---|---|---|
+| A. 未开始分页 | `"{}"` | 合法初始态（R6 的 `default="{}"`/`server_default="{}"`），无任何资源已取页 | **允许**，等价于从第 1 页重拉全部资源 |
+| B. schema 在但资源无条目 | `{"schema_version":1,"resources":{}}` 或某资源键缺失 | 该资源从未进入分页 | 该资源按第 1 页开始；若所有目标资源都是 B，则整体同 A |
+| C. 无法识别 | 列值为 `NULL` / 非 JSON / `schema_version` 非 1 | 数据损坏或版本不认识 | 409 `UNSUPPORTED_CURSOR_SCHEMA`（C 中的 NULL 单独走 `NO_CURSOR`） |
+
+- **B 与 A 等价**，因此实现上「无可续游标」的判定条件必须是"每个目标资源都没有已取页记录"，
+  而不是"`cursor_json` 字符串等于 `{}`"。用字符串比较会在 B 情形漏判。
+- 判定函数建议单一出口：`resume_plan(cursor_json, target_resources) -> ResumePlan`，
+  `ResumePlan.empty` 为真 ⇒ 允许但走全量；为假 ⇒ 逐资源带游标续跑。
+- 若某资源 `complete=true`（已取到末页），resume 时**跳过**该资源（与 R4-3 同义）。
+- 409 的 `NO_CURSOR` 仅保留给 **C 中的 NULL 列值**（历史脏数据），不再表示 `{}`。
 
 ---
 
