@@ -86,6 +86,8 @@
        resource_status_json/护栏判断。混用会导致"续跑几次后页数预算被历史耗尽"的隐性 bug。
    - **SKIP 资源的状态与台账（用户 2026-10-27 追加，写法定死）**：
      * 状态：`mark_resource_succeeded`（SKIP 不是失败也不是"未开始"）；
+       新 run 的 `attempt` 无论 SKIP 与否一律 = 源 attempt + 1（SKIP 只跳过拉取，
+       **不改变 run 级链路元数据**：attempt、retry_of_run_id、resumed_from 照常记录）；
      * `resource_status_json` 该资源条目 metadata 必须含：
        `{"resumed": "skip", "resumed_from_run": <源run_id>, "source_pages": <源累计pages>, "source_fetched": <源累计fetched>}`，
        使台账能区分"本次真拉取的成功"与"承袭源 run 的成功"；
