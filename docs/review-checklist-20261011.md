@@ -833,3 +833,144 @@ env -u PYTHONPATH python scripts/inventory_architecture.py
 补充事实：该字段的历史基线 `92→0` 已在 `f8958b9` 提交信息中归因为"gitignore 排除私人目录"，与本次观察一致——不是生成器逻辑变化，是采集口径依赖工作区状态。
 
 修订记录：2026-10-27 新增 §13（R-18 追问结论 + R-26）。
+
+---
+
+## 14. R-19 验收口径定稿 + R-29 登记（2026-10-27）
+
+### 14.1 背景：原口径已不可达
+
+R-19 的原收口判据（见 `dev_task.r19-flaky.md` §6）是「全量连跑 5 次全绿」。
+2026-10-27 S4 实施期间实测三次全量，**每次都有 1 处 DB 层异常且位置漂移**：
+
+| 次 | 是否含 S4 | 结果 | 失败位置 | 异常 |
+|---|---|---|---|---|
+| 1 | 含 | 343 passed / 1 failed | `test_demo_path_contract.py::test_demo_mode_flag_does_not_grant_api_access` | `database is locked` |
+| 2 | 含 | 343 passed / 1 error | `test_p2a_sync_guardrails.py::test_t7b`（setup） | `attempt to write a readonly database` |
+| 3 | **不含 S4**（`--ignore`） | 338 passed / 1 failed | `test_frontend_customer_service.py::test_customer_service_page_has_business_fields` | `attempt to write a readonly database` |
+
+三处用例**单跑均通过**（`demo_path` 3/3、p2a 全组 10/10、`frontend_customer_service` 3/3）。
+
+关键事实：**排除 S4 后全量仍然失败、频率相同** → R-19 是既有问题，与 S4 无关。
+同时据此**撤回**一条中途推断（"S4 并发用例放大 WAL 竞争"），对照实验证伪。
+
+根因（结构性）：几十个测试文件各自在 `tmp_path` 下自建 SQLite 并 `create_all` 建 43 张表；
+`tests/conftest.py:66` 为所有连接开 WAL，Windows 上大量库文件 + `-wal`/`-shm` 句柄轮转，
+全量串行跑（约 140s、数千次连接）时偶发 `locked` / `readonly`。
+
+**"全量 0 failed" 当前不可达**，若继续作为所有任务的验收硬门槛，R6/R4 做了也无法验收。
+
+### 14.2 新口径（定稿，替代原"全量连跑 5 次全绿"）
+
+任务验收采用**三层判据**，权重依次递减：
+
+| 层 | 判据 | 是否阻断 |
+|---|---|---|
+| **主判据** | **定向全绿**：本次新增/修改的测试文件或用例全绿（`{{N}} passed / 0 failed`） | **阻断** |
+| **主判据** | **相关零回退**：与本次改动有直接关系的既有测试文件全绿（如 S4 之于 `test_p2a_sync_guardrails.py`） | **阻断** |
+| **辅助判据** | **全量辅助**：全量回归作为回归网，按「清单」二分 | 见下 |
+
+**全量辅助的二分规则**：
+
+- **清单内不阻断**：失败用例属于**已登记 flaky 清单**（见 14.3），记录后放行。
+- **清单外阻断**：失败用例**不在清单内**，一律视为真实回归，必须查清后重跑；
+  连续两次都失败即判本次改动引入回归，不得以"又是 flaky"放过。
+
+**判定纪律**：
+
+1. 清单必须在**跑之前**存在，不得在看到失败后临时把失败用例塞进清单（事后补录无效）。
+2. 每次全量失败必须在交付说明里记录：用例名 / 异常类型 / 是否清单内 / 单跑结果。
+3. 单跑通过**不是**免责理由，只是"疑似 flaky"的必要条件；判定仍以清单归属为准。
+4. 全量若全绿，直接通过，无需引用清单。
+
+### 14.3 已知 flaky 清单（v1，2026-10-27 建立）
+
+**清单来源**：历次全量实测已复现的失败点。加入清单需附「单跑通过 + 全量失败」的双向证据。
+
+| # | 用例 | 异常形态 | 首次记录 | 备注 |
+|---|---|---|---|---|
+| F-1 | `tests/test_frontend_orders.py::*` | FAILED（偶见 ERROR） | 2026-10-12 | R-19 原始记录 |
+| F-2 | `tests/test_frontend_warehouse.py::*` | ERROR | 2026-10-26 | R-19 原始记录 |
+| F-3 | `tests/test_demo_path_contract.py::test_demo_mode_flag_does_not_grant_api_access` | FAILED `database is locked` | 2026-10-27 | 失败在 `/api/inventory` 会话写入 |
+| F-4 | `tests/test_p2a_sync_guardrails.py::test_t7b_adapter_without_guardrails_is_unchanged` | ERROR `readonly database` | 2026-10-27 | 失败在 harness setup 建 workspace |
+| F-5 | `tests/test_frontend_customer_service.py::test_customer_service_page_has_business_fields` | FAILED `readonly database` | 2026-10-27 | 失败在 `CREATE TABLE workspaces` |
+
+**清单的局限（必须写明）**：F-3/F-4/F-5 的共同根因是 SQLite 句柄竞争，**形态是任意用例都可能中招**。
+清单是按"已观测到的"穷举，不代表其他用例不会失败。因此清单外失败仍按真实回归处理——
+这是有意的保守设计，宁可多查一次，不可放过真回归。
+
+### 14.4 R-19 的收口判据（同步修订）
+
+> 原判据「全量连跑 5 次全绿」**作废**，改为：
+
+> 时间盒 1 个工作日内：**定位根因并修掉**，或**隔离落地并留下清单**。
+> 无论哪条路径，收口验收按 14.2 三层判据执行，**不再要求全量 5 次全绿**。
+>
+> 隔离落地的最低要求：① 14.3 清单存在且附双向证据；② 隔离手段不得是 `--deselect`
+> 简单排除（会连带屏蔽真实缺陷），应优先尝试 `connect_args={"timeout": N}` 或改内存库。
+
+### 14.4b 根因定位（2026-10-27 11:45 补充，重要）
+
+2+2 对照实验后继续深挖，**R-19 的性质已改变：它不是随机 flaky，是确定性的测试隔离缺陷。**
+
+**决定性实验（可复现，非概率事件）**：
+
+| 命令 | 结果 |
+|---|---|
+| `pytest tests/test_demo_path_contract.py` | **9 passed** |
+| `pytest tests/test_domain_error.py` | **5 passed** |
+| `pytest tests/test_demo_path_contract.py tests/test_domain_error.py` | **1 failed, 13 passed** |
+| `pytest tests/test_domain_error.py tests/test_demo_path_contract.py` | **14 passed** |
+
+**严格单向的顺序依赖**：污染者在前 → 失败；污染者在后 → 全绿。同一组用例，仅调换顺序，
+结果从 failed 变 passed。这不是"3 次中 2 次"的概率现象，而是"这个顺序必失败"的确定现象。
+
+**失败形态**：`test_demo_mode_flag_does_not_grant_api_access` →
+`sqlite3.OperationalError: attempt to write a readonly database`。
+
+**机理（已定位到代码层）**：
+
+1. `tests/test_demo_path_contract.py` 的 `anonymous_client` / `demo_mode_client` fixture 使用
+   `with TestClient(main_mod.app) as client:` —— **`with` 会启动 lifespan，拉起后台 worker 线程**。
+2. 该 worker 持有 `bg_mod` 的引用，而 `bg_mod` 的 reload 与 `db_mod` 的 reload 存在时序耦合；
+   `bg_mod.reset_executor()` 写在 **`yield` 之后**，即 teardown 阶段才执行。
+3. 测试函数结束后 pytest 清理 `tmp_path`，**但 worker 线程若未真正退出，仍持有旧 engine**。
+4. 下一个测试用 `monkeypatch.setenv` 指向新的 `tmp_path`，却因模块级 `engine` 已被上一个
+   worker 绑定，写入落到**已删除目录**下的路径 → SQLite 以只读方式打开 → `readonly database`。
+
+**为什么表现为"位置漂移"**：哪个用例恰好成为下一个受害者，取决于前一个用例的 worker
+是否退干净、以及文件执行顺序（pytest 默认按文件名字母序）。所以在全量里看起来"随机"，
+实际是确定的顺序污染。
+
+**为什么四次对照都是 `readonly` 而不是 `locked`**：`readonly` 是"父目录已不存在"的特征，
+`locked` 是并发写竞争的特征。四次全量四次 `readonly`，指向的正是上述"写入已删除目录"路径。
+
+**修正 14.1 的一处表述**：14.1 曾把根因归结为"WAL + 句柄轮转"。对照实验后确认，
+WAL 只是**放大器**（让连接更早建立、更持久），**真正根因是 fixture 清理不彻底 + 后台 worker
+未同步退出**。手工复现"并发建库 32/32 全成功"与"中文路径 + WAL 完全正常"两个实验，
+已排除单纯的路径编码与并发建库两个方向。
+
+**对 14.2 三层判据的影响**：判据本身仍有效（它是"如何验收"，与根因无关），
+但 F-3/F-4/F-5 的性质从"随机 flaky"升级为"**顺序污染，可确定性复现**"，
+因此 R-19 的修复路径应优先考虑**修 fixture**（同步等待 worker 退出、或改用内存库），
+而不是加长超时或扩大 flaky 清单。
+
+
+### 14.5 新增风险登记
+
+| 编号 | 级别 | 描述 | 建议 |
+|---|---|---|---|
+| R-29 | P2（流程/协作） | **并行 AI CLI 写者**：同一工作区可能同时被另一个 AI CLI（Claude Code / Codex / Cursor 等）写入，而任务模板 §3b 的 P5 校验只查 `pytest`/`uvicorn`，**完全漏检**。2026-10-27 实测事故：另一界面以用户账户（UID 197609，非 sandbox）启动 Claude Code，于 10:53:20 向 `app/main.py` 写入 49 行 S4 闸门骨架后退出，未跑测试未写交付；该代码含 `SyntaxError`（`finally` 内二次 `global` 声明），**模块完全无法导入**；且注释沿用的是已废弃的 R-26 编号（版本分叉痕迹）。若未人工盘问，该 `SyntaxError` 会被带进提交且无人发现 | ① **P5 命令扩展**为 `ps -W \| grep -Ei "pytest\|uvicorn\|claude\|codex\|cursor\|code\b"`，已落地进模板 §3b；② **开工前与提交前各查一次**（提交前那次尤其关键，因为另一进程可能在实施中途才启动）；③ 发现即**停手报告**，不得自行覆盖/合并/`stash` 其改动，须由用户裁定归属（本次用户裁定"保留骨架、修复后补齐、一次性提交"）；④ 配合新增的 **P7**：提交前用 `git diff --cached --numstat` 核对改动规模与预期一致，删除数非 0 必须解释——这既是换行符污染的第一信号，也是"混入他人改动"的第一信号 |
+
+### 14.6 模板同步
+
+已落地进 `dev_task.template.md`：
+
+- §0 固化条款索引：五条 → **六条**，新增 R-29；
+- §3b P5 命令扩展（加 `claude|codex|cursor|code`）；
+- §3b 新增 **P7**「改动规模与预期一致」；
+- §3b 红线新增两条：P5 发现 AI CLI → 按 R-29 处理；P7 删除数非 0 → 查换行符污染；
+- 附件固化条款表新增 R-29 一行。
+
+修订记录：2026-10-27 新增 §14（R-19 验收口径定稿 + R-29 并行 AI CLI 写者登记）。
+
