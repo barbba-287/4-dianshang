@@ -75,6 +75,60 @@ POST /api/external/shopify/sync?resources=orders,inventory
 - 留存失败**不影响同步成功**（降级为 warning + 台账 failed），但排障时先看台账 `retention` 是否 `ok`。
 - 留存文件含店铺真实业务数据：**不外传**（不进 git / 聊天 / 导出），目录已被 `.gitignore` 覆盖。
 
+## live 热开关：无 UI，走 API
+
+> 现状（2026-10-27 核实）：`POST /api/admin/live-switch` 存在且可用，但**没有任何前端调用点**——
+> `app/templates/` 与 `app/static/` 中检索 `live-switch` 结果为空，`/shopify` 页面也不含该开关。
+> 运维只能用 API / 命令行操作，请勿在页面上找这个按钮。
+
+**开关性质**（先读，避免误判）：
+
+- 路径：`POST /api/admin/live-switch`，body `{"live_enabled": true|false}`，返回 `{"live_enabled": ..., "source": "runtime_flag"}`。
+- 权限：仅 `ROLE_ADMIN`（需已登录管理员会话 + `X-CSRF-Token`，取 `dianshang_csrf` cookie 值）。
+- **只存进程内存**（`app/runtime_flags.py`），**不落库、不改 `.env`**；进程重启后回落到 `.env` 的 `SHOPIFY_LIVE_ENABLED`。
+- **多 worker / 多副本部署时进程内状态不共享**：每个 worker 各自一份。要做全实例关闭，需逐 worker 调用或改为重启加载 `.env`（现行假设是单进程）。
+- 关闭后的预期行为：同步请求返回 `409 SHOPIFY_LIVE_NOT_CONFIGURED`；`capabilities` 报 `live_enabled: false`。
+
+**操作例（关闭 live，先关再排查）**：
+
+> CSRF 取值两种方式，任选其一：
+> - **推荐**：浏览器按 F12 → Application/存储 → Cookies → 复制 `dianshang_csrf` 的值（最省事，跨平台不会踩转义坑）。
+> - 命令行从 cookies 文件里抠（**Windows Git Bash 下 `\t` 可能不生效**，此写法主要给 Linux/macOS 用；Git Bash 请直接用手工复制）：
+
+```bash
+# Linux/macOS（GNU grep 支持 \t）
+CSRF=$(grep -o 'dianshang_csrf\t[^;]*' cookies.txt | cut -f2)
+
+# Windows Git Bash：\t 常被当字面量，改用 $'\t' 或直接手填
+CSRF=$(grep -o $'dianshang_csrf\t[^;]*' cookies.txt | cut -f2)
+# 仍失败就直接把 devtools 里复制的值贴进来：
+# CSRF=<粘贴此处>
+
+curl -X POST http://127.0.0.1:8000/api/admin/live-switch \
+  -b cookies.txt -H "Content-Type: application/json" \
+  -H "X-CSRF-Token: $CSRF" \
+  -d '{"live_enabled": false}'
+```
+
+重启后恢复 `false`（`.env` 基线）：
+
+```bash
+# .env 内保持 SHOPIFY_LIVE_ENABLED=false，重启即回到基线
+python -m uvicorn app.main:app --reload
+```
+
+**验证是否已关**：
+
+```text
+GET /api/external/shopify/capabilities  → live_enabled: false
+POST /api/external/shopify/sync         → 409 SHOPIFY_LIVE_NOT_CONFIGURED
+```
+
+**多 worker 场景的自查**：若某次调用后同步仍然成功，多半是打到了另一个 worker，逐实例重复调用即可（这是已知限制，不算故障）。
+
+> 归属：这是一条运维可用性缺口（无 UI），不影响"可停"能力（API 可用即达标）。
+> 登记见 `docs/review-checklist-20261011.md` R-25；产品化 UI 另行立项，不在当前执行线内。
+
 ## 面试演示口径
 
 > 这是官方 Dev Store 的真实 API 数据结构验证，不是生产店铺经营数据。我的重点是把第三方 API 适配为只读外部事实层：先做 scope、分页、错误和幂等，再让上层 Skill/MCP 读取统一事实；外部库存观察值和内部库存台账分开，避免同步直接污染业务库存。
