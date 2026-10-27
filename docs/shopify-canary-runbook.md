@@ -17,6 +17,8 @@ SHOPIFY_API_VERSION=2026-07
 
 `.env.example` 只保留空变量名。日志、数据库和接口响应不得出现 Token。
 
+注意：`DEMO_MODE_ENABLED=true` 只放行 seed-demo 数据种子命令，对登录鉴权与 API 鉴权零影响——运维不要把"演示模式开着"理解为任何鉴权被放宽（详见 `docs/demo-path-audit-20261026.md` D-1，现状即此语义，2026-10-27 确认）。
+
 ## 页面验证
 
 启动：
