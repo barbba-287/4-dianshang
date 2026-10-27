@@ -87,6 +87,7 @@ POST /api/external/shopify/sync?resources=orders,inventory
 - 权限：仅 `ROLE_ADMIN`（需已登录管理员会话 + `X-CSRF-Token`，取 `dianshang_csrf` cookie 值）。
 - **只存进程内存**（`app/runtime_flags.py`），**不落库、不改 `.env`**；进程重启后回落到 `.env` 的 `SHOPIFY_LIVE_ENABLED`。
 - **多 worker / 多副本部署时进程内状态不共享**：每个 worker 各自一份。要做全实例关闭，需逐 worker 调用或改为重启加载 `.env`（现行假设是单进程）。
+- **同一限制也适用于 S4 的 live 同步单飞闸门**：闸门是进程内 `threading.Lock`（`app/main.py` 的 `_sync_gate_lock`），多 worker 部署时每个 worker 各自独立，**跨进程不具备互斥能力**——两个 worker 可能同时跑 live 同步。登记为 **R-27**，解除条件见 `dev_task.p1-residuals-s4-r6-r4.md`。现行假设仍是单进程，因此该限制不影响当前 Canary。
 - 关闭后的预期行为：同步请求返回 `409 SHOPIFY_LIVE_NOT_CONFIGURED`；`capabilities` 报 `live_enabled: false`。
 
 **操作例（关闭 live，先关再排查）**：

@@ -1790,6 +1790,24 @@ _sync_cancel_lock = threading.Lock()
 # 记录当前线程登记的 run_id，保证请求结束时能精确注销自己的 token。
 _sync_token_local = threading.local()
 
+# ---------------------------------------------------------------------------
+# Shopify live 同步的单飞闸门（进程内）
+#
+# 语义：同一时刻只允许一个 live run 执行；第二个请求**立即** 409
+# `SHOPIFY_SYNC_IN_PROGRESS`，不排队、不阻塞。
+#
+# 为什么用非阻塞 Lock 而不是 Semaphore(N=1)：live Canary 是人工触发的低频操作，
+# 排队只会掩盖"误操作连点"；立即 409 让运维立刻看到"已经在跑"。
+#
+# 槽位必须在 `begin_sync_run` 之前占用：begin_sync_run 内部会 commit()，
+# 若先建 run 再抢锁失败，就会留下一个永远 running 的孤儿 run。
+#
+# 已知限制：多 worker / 多副本部署时进程内锁失效（R-27，见交付说明与 runbook）。
+# ---------------------------------------------------------------------------
+_sync_gate_lock = threading.Lock()
+# 当前持锁的 run_id（仅用于 409 日志与排查），由持锁线程写入/清空。
+_sync_gate_owner: str | None = None
+
 # 护栏类错误码：走既有错误码体系（AdapterError.code → resource_status_json
 # 与 run.error_code），不新增 run 终态，也不改响应模型。
 GUARDRAIL_ERROR_CODES = {"SHOPIFY_SYNC_BUDGET_EXCEEDED", "SHOPIFY_SYNC_CANCELLED"}
@@ -1844,7 +1862,40 @@ def _shopify_sync_impl(request: Request, db: Session = Depends(get_db), resource
 
     拆成 impl + 壳的原因：壳负责在请求结束时（含异常路径）注销取消 token，
     因此同步执行体必须能整体放进一个 try/finally。
+
+    本函数还负责 **live 同步单飞闸门**：
+    1. 非阻塞抢锁——抢不到立刻 409 `SHOPIFY_SYNC_IN_PROGRESS`（不排队、不阻塞）；
+    2. 抢到后执行原有同步逻辑（鉴权 / live 配置校验 / 建 run / 取数 / 入库）；
+    3. 在 `finally` 里释放锁（成功/失败/取消/异常/BaseException 全部覆盖）。
+
+    槽位必须在 `begin_sync_run` 之前占用：begin_sync_run 内部会 commit()，
+    若先建 run 再抢锁失败，就会留下一个永远 running 的孤儿 run。
     """
+    global _sync_gate_owner
+    if not _sync_gate_lock.acquire(blocking=False):
+        logger.warning("shopify live 同步并发请求被拒：已有 run 在执行（owner_run_id=%s）", _sync_gate_owner)
+        raise DomainError(
+            code="SHOPIFY_SYNC_IN_PROGRESS",
+            message="已有 live 同步正在运行，请等待其结束或先调用取消接口",
+            http_status=409,
+        )
+    try:
+        return _shopify_sync_run(request, db, resources)
+    finally:
+        # 释放顺序不可颠倒：先清归属，再放锁。
+        # 无论成功/失败/取消/异常（含 BaseException）都走到这里。
+        # 注意：`global _sync_gate_owner` 已在函数首行声明，此处不得重复声明
+        # （重复会触发 SyntaxError: name is used prior to global declaration）。
+        _sync_gate_owner = None
+        _sync_gate_lock.release()
+
+
+def _shopify_sync_run(request: Request, db: Session, resources: str):
+    """Shopify live 同步的实际执行体（调用方 `_shopify_sync_impl` 已持有单飞闸门）。
+
+    本函数会回填模块级 `_sync_gate_owner`，因此必须持有 `global` 声明。
+    """
+    global _sync_gate_owner
     principal = require_principal(request, permission="inventory.write")
     settings = get_settings()
     if not (settings.shopify_live_enabled and runtime_live_enabled() and settings.shopify_store_domain and settings.shopify_access_token):
@@ -1866,6 +1917,8 @@ def _shopify_sync_impl(request: Request, db: Session = Depends(get_db), resource
     # 否则会留下一个永远 running 的孤儿 run。
     canonical_store_domain(settings.shopify_store_domain)
     run = begin_sync_run(db, workspace_id=principal.workspace_id, platform="shopify", sync_type="shopify_live", account_ref=account_ref, store_ref=settings.shopify_store_domain, source_mode="shopify_live", simulated=False)
+    # 槽位归属回填：run 已建立，把 run_id 记到闸门上（仅用于 409 日志与排查）。
+    _sync_gate_owner = run.run_id
     # live 响应原样留存：按 run 分目录落到 artifacts 下（该目录已被 .gitignore 覆盖）。
     retention_dir = settings.resolve_path(settings.artifacts_dir) / "shopify_sync" / run.run_id
     transport = ShopifyLiveTransport(

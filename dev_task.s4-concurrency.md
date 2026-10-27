@@ -189,3 +189,115 @@ raise DomainError(
 ## 7. 复核结论
 
 （待实施后由 WorkBuddy 填写）
+
+---
+
+## 8. 实施记录（2026-10-27）
+
+### 8.1 前置校验结果与两处偏离
+
+| # | 前置条件 | 期望 | 实测 | 判定 |
+|---|---|---|---|---|
+| P1 | 前置提交已合入 | OK | `4120974` / `60ab12f` 均为 HEAD 祖先 | ✅ |
+| P2 | 工作区干净 | 空输出 | ` M app/main.py`（49 行，来源见 8.2） | ❌ **偏离** |
+| P3 | 基线测试绿 | 10 passed | `10 passed, 387 warnings in 7.11s` | ✅ |
+| P4 | 目标符号**不存在** | NOT_FOUND | **符号已存在，且含 `SyntaxError`** | ❌ **偏离** |
+| P5 | 无并行进程 | 无 pytest/uvicorn | 无 pytest/uvicorn，**但有 `claude` 进程（PID 1665，10:44:49–10:53 后）** | ❌ **偏离（校验盲区）** |
+| P6 | `SHOPIFY_LIVE_ENABLED=false` | false | `.env:21 false` | ✅ |
+
+**P4/P5 偏离的共同根因**：另一界面在 10:44:49 启动了 Claude Code 进程，
+于 **10:53:20** 向 `app/main.py` 写入 49 行（闸门定义 + 壳化 + `_shopify_sync_run` 拆分），
+随后退出，**未运行任何测试、未写交付说明**。
+
+**该代码含 `SyntaxError`，模块完全无法导入**：
+
+```
+File "app/main.py", line 1887
+    global _sync_gate_owner
+SyntaxError: name '_sync_gate_owner' is used prior to global declaration
+```
+
+原因：`finally` 块内二次声明 `global`，而变量已在函数首行被 `logger.warning` 读取。
+
+**用户裁定**：保留骨架，修复后补齐测试与交付说明，**一次性完整提交，不单独提交骨架**。
+已执行：删除 `finally` 内重复 `global` 声明（`_shopify_sync_run` 的 `global` 保留，因其确需回填）。
+
+### 8.2 疑似编号错配（已修正）
+
+该进程读取的是 10:44 版任务文件（残留编号 **R-26**），而 `5d377db` 已于 10:52:43
+改为 **R-27**。其代码注释写的是 R-26，已改为 R-27。
+**这是「两个界面并行推进同一份任务文件」的典型版本分叉痕迹**，作为 P5 盲区的旁证。
+
+### 8.3 P5 校验盲区（建议加固）
+
+现行 P5 只查 `pytest` / `uvicorn`，未覆盖 AI CLI 与编辑器：
+
+```bash
+# 现行
+ps -W | grep -E "pytest|uvicorn"
+# 建议
+ps -W | grep -Ei "pytest|uvicorn|claude|codex|cursor|code\b" | grep -v grep
+```
+
+另一条更硬的检查：提交前用 `git diff --numstat` 核对改动规模**与预期一致**。
+本次实测显示 49 行新增 / 3 个 hunk，而初次读 diff 时只看了第一个 hunk（18 行）就下结论，
+属 R-20 明令禁止的「中段采样」，已自我纠正。
+
+### 8.4 完成标准核对
+
+| 标准 | 期望 | 实测 |
+|---|---|---|
+| `pytest -q tests/test_s4_sync_gate.py` | 5 passed | **5 passed**（连跑 5 次均 5 passed，3.4s 左右，稳定） |
+| 既有 p2a 10 例 | 10 passed | **10 passed**（6.91s） |
+| p2a + S4 联合 | 15 passed | **15 passed**（连跑 3 次均稳） |
+| 全量回归 | 344 passed / 0 failed | 见 8.5（两次运行各出现 1 个 DB 层异常，位置漂移） |
+| runbook 追加 R-27 | 已追加 | 已追加 |
+| 交付说明 | `.testtmp/delivery.s4.md` | 已落盘 |
+
+### 8.5 全量回归的 DB 层不稳定（归入 R-19，不新开编号）
+
+三次全量运行结果：
+
+| 次 | 是否含 S4 | 结果 | 失败/报错位置 | 异常类型 |
+|---|---|---|---|---|
+| 1 | 含 | 343 passed / 1 failed | `test_demo_path_contract.py::test_demo_mode_flag_does_not_grant_api_access` | `database is locked`（会话心跳写入） |
+| 2 | 含 | 343 passed / 1 error | `test_p2a_sync_guardrails.py::test_t7b`（setup 建 workspace） | `attempt to write a readonly database` |
+| 3 | **不含 S4**（`--ignore`） | 338 passed / 1 failed | `test_frontend_customer_service.py::test_customer_service_page_has_business_fields` | `attempt to write a readonly database`（`CREATE TABLE workspaces`） |
+
+**决定性证据**：**排除 S4 测试后全量仍然失败，频率相同**，且失败落在
+`test_frontend_*` 一类——正是 R-19 早已记录的原话「全量约 1/3 概率随机失败，单跑必过」。
+
+**共同特征**：均为 DB 层异常（非断言失败、非 S4 语义）；失败位置**每次漂移**；
+**单跑全部通过**（`demo_path` 3/3、p2a 全组 10/10、`frontend_customer_service` 3/3）。
+
+**根因（结构性，既有）**：几十个测试文件各自在 `tmp_path` 下自建 SQLite 文件并
+`create_all` 建 43 张表；`conftest.py:66` 为所有连接开 WAL，Windows 上大量
+库文件 + `-wal`/`-shm` 句柄轮转，全量串行跑（约 140s）时偶发 `locked` / `readonly`。
+
+**撤回一条中途推断**：本轮曾判断「S4 并发用例放大 WAL 竞争」，**对照实验证伪**
+（排除 S4 后失败依旧、频率不变），该推断**证据不足，予以撤回**。
+
+**S4 自身稳定性（正面证据）**：
+
+| 验证 | 结果 |
+|---|---|
+| `tests/test_s4_sync_gate.py` 连跑 5 次 | 5 passed × 5（3.40–3.49s） |
+| S4 + p2a 联合连跑 3 次 | 15 passed × 3（9.75–9.85s） |
+
+**处置**：归入 **R-19**，**不新开编号**。并入其隔离记录时补两条：
+① 失败形态含 `readonly database`，不只有 `database is locked`；
+② 隔离时优先尝试给测试库加 `connect_args={"timeout": N}` 或改内存库，
+不要直接 `--deselect`（会连带屏蔽真实的 SQLite 并发缺陷）。
+
+**是否满足「344 passed / 0 failed」**：**未严格满足**（重跑仍未全绿，换位置失败）。
+判定：S4 的定向验收（5 passed）与既有 p2a 不回退（10 passed）**全部满足**；
+全量 0 failed 受 R-19 阻断，**既不能作为 S4 的通过依据，也不能据此否决 S4**。
+**建议 R-19 提前启动**（原定 S4/R6/R4 之后），否则 R6/R4 的验收同样不可信。
+
+### 8.6 对照实验原始输出
+
+- 含 S4 第 1 次：`.testtmp/s4-full.txt`
+- 含 S4 第 2 次：`.testtmp/s4-full-rerun.txt`
+- **不含 S4**：`.testtmp/full-no-s4.txt`
+
+
