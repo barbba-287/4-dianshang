@@ -1823,6 +1823,22 @@ def _unregister_sync_cancel_token(run_id: str) -> None:
         _sync_token_local.run_id = None
 
 
+def _shopify_retention_meta(transport, resource: str) -> dict:
+    """取某个资源的 live 响应留存留痕，写进 resource_status_json。
+
+    留存是诊断能力：写盘失败不影响同步成功，但台账必须可见（status=failed）。
+    transport 不支持留存（如被替换的测试替身）时退化为零文件、状态 ok。
+    """
+    snapshot = getattr(transport, "retention_snapshot", None)
+    if snapshot is None:
+        return {"status": "ok", "files": 0, "dir": None}
+    try:
+        value = snapshot(resource) or {}
+    except Exception:  # noqa: BLE001 - 留痕失败不得影响同步
+        return {"status": "failed", "files": 0, "dir": None}
+    return {"status": value.get("status") or "ok", "files": int(value.get("files") or 0), "dir": value.get("dir")}
+
+
 def _shopify_sync_impl(request: Request, db: Session = Depends(get_db), resources: str = "orders,inventory"):
     """Shopify live 同步的内部实现（路由壳见 _shopify_sync_route）。
 
@@ -1834,7 +1850,7 @@ def _shopify_sync_impl(request: Request, db: Session = Depends(get_db), resource
     if not (settings.shopify_live_enabled and runtime_live_enabled() and settings.shopify_store_domain and settings.shopify_access_token):
         raise DomainError(code="SHOPIFY_LIVE_NOT_CONFIGURED", message="Shopify live 未配置", http_status=409)
     from app.platform_adapters.base import AdapterError
-    from app.platform_adapters.shopify import ShopifyLiveTransport, ShopifyReadOnlyAdapter
+    from app.platform_adapters.shopify import ShopifyLiveTransport, ShopifyReadOnlyAdapter, canonical_store_domain
     from app.external_orders import ensure_external_account, ingest_orders
     from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, ImportStats, ingest_inventory
     selected = [item.strip() for item in resources.split(",") if item.strip()]
@@ -1844,9 +1860,23 @@ def _shopify_sync_impl(request: Request, db: Session = Depends(get_db), resource
     # run 级 wall-clock 预算：进入路由即开始计时，覆盖 transport 等待与入库。
     budget_seconds = int(settings.shopify_sync_budget_seconds)
     deadline = time.monotonic() + budget_seconds
-    transport = ShopifyLiveTransport(settings.shopify_store_domain, settings.shopify_access_token, settings.shopify_api_version, settings.shopify_request_timeout_seconds, settings.shopify_max_retries)
     account_ref = settings.shopify_store_domain
+    # 店铺域名先校验（与 transport 构造时的校验同源）：留存目录要用 run_id，
+    # transport 必须在 run 建立后构造，但域名非法仍须在建 run 之前报错，
+    # 否则会留下一个永远 running 的孤儿 run。
+    canonical_store_domain(settings.shopify_store_domain)
     run = begin_sync_run(db, workspace_id=principal.workspace_id, platform="shopify", sync_type="shopify_live", account_ref=account_ref, store_ref=settings.shopify_store_domain, source_mode="shopify_live", simulated=False)
+    # live 响应原样留存：按 run 分目录落到 artifacts 下（该目录已被 .gitignore 覆盖）。
+    retention_dir = settings.resolve_path(settings.artifacts_dir) / "shopify_sync" / run.run_id
+    transport = ShopifyLiveTransport(
+        settings.shopify_store_domain,
+        settings.shopify_access_token,
+        settings.shopify_api_version,
+        settings.shopify_request_timeout_seconds,
+        settings.shopify_max_retries,
+        retention_dir=str(retention_dir),
+        retention_max_bytes=settings.shopify_retention_max_bytes,
+    )
     # 取消 token：run 建立后立即登记，run 结束（成功/失败/取消/异常）后注销。
     cancel_token = _register_sync_cancel_token(run.run_id)
     adapter = ShopifyReadOnlyAdapter(
@@ -1932,11 +1962,11 @@ def _shopify_sync_impl(request: Request, db: Session = Depends(get_db), resource
                 mark_resource_succeeded(db, run, resource, ImportStats(total=stats.total, inserted=stats.inserted, no_op=stats.no_op, conflict=stats.conflict, snapshot_ids=stats.snapshot_ids))
                 result["resources"][resource] = {"total": stats.total, "inserted": stats.inserted, "no_op": stats.no_op, "conflict": stats.conflict, "snapshot_ids": stats.snapshot_ids or [], "stored": True, "data_completeness": "complete"}
             # 页数预算留痕：实际消耗页数 + 本次 wall-clock 预算，写入 resource_status_json。
-            record_resource_metadata(db, run, resource, {"pages_used": adapter.pages_used, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages})
+            record_resource_metadata(db, run, resource, {"pages_used": adapter.pages_used, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages, "retention": _shopify_retention_meta(transport, resource)})
             result["resources"][resource]["pages_used"] = adapter.pages_used
         except Exception as exc:
             mark_resource_failed(db, run, resource, exc)
-            record_resource_metadata(db, run, resource, {"pages_used": adapter.pages_used, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages})
+            record_resource_metadata(db, run, resource, {"pages_used": adapter.pages_used, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages, "retention": _shopify_retention_meta(transport, resource)})
             result["resources"][resource] = {"error_code": getattr(exc, "code", type(exc).__name__), "error": str(exc), "pages_used": adapter.pages_used}
             if getattr(exc, "code", "") in GUARDRAIL_ERROR_CODES:
                 # 护栏终止：不再处理后续资源，run 终态为 failed + 对应错误码。
@@ -1948,7 +1978,7 @@ def _shopify_sync_impl(request: Request, db: Session = Depends(get_db), resource
             if resource in result["resources"]:
                 continue
             mark_resource_failed(db, run, resource, guardrail_error)
-            record_resource_metadata(db, run, resource, {"pages_used": 0, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages})
+            record_resource_metadata(db, run, resource, {"pages_used": 0, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages, "retention": _shopify_retention_meta(transport, resource)})
             result["resources"][resource] = {"error_code": getattr(guardrail_error, "code", type(guardrail_error).__name__), "error": str(guardrail_error), "pages_used": 0}
         finalize_resource_run(db, run, error=guardrail_error)
         # 护栏终止的 run 一律为 failed（即使部分资源此前已成功）。

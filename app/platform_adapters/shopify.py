@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +17,15 @@ import httpx
 from app.platform_adapters.base import AdapterError
 
 SHOPIFY_API_VERSION = "2026-07"
+
+logger = logging.getLogger(__name__)
+
+# GraphQL 数据键 → 留存用的资源名（与台账 resource 名一致：orders/inventory）。
+_RESOURCE_BY_DATA_KEY = {
+    "orders": "orders",
+    "inventoryItems": "inventory",
+    "products": "products",
+}
 
 
 class ShopifyTransport(Protocol):
@@ -38,17 +49,25 @@ class ShopifyLiveTransport:
     api_version: str = SHOPIFY_API_VERSION
     timeout_seconds: float = 20.0
     max_retries: int = 2
+    # live 响应原样留存的落盘目录与单文件字节上限；两者都为 None 时行为与留存前完全一致。
+    retention_dir: str | None = None
+    retention_max_bytes: int | None = None
 
     def __post_init__(self):
         self.store_domain = canonical_store_domain(self.store_domain)
         if not self.access_token:
             raise ValueError("SHOPIFY_ACCESS_TOKEN_REQUIRED")
         self.endpoint = f"https://{self.store_domain}/admin/api/{self.api_version}/graphql.json"
+        # 留存累计状态（对外可读）：正文文件数、最差状态、落盘目录。
+        self.retention_files = 0
+        self.retention_status = "ok"
+        self._retention_by_resource: dict[str, dict] = {}
 
     def query(self, *, query: str, variables: dict, request_id: str) -> dict[str, Any]:
         if "mutation" in query.lower():
             raise AdapterError("SHOPIFY_READ_ONLY_ONLY", "Shopify adapter 仅支持只读")
         body = {"query": query, "variables": variables}
+        started = time.monotonic()
         for attempt in range(self.max_retries + 1):
             try:
                 response = httpx.post(self.endpoint, json=body, headers={"X-Shopify-Access-Token": self.access_token, "User-Agent": "dianshang-shopify-readonly/0.1", "X-Request-ID": request_id}, timeout=self.timeout_seconds)
@@ -74,8 +93,91 @@ class ShopifyLiveTransport:
                 raise AdapterError("SHOPIFY_BAD_RESPONSE", "Shopify 响应不是 JSON") from exc
             if data.get("errors"):
                 raise AdapterError("SHOPIFY_GRAPHQL_ERROR", "Shopify GraphQL 返回业务错误")
+            # 留存原始响应体（在把响应交出去之前落盘），失败只告警不打断同步。
+            self._retain_response(
+                request_id=request_id,
+                response=response,
+                query=query,
+                variables=variables,
+                attempt=attempt + 1,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
             return {**data, "request_id": request_id}
         raise AdapterError("SHOPIFY_UPSTREAM_ERROR", "Shopify 请求失败", retryable=True)
+
+    # ------------------------------------------------------------------
+    # live 响应原样留存
+    #
+    # 布局：<retention_dir>/<request_id>.json            正文（response.text 的 UTF-8 字节原样）
+    #       <retention_dir>/<request_id>.json.truncated   超限时只写前 N 字节（不用 .json 后缀，避免被误解析）
+    #       <retention_dir>/<request_id>.meta.json       元数据（含 truncated/stored_bytes/original_size）
+    #
+    # 语义：留存是诊断能力，写盘失败降级为 warning + 台账 failed，同步照常成功。
+    # ------------------------------------------------------------------
+    def _retain_response(self, *, request_id: str, response: Any, query: str, variables: dict, attempt: int, elapsed_ms: int) -> None:
+        if not self.retention_dir:
+            return
+        # resource 由适配器在每次 fetch 前设置；fixture transport 没有该属性时按未知处理。
+        resource = getattr(self, "resource", None)
+        raw = response.text.encode("utf-8")
+        original_size = len(raw)
+        limit = self.retention_max_bytes
+        truncated = limit is not None and original_size > limit
+        stored = raw[:limit] if truncated else raw
+        body_name = f"{request_id}.json.truncated" if truncated else f"{request_id}.json"
+        try:
+            os.makedirs(self.retention_dir, exist_ok=True)
+        except OSError as exc:
+            logger.warning("Shopify live 响应留存建目录失败 request_id=%s resource=%s error=%s", request_id, resource, exc)
+            self._record_retention(resource, files=0, status="failed")
+            return
+        try:
+            with open(os.path.join(self.retention_dir, body_name), "wb") as handle:
+                handle.write(stored)
+        except OSError as exc:
+            logger.warning("Shopify live 响应留存写正文失败 request_id=%s resource=%s error=%s", request_id, resource, exc)
+            self._record_retention(resource, files=0, status="failed")
+            return
+        self._record_retention(resource, files=1, status="truncated" if truncated else "ok")
+        meta = {
+            "request_id": request_id,
+            "attempt": attempt,
+            "http_status": response.status_code,
+            "elapsed_ms": elapsed_ms,
+            "query": query,
+            "variables": variables,
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "truncated": truncated,
+            "stored_bytes": len(stored),
+            "original_size": original_size,
+            "resource": resource,
+        }
+        try:
+            with open(os.path.join(self.retention_dir, f"{request_id}.meta.json"), "w", encoding="utf-8") as handle:
+                json.dump(meta, handle, ensure_ascii=False, sort_keys=True, indent=2)
+        except OSError as exc:
+            logger.warning("Shopify live 响应留存写元数据失败 request_id=%s resource=%s error=%s", request_id, resource, exc)
+            self._record_retention(resource, files=0, status="failed")
+
+    def _record_retention(self, resource: str | None, *, files: int, status: str) -> None:
+        """更新累计与按资源的留存状态（failed 优先于 truncated，truncated 优先于 ok）。"""
+        key = resource or "unknown"
+        entry = self._retention_by_resource.setdefault(key, {"files": 0, "status": "ok"})
+        entry["files"] += files
+        if status == "failed":
+            entry["status"] = "failed"
+        elif status == "truncated" and entry["status"] == "ok":
+            entry["status"] = "truncated"
+        self.retention_files += files
+        if status == "failed":
+            self.retention_status = "failed"
+        elif status == "truncated" and self.retention_status == "ok":
+            self.retention_status = "truncated"
+
+    def retention_snapshot(self, resource: str) -> dict:
+        """取某个资源的留存快照（供台账留痕用）；无留存时 files=0。"""
+        entry = self._retention_by_resource.get(resource) or {"files": 0, "status": "ok"}
+        return {"status": entry["status"], "files": entry["files"], "dir": self.retention_dir}
 
 
 @dataclass
@@ -137,6 +239,8 @@ class ShopifyReadOnlyAdapter:
         seen: set[str] = set()
         records: list[dict] = []
         pages_used = 0
+        # 留存用的资源名（如 orders/inventory）；fixture transport 没有该属性也不报错。
+        self._set_transport_resource(_RESOURCE_BY_DATA_KEY.get(data_key, data_key))
         try:
             for _ in range(self.max_pages):
                 # 每页一次检查点：取消与 wall-clock 预算都在这里生效。
@@ -158,6 +262,16 @@ class ShopifyReadOnlyAdapter:
         finally:
             # 成功、失败、取消都留痕，避免预算/取消路径下页数丢失。
             self.pages_used = pages_used
+
+    def _set_transport_resource(self, resource: str) -> None:
+        """把当前资源名写到 transport 上，供 live 响应留存的 meta 记录。
+
+        transport 不支持动态属性时静默跳过（fixture transport 与自定义实现都安全）。
+        """
+        try:
+            setattr(self._transport, "resource", resource)
+        except Exception:  # noqa: BLE001 - 留存元信息失败不得影响同步
+            pass
 
     def fetch_products(self):
         return self._pages(PRODUCTS_QUERY, "products")

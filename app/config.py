@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     shopify_max_pages: int = 100
     # 单次 Shopify sync run 的 wall-clock 预算（秒）；超限即终止该 run
     shopify_sync_budget_seconds: int = 300
+    # live 响应原样留存的单文件字节上限；超限只写前 N 字节并改名为 .json.truncated
+    shopify_retention_max_bytes: int = 10485760
 
     api_auth_enabled: bool = False
     api_key: str = ""
