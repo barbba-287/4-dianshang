@@ -127,7 +127,7 @@ raise DomainError(
 ### 2.7 已知残留（必须登记）
 
 - **多 worker / 多副本部署时进程内锁失效**：与 P2-0a 热开关、取消 token 同源限制。
-  登记为 R-26（新编号），并在 `docs/shopify-canary-runbook.md` 现有「单进程假设」
+  登记为 R-27（新编号），并在 `docs/shopify-canary-runbook.md` 现有「单进程假设」
   段落追加一句。
 - `_sync_gate_owner` 是没有加锁保护的裸全局变量（只在持锁期间读写，天然互斥）；
   若将来改成允许并发（B 方案），必须改为受锁保护的 dict。
@@ -172,10 +172,10 @@ raise DomainError(
 - 新增用例定向全绿：`pytest -q tests/test_s4_sync_gate.py` → 5 passed。
 - 全量：**339 + 5 = 344 passed / 0 failed**（R-19 规则照常：允许重跑一次全绿，但必须登记）。
 - 既有 `tests/test_p2a_sync_guardrails.py` 10 例必须仍全绿（闸门不改既有语义）。
-- `docs/shopify-canary-runbook.md` 的「单进程假设」段落追加一句指向 R-26。
+- `docs/shopify-canary-runbook.md` 的「单进程假设」段落追加一句指向 R-27。
 - **交付说明落盘到 `.testtmp/delivery.s4.md`**（R-22 缓解：进程可能无声死亡，
   不依赖 stdout 存活）。必须回答：
-  1. 多 worker 残留（R-26）；
+  1. 多 worker 残留（R-27）；
   2. 为何选 A 不选 B；
   3. 闸门与 `runtime_flags` 的关系（§2.6 的实测结果）；
   4. 槽位前移到 `begin_sync_run` 之前的理由与证据（孤儿 run 不可产生的验证）；
