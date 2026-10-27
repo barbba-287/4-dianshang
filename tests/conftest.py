@@ -23,6 +23,19 @@ os.environ["WORKER_LEASE_SECONDS"] = "30"
 os.environ["EMPLOYEE_AUTH_ENABLED"] = "false"
 os.environ["DEMO_MODE_ENABLED"] = "true"
 
+# Shopify live 通道固定为「关闭」基线，防止测试结果随仓库外 `.env` 漂移。
+# `Settings` 用 `env_file=".env"`（app/config.py），仓库外的本地 `.env` 若写了
+# SHOPIFY_LIVE_ENABLED=true / 真 token，测试进程就会读到它 —— 环境变量优先级高于
+# dotenv，这里统一压死。取值以 `app/config.py` 的既有默认值为准，不另行发明。
+# 需要非默认值的测试（如 tests/test_p2a_sync_guardrails.py 的 harness）自行
+# monkeypatch 覆盖，既有做法不变。
+os.environ["SHOPIFY_LIVE_ENABLED"] = "false"
+os.environ["SHOPIFY_STORE_DOMAIN"] = ""
+os.environ["SHOPIFY_ACCESS_TOKEN"] = ""
+os.environ["SHOPIFY_SYNC_BUDGET_SECONDS"] = "300"
+os.environ["SHOPIFY_MAX_PAGES"] = "100"
+os.environ["SHOPIFY_API_VERSION"] = "2026-07"
+
 # 让 subprocess 启动的子进程（test_alembic.py、部分 CLI 测试）也拿到 WAL 设置：
 # Python 启动时会自动导入 sys.path 上第一个 sitecustomize，故把本目录前置。
 _WAL_BOOTSTRAP_DIR = str(Path(__file__).parent / "_wal_bootstrap")
@@ -64,6 +77,14 @@ def _isolate_env(tmp_path, monkeypatch):
     monkeypatch.setenv("ARTIFACTS_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setenv("IMPORTS_DIR", str(uploads_dir))
     monkeypatch.setenv("WORKER_LEASE_SECONDS", "30")
+    # 与模块级保持同一套 Shopify 关闭基线：monkeypatch 会连同仓库外 `.env`
+    # 可能带来的真值一起覆盖，保证单个用例也读不到本地 `.env`。
+    monkeypatch.setenv("SHOPIFY_LIVE_ENABLED", "false")
+    monkeypatch.setenv("SHOPIFY_STORE_DOMAIN", "")
+    monkeypatch.setenv("SHOPIFY_ACCESS_TOKEN", "")
+    monkeypatch.setenv("SHOPIFY_SYNC_BUDGET_SECONDS", "300")
+    monkeypatch.setenv("SHOPIFY_MAX_PAGES", "100")
+    monkeypatch.setenv("SHOPIFY_API_VERSION", "2026-07")
     yield
 
 
