@@ -21,6 +21,10 @@ python -m app.cli query "green tea"
 
 # 打印运行时配置与规模
 python -m app.cli status
+
+# 读取 Shopify live 响应留存（本地只读）
+python -m app.cli retention list --run-id <run-id>
+python -m app.cli retention get --run-id <run-id> --request-id <request-id>
 ```
 """
 
@@ -511,6 +515,168 @@ def cmd_seed_demo(args: list[str]) -> int:
         db.close()
 
 
+# ---------------------------------------------------------------------------
+# Shopify live 响应留存：只读本地目录（不访问网络、不写数据库）
+# ---------------------------------------------------------------------------
+
+_RETENTION_META_SUFFIX = ".meta.json"
+_RETENTION_TRUNCATED_SUFFIX = ".json.truncated"
+
+
+def _retention_dir(run_id: str) -> Path:
+    """某个 run 的留存目录；与同步路由落盘布局保持一致。"""
+    settings = get_settings()
+    return settings.resolve_path(settings.artifacts_dir) / "shopify_sync" / run_id
+
+
+def _retention_load_meta(directory: Path, request_id: str) -> dict | None:
+    meta_path = directory / f"{request_id}{_RETENTION_META_SUFFIX}"
+    if not meta_path.is_file():
+        return None
+    try:
+        value = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def cmd_retention_list(run_id: str, directory: Path) -> int:
+    """列出某个 run 留存目录下的文件与 meta 摘要。"""
+    if not directory.is_dir():
+        print(json.dumps({
+            "ok": False,
+            "run_id": run_id,
+            "dir": str(directory),
+            "error_code": "RETENTION_RUN_NOT_FOUND",
+            "error": "该 run 没有留存目录",
+        }, ensure_ascii=False))
+        return 2
+    request_ids: set[str] = set()
+    bodies: dict[str, str] = {}
+    truncated: set[str] = set()
+    for entry in sorted(directory.iterdir()):
+        if not entry.is_file():
+            continue
+        name = entry.name
+        if name.endswith(_RETENTION_META_SUFFIX):
+            request_ids.add(name[: -len(_RETENTION_META_SUFFIX)])
+        elif name.endswith(_RETENTION_TRUNCATED_SUFFIX):
+            rid = name[: -len(_RETENTION_TRUNCATED_SUFFIX)]
+            request_ids.add(rid)
+            bodies[rid] = name
+            truncated.add(rid)
+        elif name.endswith(".json"):
+            rid = name[: -len(".json")]
+            request_ids.add(rid)
+            bodies[rid] = name
+    items = []
+    for rid in sorted(request_ids):
+        meta = _retention_load_meta(directory, rid) or {}
+        body_name = bodies.get(rid)
+        body_bytes = (directory / body_name).stat().st_size if body_name else None
+        items.append({
+            "request_id": rid,
+            "body_file": body_name,
+            "body_bytes": body_bytes,
+            "truncated": bool(meta.get("truncated")) or rid in truncated,
+            "stored_bytes": meta.get("stored_bytes"),
+            "original_size": meta.get("original_size"),
+            "http_status": meta.get("http_status"),
+            "attempt": meta.get("attempt"),
+            "resource": meta.get("resource"),
+            "captured_at": meta.get("captured_at"),
+            "has_meta": bool(meta),
+        })
+    print(json.dumps({
+        "ok": True,
+        "run_id": run_id,
+        "dir": str(directory),
+        "items": items,
+        "summary": {
+            "requests": len(items),
+            "body_files": len(bodies),
+            "truncated": len(truncated),
+        },
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_retention_get(run_id: str, request_id: str, directory: Path) -> int:
+    """读取某个请求的留存正文；meta 标记截断时拒绝当作完整响应解析。"""
+    if not directory.is_dir():
+        print(json.dumps({
+            "ok": False,
+            "run_id": run_id,
+            "request_id": request_id,
+            "error_code": "RETENTION_RUN_NOT_FOUND",
+            "error": "该 run 没有留存目录",
+        }, ensure_ascii=False))
+        return 2
+    meta = _retention_load_meta(directory, request_id)
+    if meta is None:
+        print(json.dumps({
+            "ok": False,
+            "run_id": run_id,
+            "request_id": request_id,
+            "error_code": "RETENTION_META_NOT_FOUND",
+            "error": "该请求没有留存元数据",
+        }, ensure_ascii=False))
+        return 2
+    if meta.get("truncated"):
+        # 截断文件不是完整响应：拒绝解析、拒绝用作回放/对比基准。
+        print(json.dumps({
+            "ok": False,
+            "run_id": run_id,
+            "request_id": request_id,
+            "truncated": True,
+            "stored_bytes": meta.get("stored_bytes"),
+            "original_size": meta.get("original_size"),
+            "error_code": "RETENTION_TRUNCATED",
+            "error": "留存响应已截断、非完整响应，拒绝解析，也不得用作重放或对比基准",
+        }, ensure_ascii=False))
+        return 3
+    body_path = directory / f"{request_id}.json"
+    if not body_path.is_file():
+        print(json.dumps({
+            "ok": False,
+            "run_id": run_id,
+            "request_id": request_id,
+            "error_code": "RETENTION_BODY_NOT_FOUND",
+            "error": "该请求没有留存正文文件",
+        }, ensure_ascii=False))
+        return 2
+    print(body_path.read_text(encoding="utf-8"))
+    return 0
+
+
+def cmd_retention(args: list[str]) -> int:
+    """读取 Shopify live 响应留存（本地只读）。
+
+    用法：
+      python -m app.cli retention list --run-id <run_id>
+      python -m app.cli retention get --run-id <run_id> --request-id <request_id>
+    """
+    if not args:
+        print(json.dumps({"ok": False, "error_code": "INVALID_REPLAY_INPUT", "error": "缺少子命令（list / get）"}, ensure_ascii=False))
+        return 2
+    action = args[0]
+    if action not in {"list", "get"}:
+        print(json.dumps({"ok": False, "error_code": "INVALID_REPLAY_INPUT", "error": "子命令只支持 list / get"}, ensure_ascii=False))
+        return 2
+    run_id = _option(args, "--run-id")
+    if not run_id:
+        print(json.dumps({"ok": False, "error_code": "INVALID_REPLAY_INPUT", "error": "缺少 --run-id"}, ensure_ascii=False))
+        return 2
+    directory = _retention_dir(run_id)
+    if action == "list":
+        return cmd_retention_list(run_id, directory)
+    request_id = _option(args, "--request-id")
+    if not request_id:
+        print(json.dumps({"ok": False, "error_code": "INVALID_REPLAY_INPUT", "error": "缺少 --request-id"}, ensure_ascii=False))
+        return 2
+    return cmd_retention_get(run_id, request_id, directory)
+
+
 def cmd_status(args: list[str]) -> int:
     """打印运行时配置与数据库 / 向量库规模。"""
     from sqlalchemy import func, inspect, select
@@ -559,6 +725,7 @@ COMMANDS = {
     "external-list-connectors": cmd_external_list_connectors,
     "external-preview": cmd_external_preview,
     "external-import": cmd_external_import,
+    "retention": cmd_retention,
 }
 
 
@@ -575,6 +742,7 @@ COMMAND_HELP = {
     "external-list-connectors": "列出离线平台连接器能力",
     "external-preview": "预览并标准化外部库存文件（不落库）",
     "external-import": "导入外部库存快照（不修改内部库存，可用 --workspace 指定商家）",
+    "retention": "读取 Shopify live 响应留存（list --run-id / get --run-id --request-id，仅本地只读）",
 }
 
 
