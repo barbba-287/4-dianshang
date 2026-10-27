@@ -84,6 +84,30 @@
 
 - **必须新增 Alembic migration**（`migrations/versions/00xx_external_sync_run_cursor.py`），
   因 `db.py` 需加字段；migration 必须可 `downgrade`（删列）且不破坏既有行（默认值填充）。
+- **downgrade 语义（2026-10-27 用户裁定，强制）**：
+  - `downgrade` **允许丢失 cursor 数据**（`DROP COLUMN cursor_json` 即整列丢弃，不做备份/迁移到别处）；
+  - **但不得触碰其余任何字段**：不重建表、不改既有列的类型/默认值/索引/约束、不动其他表的任何列；
+  - 实现要求：`downgrade()` 里**只允许一条** `op.drop_column("external_sync_runs", "cursor_json")`，
+    禁止 `op.batch_alter_table(...)` 的整表重建（MySQL/SQLite 兼容性 + 最小影响面）；
+  - 若某数据库方言必须重建表才能 drop column，**停下报告**，不得自行改道。
+- **`cursor_json` schema 必须定死（用户裁定）**，键名一经确定不得漂移：
+  ```json
+  {
+    "schema_version": 1,
+    "resources": {
+      "orders":    {"cursor": "<endCursor|null>", "pages": 3, "fetched": 150, "complete": false},
+      "inventory": {"cursor": "<endCursor|null>", "pages": 1, "fetched": 28,  "complete": true}
+    },
+    "updated_at": "<UTC ISO8601>"
+  }
+  ```
+  - `schema_version`：整数，本期固定 `1`；读取端遇到未知版本必须**降级为不可续跑**（R4 返回 409），不得猜测；
+  - `resources` 只出现本次 run 实际同步的资源键（`orders` / `inventory`）；
+  - `cursor`：末页 `endCursor`；已取完（`hasNextPage=false`）时为 `null` 且 `complete=true`；
+  - `pages` / `fetched` 为累计值（跨续跑用：续跑时从源 run 的 `pages` 起算，不归零）；
+  - `updated_at` 每次落库更新。
+- **`cursor_json` 列定义定死**：`Text`，`nullable=False`，`default="{}"`，`server_default="{}"`；
+  空 run（未开始分页）也是合法 `"{}"`，读取端按"无可续游标"处理。
 - 不改 `resource_status_json` 既有结构（cursor 独立字段，不塞进 JSON 台账）。
 - 不实现"自动续跑"（那是 R4）；R6 只保证"游标被持久化了，可被读到"。
 - `seen` 集合（防环）也要能恢复：建议存最近 N 个游标（或只存最后游标 + 页数，环检测退化）
@@ -96,14 +120,17 @@
 | R6-1 | 正常 3 页同步 | 每页后 `cursor_json[resource].pages` 递增，终值 = 3，`cursor` = 末页 endCursor |
 | R6-2 | 中途 fail（模拟第 2 页抛错） | `cursor_json` 保留到第 1 页末端游标 |
 | R6-3 | 取消中途 | 同上，游标保留（取消也是可续跑的） |
-| R6-4 | migration up/down | `alembic upgrade head` + `downgrade -1` 均成功；既有行 `cursor_json` 为 `"{}"` |
+| R6-4 | migration up/down | `alembic upgrade head` + `downgrade -1` 均成功；既有行 `cursor_json` 为 `"{}"`；**down 后逐列核对 `external_sync_runs` 表结构与 down 前一致（除 `cursor_json` 消失）** |
+| R6-6 | `cursor_json` schema 形状 | 写入后 JSON 可解析、`schema_version==1`、键集合恰为 `schema_version/resources/updated_at`；已取完资源 `cursor is None and complete is True` |
+| R6-7 | 未知 schema_version 读取 | 手工写入 `schema_version=99` → R4 的 resume 必须返回 409 而非猜测续跑 |
 | R6-5 | 双资源并发（orders+inventory） | 两个 key 互不覆盖 |
 
 ### 2.5 完成标准
 
-- 用例定向绿；全量 343+5=348 passed / 0 failed。
+- 用例定向绿（**7 条**：R6-1/2/3/4/5/6/7）；全量 343+7=350 passed / 0 failed。
 - migration 在 SQLite（测试）与 MySQL（既有 migration 测试如果覆盖）均通过。
 - **R6 必须作为独立提交合入，且合入时间早于 R4 的第一个提交**（用户红线）。
+- downgrade 只丢 cursor、其余字段逐列零变化（R6-4 用例强制）。
 
 ---
 
@@ -148,9 +175,14 @@
 
 ### 3.5 完成标准
 
-- 用例定向绿；全量 348+5=353 passed / 0 failed。
+- 用例定向绿（**7 条**，含 R4-6/R4-7 见下）；全量 350+7=357 passed / 0 failed。
 - 路由注册冒烟（`/resume` 在 `app.routes`）。
-- 交付说明必须含：预算归属取舍、留存目录不复用的理由、与 S4 闸门的交互。
+- 交付说明必须含：预算归属取舍、留存目录不复用的理由、与 S4 闸门的交互、schema_version 不匹配的拒绝路径。
+
+| # | 场景 | 期望 |
+|---|---|---|
+| R4-6 | 源 run 的 `cursor_json` 为 `"{}"`（无游标） | 409 `SYNC_RUN_NOT_RESUMABLE`，reason=`NO_CURSOR` |
+| R4-7 | 源 run 的 `cursor_json.schema_version=99` | 409，reason=`UNSUPPORTED_CURSOR_SCHEMA`（不得猜测） |
 
 ---
 
