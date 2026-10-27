@@ -172,8 +172,12 @@ def stop_background_workers(timeout: float = 5.0) -> None:
     if stop_event is not None:
         stop_event.set()
     if dispatch_thread is not None:
+        # timeout 是 join 的**上限**，不是保证。超时后线程可能仍存活（例如正卡在
+        # 一次长 DB 写入里），此时**不能** unregister：一旦从登记表移除，测试侧就
+        # 再也拿不到它的 stop_event，等于把一个已失去模块引用的线程彻底弄丢，
+        # 正是 R-19 的原始病症。所以只在确认已退出时反登记，否则保留条目让
+        # conftest 的后续 reap_all() 再试。
         dispatch_thread.join(timeout=timeout)
-        # 已主动停掉：从进程级登记表移除，避免登记表随 reload 累积。
         from app._worker_registry import unregister
 
         if not dispatch_thread.is_alive():

@@ -27,6 +27,8 @@
 import importlib
 import threading
 
+import pytest
+
 from app._worker_registry import clear, live_threads, register, reap_all, snapshot
 
 _DISPATCHER = "ds-dispatcher"
@@ -121,6 +123,35 @@ def test_registry_ignores_stop_event_of_dead_thread():
     reap_all(timeout=0.2)
     assert not [t for t, _ in snapshot() if t is thread], "已结束线程未从登记表移除"
     clear()
+
+
+def test_clear_refuses_while_thread_still_alive():
+    """`clear()` 必须拒绝清空"还有存活线程"的登记表。
+
+    `clear()` 只移除条目、不停止线程。对存活线程调用它，该线程就彻底失去引用，
+    测试侧再也拿不到它的 `stop_event`——这正是 R-19 的原始病症换了个起因。
+    因此加了硬保护：仍有存活线程时抛 `RuntimeError`。
+
+    本用例钉住这层保护：若有人把保护去掉（改回无条件 `_registry.clear()`），
+    这里会因"没抛异常"而变红。
+    """
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=lambda: stop.wait(30), daemon=True, name="ds-clear-guard-probe"
+    )
+    thread.start()
+    register(thread, stop)
+    try:
+        with pytest.raises(RuntimeError, match="拒绝 clear"):
+            clear()
+        # 拒绝之后条目必须还在（不能被"先清一半"）
+        assert any(t is thread for t, _ in snapshot()), "clear() 拒绝后却已把条目删掉"
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
+    # 线程已死，此时 clear() 才应放行
+    clear()
+    assert not snapshot(), "线程已退出后 clear() 未清空"
 
 
 # ---------------------------------------------------------------------------

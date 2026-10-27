@@ -103,6 +103,26 @@ def reap_all(timeout: float = 1.0) -> int:
 
 
 def clear() -> None:
-    """清空登记表（仅供测试在会话结束时调用，不停止线程）。"""
+    """清空登记表，**仅供测试**在用例/会话收尾时调用。
+
+    ## 为什么要求"线程已死"才能清
+
+    `clear()` 只移除条目、**不停止线程**。如果对一个仍存活的线程调用它，
+    该线程就彻底失去引用——测试侧再也拿不到它的 `stop_event`，永远停不掉，
+    正是 R-19 的原始病症（只是换了个起因）。
+
+    因此这里加了保护：只要登记表里还有存活线程，就**拒绝清空**并抛
+    `RuntimeError`。要清空请先 `reap_all()`。
+
+    生产环境不应调用本函数；它存在只为测试收尾，且测试收尾本身由
+    `tests/conftest.py` 的 autouse fixture 用 `reap_all()` 完成。
+    """
     with _lock:
+        alive = [(t, e) for t, e in _registry.items() if t.is_alive()]
+        if alive:
+            names = ", ".join(sorted({t.name for t, _ in alive}))
+            raise RuntimeError(
+                f"拒绝 clear()：登记表仍有 {len(alive)} 个存活线程（{names}）。"
+                "请先调用 reap_all() 停掉它们，否则这些线程将失去引用、无法再被停止。"
+            )
         _registry.clear()
