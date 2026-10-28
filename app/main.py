@@ -2094,6 +2094,370 @@ def cancel_external_sync_run(run_id: str, request: Request, db: Session = Depend
     }
 
 
+# ---------------------------------------------------------------------------
+# R4：live 同步断点续跑（POST /api/external/sync/runs/{run_id}/resume）
+#
+# 两段式（任务文件 dev_task.r4-resume.md §2.1）：
+#   1) 前置校验段：**只读库**，不占闸门——run 存在性 / live 判定 / 状态判定 / plan 判定；
+#   2) 执行段：**占 S4 同一把单飞闸门**——持锁后按主键重读源 run 并复核全部前置条件
+#      （TOCTOU 防护），再按 plan.action 分派拉取。
+#
+# 错误码面不扩张：resume 的 409 一律 code="SYNC_RUN_NOT_RESUMABLE"，
+# 细分靠 message 里的 reason=<XXX>（不扩 DomainError 结构，同 S4 先例）。
+# ---------------------------------------------------------------------------
+
+# resume 支持的资源集（与 /sync 一致）。
+_RESUME_ALLOWED_RESOURCES = ("orders", "inventory")
+# reason 枚举（定死 5 个，实现中不得新增第 6 个）。
+_RESUME_REASON_NOT_LIVE_RUN = "NOT_LIVE_RUN"
+_RESUME_REASON_NOT_RESUMABLE_STATE = "NOT_RESUMABLE_STATE"
+_RESUME_REASON_NOTHING_TO_RESUME = "NOTHING_TO_RESUME"
+
+
+def _resume_conflict(reason: str, base: str) -> DomainError:
+    """R4 的 409：code 固定为 SYNC_RUN_NOT_RESUMABLE，细分靠 message 里的 reason=。"""
+    return DomainError(
+        code="SYNC_RUN_NOT_RESUMABLE",
+        message=f"{base}（reason={reason}）",
+        http_status=409,
+    )
+
+
+def _resume_target_resources(source, requested: list[str] | None) -> list[str]:
+    """目标资源集：请求参数优先；缺省时取源 run 已初始化的资源集。
+
+    源 run 推不出来时兜底为 orders,inventory（与 /sync 的默认口径一致）。
+    """
+    from app.external_sync import resource_status
+    names: list[str] = []
+    for item in requested or []:
+        for piece in str(item).split(","):
+            name = piece.strip()
+            if name and name not in names:
+                names.append(name)
+    if not names:
+        for name in resource_status(source):
+            if name != "schema_version" and name in _RESUME_ALLOWED_RESOURCES and name not in names:
+                names.append(name)
+    if not names:
+        names = list(_RESUME_ALLOWED_RESOURCES)
+    if not set(names).issubset(set(_RESUME_ALLOWED_RESOURCES)):
+        raise DomainError(code="SHOPIFY_RESOURCE_INVALID", message="当前续跑只支持 orders/inventory", http_status=422)
+    return names
+
+
+def _resume_plan_or_raise(source, targets: list[str]):
+    """前置判定：live 判定 → 状态判定 → resume_plan 判定（顺序照任务文件 §2.1）。
+
+    前置段与持锁后的重读段共用本函数，保证两处判定口径逐字一致。
+    """
+    from app.external_sync import CURSOR_ACTION_SKIP, CURSOR_REASON_NO_CURSOR, resume_plan
+    if source.platform != "shopify" or source.source_mode != "shopify_live":
+        raise _resume_conflict(_RESUME_REASON_NOT_LIVE_RUN, "该运行不是 Shopify live 同步，不能续跑")
+    if source.status not in ("failed", "partial"):
+        raise _resume_conflict(_RESUME_REASON_NOT_RESUMABLE_STATE, "该运行不在可续跑状态")
+    plan = resume_plan(source.cursor_json, targets)
+    if not plan.allowed:
+        raise _resume_conflict(plan.reason or CURSOR_REASON_NO_CURSOR, "该运行没有可用的续跑游标")
+    if plan.resources and all(item.action == CURSOR_ACTION_SKIP for item in plan.resources.values()):
+        raise _resume_conflict(_RESUME_REASON_NOTHING_TO_RESUME, "目标资源均已取完，无需续跑")
+    return plan
+
+
+def _seed_resume_cursor(db: Session, run, source, targets: list[str]) -> None:
+    """把源 run 的游标条目注入新 run 的 cursor_json（跨 run 累计口径的基线）。
+
+    R6 的 cursor_json.resources[x].pages/fetched 是**跨 run 累计值**：落库时
+    record_sync_cursor 的 _cursor_delta 只换算"本次增量"，累加基数取自**同一行**列里
+    已有的值。新 run 的列初始为 "{}"（基数为 0），若不注入源基线，续跑会把累计值冲回
+    "本次页数"——链式续跑（A→B→C）的 pages 就不再递增（R4-10 ②）。
+    因此这里显式注入源 run 的目标资源条目；源里没有条目的资源不注入（保持 0 基数）。
+    """
+    from app.external_sync import CURSOR_SCHEMA_VERSION
+    try:
+        payload = json.loads(source.cursor_json or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    resources = payload.get("resources")
+    if not isinstance(resources, dict):
+        resources = {}
+    seeded = {}
+    for name in targets:
+        item = resources.get(name)
+        if isinstance(item, dict):
+            seeded[name] = dict(item)
+    if not seeded:
+        # 无基线可注入：保持 begin_sync_run 写下的 "{}"（"未开始分页"的合法初始态）。
+        return
+    from datetime import timezone
+    run.cursor_json = json.dumps(
+        {
+            "schema_version": CURSOR_SCHEMA_VERSION,
+            "resources": seeded,
+            "updated_at": payload.get("updated_at") or datetime.now(timezone.utc).isoformat(),
+        },
+        ensure_ascii=False,
+    )
+    db.commit()
+    db.refresh(run)
+
+
+def _shopify_resume_run(request: Request, db: Session, principal, source, plan, targets: list[str]):
+    """Shopify live 同步**续跑**的实际执行体（调用方已持有单飞闸门）。
+
+    与 `_shopify_sync_run` 的唯一结构性差异：每个资源按 plan.resources[resource].action
+    分派（resume / restart / skip），其余（预算、取消、留存目录、护栏收尾）完全同构。
+    """
+    global _sync_gate_owner
+    settings = get_settings()
+    if not (settings.shopify_live_enabled and runtime_live_enabled() and settings.shopify_store_domain and settings.shopify_access_token):
+        raise DomainError(code="SHOPIFY_LIVE_NOT_CONFIGURED", message="Shopify live 未配置", http_status=409)
+    from app.platform_adapters.base import AdapterError
+    from app.platform_adapters.shopify import ShopifyLiveTransport, ShopifyReadOnlyAdapter, canonical_store_domain
+    from app.external_orders import ensure_external_account, ingest_orders
+    from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, record_run_metadata, record_sync_cursor, ImportStats, ingest_inventory, CURSOR_ACTION_RESUME, CURSOR_ACTION_SKIP
+    # 新 run 自己的 wall-clock 预算（不继承源 run 的剩余量）。
+    budget_seconds = int(settings.shopify_sync_budget_seconds)
+    deadline = time.monotonic() + budget_seconds
+    account_ref = settings.shopify_store_domain
+    # 店铺域名先校验：留存目录要用 run_id，transport 必须在 run 建立后构造，
+    # 但域名非法仍须在建 run 之前报错，否则会留下一个永远 running 的孤儿 run。
+    canonical_store_domain(settings.shopify_store_domain)
+    run = begin_sync_run(
+        db,
+        workspace_id=principal.workspace_id,
+        platform="shopify",
+        sync_type="shopify_live",
+        account_ref=account_ref,
+        store_ref=settings.shopify_store_domain,
+        source_mode="shopify_live",
+        simulated=False,
+        # 链路语义：attempt 单调 +1，retry_of_run_id 指向**直接前驱**（链式续跑可追溯）。
+        attempt=int(source.attempt or 1) + 1,
+        retry_of_run_id=source.run_id,
+    )
+    # 槽位归属回填（仅用于 409 日志与排查）。
+    _sync_gate_owner = run.run_id
+    # R6 累计口径：把源 run 的游标条目作为新 run 的累计基数注入。
+    _seed_resume_cursor(db, run, source, targets)
+    # live 响应原样留存：按**新 run_id** 分目录落到 artifacts 下（不复用源目录）。
+    retention_dir = settings.resolve_path(settings.artifacts_dir) / "shopify_sync" / run.run_id
+    transport = ShopifyLiveTransport(
+        settings.shopify_store_domain,
+        settings.shopify_access_token,
+        settings.shopify_api_version,
+        settings.shopify_request_timeout_seconds,
+        settings.shopify_max_retries,
+        retention_dir=str(retention_dir),
+        retention_max_bytes=settings.shopify_retention_max_bytes,
+    )
+    # 取消 token：run 建立后立即登记，run 结束后注销。
+    cancel_token = _register_sync_cancel_token(run.run_id)
+    adapter = ShopifyReadOnlyAdapter(
+        transport,
+        live_enabled=True,
+        simulated=False,
+        page_size=settings.shopify_max_page_size,
+        max_pages=settings.shopify_max_pages,
+        deadline=deadline,
+        cancel_check=cancel_token.is_set,
+    )
+    initialize_resources(db, run, targets)
+    # run 级链路元数据（台账顶层）：续跑来源 run_id。
+    record_run_metadata(db, run, {"resumed_from": source.run_id})
+    result = {"run_id": run.run_id, "platform": "shopify", "source_mode": "shopify_live", "simulated": False, "resumed_from": source.run_id, "resources": {}}
+    guardrail_error = None
+    for resource in targets:
+        entry = plan.resources.get(resource)
+        action = getattr(entry, "action", None)
+        if action == CURSOR_ACTION_SKIP:
+            # SKIP：该资源在源 run 已取完 → 零上游调用、零页消耗。
+            # 台账必须写清"这是承袭源 run 的成功，不是本次真拉取的成功"。
+            mark_resource_succeeded(db, run, resource, ImportStats())
+            record_resource_metadata(db, run, resource, {"resumed": "skip", "resumed_from_run": source.run_id, "source_pages": int(getattr(entry, "pages", 0) or 0), "source_fetched": int(getattr(entry, "fetched", 0) or 0)})
+            result["resources"][resource] = {"resumed": "skip", "source_pages": int(getattr(entry, "pages", 0) or 0), "source_fetched": int(getattr(entry, "fetched", 0) or 0)}
+            continue
+        # RESUME → 从源游标继续；RESTART → 从第一页开始（start_cursor=None）。
+        adapter.start_cursor = getattr(entry, "cursor", None) if action == CURSOR_ACTION_RESUME else None
+        mark_resource_running(db, run, resource)
+        # R6：每页成功后把游标与累计计数写进 run.cursor_json（独立列，不塞进台账 JSON）。
+        adapter.on_page_done = lambda cursor, pages, fetched, _resource=resource: record_sync_cursor(
+            db, run, _resource, cursor, pages, fetched, complete=(cursor is None)
+        )
+        try:
+            # 资源级检查点：资源之间不翻页时也能被取消/预算中止。
+            if cancel_token.is_set():
+                raise AdapterError("SHOPIFY_SYNC_CANCELLED", "同步已被请求取消")
+            if time.monotonic() > deadline:
+                raise AdapterError("SHOPIFY_SYNC_BUDGET_EXCEEDED", "同步超出 wall-clock 预算")
+            records = adapter.fetch_orders() if resource == "orders" else adapter.fetch_inventory()
+            if resource == "orders":
+                account = ensure_external_account(db, workspace_id=principal.workspace_id, platform="shopify", account_ref=account_ref, store_ref=settings.shopify_store_domain, source_mode="shopify_live", simulated=False)
+                normalized = []
+                for row in records:
+                    lines = []
+                    for line in ((row.get("lineItems") or {}).get("nodes") or []):
+                        variant = line.get("variant") or {}
+                        amount_set = line.get("originalTotalSet") or {}
+                        shop_money = amount_set.get("shopMoney") or {}
+                        order_total_set = row.get("currentTotalPriceSet") or {}
+                        order_shop_money = order_total_set.get("shopMoney") or {}
+                        currency = shop_money.get("currencyCode") or order_shop_money.get("currencyCode") or "USD"
+                        line_amount = shop_money.get("amount") or "0"
+                        order_amount = order_shop_money.get("amount") or "0"
+                        # Amounts are available in the Shopify GraphQL response;
+                        # preserve their currency instead of coercing to CNY.
+                        lines.append({
+                            "external_line_id": line.get("id") or "line",
+                            "external_sku": (line.get("sku") or variant.get("id") or "unknown"),
+                            "ordered_qty": line.get("quantity", 0),
+                            "cancelled_qty": 0,
+                            "refunded_qty": 0,
+                            "gross_amount": line_amount,
+                            "refund_amount": "0",
+                            "currency": currency,
+                        })
+                    financial_status = (row.get("displayFinancialStatus") or "").lower()
+                    status = {"paid": "paid", "partially_paid": "paid", "refunded": "completed", "partially_refunded": "completed", "voided": "cancelled", "pending": "pending"}.get(financial_status, "unknown")
+                    normalized.append({
+                        "account_ref": account_ref,
+                        "store_ref": settings.shopify_store_domain,
+                        "external_order_no": row.get("id") or row.get("name"),
+                        "order_status": status,
+                        "external_created_at": row.get("createdAt"),
+                        "external_updated_at": row.get("updatedAt") or row.get("createdAt"),
+                        "paid_at": row.get("processedAt"),
+                        "gross_amount": order_amount,
+                        "refund_amount": "0",
+                        "currency": (row.get("currentTotalPriceSet") or {}).get("shopMoney", {}).get("currencyCode") or "USD",
+                        "lines": lines,
+                        "source_mode": "shopify_live",
+                        "simulated": False,
+                        "status_reason": "Shopify 当前只读查询未包含退款明细；订单与行金额可用，退款金额为 unknown",
+                    })
+                from app.connectors import load_orders
+                from dataclasses import replace
+                # Normalize through the existing canonical order contract.
+                content = json.dumps(normalized, ensure_ascii=False)
+                canonical = [
+                    replace(record, source_mode="shopify_live", simulated=False)
+                    for record in load_orders(content, platform="shopify", source_mode="json")
+                ]
+                stats = ingest_orders(db, canonical, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
+                mark_resource_succeeded(db, run, resource, ImportStats(total=stats.total, inserted=stats.inserted, updated=stats.updated, no_op=stats.no_op, conflict=stats.conflict, stale=stats.stale))
+                result["resources"][resource] = {"total": stats.total, "inserted": stats.inserted, "updated": stats.updated, "no_op": stats.no_op, "conflict": stats.conflict, "data_completeness": "partial", "note": "退款明细未在当前只读查询中请求，退款金额保持 unknown"}
+            else:
+                from app.connectors import normalize_inventory_row
+                canonical = [normalize_inventory_row(row, platform="shopify", source_mode="shopify_live", index=index) for index, row in enumerate(records)]
+                stats = ingest_inventory(db, canonical, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
+                mark_resource_succeeded(db, run, resource, ImportStats(total=stats.total, inserted=stats.inserted, no_op=stats.no_op, conflict=stats.conflict, snapshot_ids=stats.snapshot_ids))
+                result["resources"][resource] = {"total": stats.total, "inserted": stats.inserted, "no_op": stats.no_op, "conflict": stats.conflict, "snapshot_ids": stats.snapshot_ids or [], "stored": True, "data_completeness": "complete"}
+            # 页数预算留痕：本次消耗页数 + 本次 wall-clock 预算（单 run 口径，不继承源 run）。
+            record_resource_metadata(db, run, resource, {"pages_used": adapter.pages_used, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages, "retention": _shopify_retention_meta(transport, resource)})
+            result["resources"][resource]["pages_used"] = adapter.pages_used
+        except Exception as exc:
+            mark_resource_failed(db, run, resource, exc)
+            record_resource_metadata(db, run, resource, {"pages_used": adapter.pages_used, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages, "retention": _shopify_retention_meta(transport, resource)})
+            result["resources"][resource] = {"error_code": getattr(exc, "code", type(exc).__name__), "error": str(exc), "pages_used": adapter.pages_used}
+            if getattr(exc, "code", "") in GUARDRAIL_ERROR_CODES:
+                # 护栏终止：不再处理后续资源，run 终态为 failed + 对应错误码。
+                guardrail_error = exc
+                break
+    if guardrail_error is not None:
+        # 尚未开始的资源记为同一护栏错误码，保证 run 终态为 failed。
+        for resource in targets:
+            if resource in result["resources"]:
+                continue
+            mark_resource_failed(db, run, resource, guardrail_error)
+            record_resource_metadata(db, run, resource, {"pages_used": 0, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages, "retention": _shopify_retention_meta(transport, resource)})
+            result["resources"][resource] = {"error_code": getattr(guardrail_error, "code", type(guardrail_error).__name__), "error": str(guardrail_error), "pages_used": 0}
+        finalize_resource_run(db, run, error=guardrail_error)
+        # 护栏终止的 run 一律为 failed（即使部分资源此前已成功）。
+        if run.status != "failed":
+            run.status = "failed"
+            db.commit()
+            db.refresh(run)
+    else:
+        finalize_resource_run(db, run)
+    result["status"] = run.status
+    result["error_code"] = run.error_code
+    return result
+
+
+def _shopify_resume_impl(request: Request, db: Session, run_id: str, requested: list[str] | None):
+    """续跑的实现：前置校验段（不占闸门）→ 抢闸门 → TOCTOU 重读 → 执行段。
+
+    闸门顺序铁律不变：**抢锁在 begin_sync_run 之前**（否则抢锁失败会留下孤儿 run）。
+    """
+    global _sync_gate_owner
+    principal = require_principal(request, permission="inventory.write")
+    from app.db import ExternalSyncRun
+    source = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.run_id == run_id, ExternalSyncRun.workspace_id == principal.workspace_id))
+    if source is None:
+        raise DomainError(code="SYNC_RUN_NOT_FOUND", message="同步运行不存在", http_status=404)
+    # 前置校验段（只读库，不占闸门）：live 判定 → 状态判定 → plan 判定。
+    targets = _resume_target_resources(source, requested)
+    _resume_plan_or_raise(source, targets)
+    if not _sync_gate_lock.acquire(blocking=False):
+        logger.warning("shopify live 续跑并发请求被拒：已有 run 在执行（owner_run_id=%s）", _sync_gate_owner)
+        raise DomainError(
+            code="SHOPIFY_SYNC_IN_PROGRESS",
+            message="已有 live 同步正在运行，请等待其结束或先调用取消接口",
+            http_status=409,
+        )
+    try:
+        # TOCTOU 防护：前置校验段与抢锁之间有时间窗，源 run 可能已被并发取消/改写。
+        # 持锁后**第一件事**是按主键重读源 run 并复核全部前置条件；
+        # cursor_json 也以重读值为准重算 plan。
+        source = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.run_id == run_id, ExternalSyncRun.workspace_id == principal.workspace_id))
+        if source is None:
+            raise DomainError(code="SYNC_RUN_NOT_FOUND", message="同步运行不存在", http_status=404)
+        plan = _resume_plan_or_raise(source, targets)
+        return _shopify_resume_run(request, db, principal, source, plan, targets)
+    finally:
+        # 释放顺序不可颠倒：先清归属，再放锁。
+        _sync_gate_owner = None
+        _sync_gate_lock.release()
+
+
+class ExternalSyncResumeRequest(BaseModel):
+    """续跑请求体（可选）：指定目标资源集；缺省时取源 run 的资源集。"""
+
+    resources: list[str] | None = None
+
+
+@app.post("/api/external/sync/runs/{run_id}/resume")
+def resume_external_sync_run(
+    run_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    resources: str | None = Query(default=None),
+    payload: ExternalSyncResumeRequest | None = Body(default=None),
+):
+    """Shopify live 同步断点续跑入口（同步执行；护栏 = wall-clock 预算 + 取消 token）。
+
+    语义：
+    - run 不存在或不属于当前 workspace → 404 SYNC_RUN_NOT_FOUND；
+    - 非 live run / 非可续跑状态 / 无可用游标 / 目标资源均已取完 → 409
+      SYNC_RUN_NOT_RESUMABLE，细分原因见 message 里的 reason=<XXX>；
+    - 与 /sync 共享同一把单飞闸门：任一在跑，另一方 409 SHOPIFY_SYNC_IN_PROGRESS。
+    """
+    requested: list[str] = []
+    if resources:
+        requested.append(resources)
+    if payload is not None and payload.resources:
+        requested.extend(payload.resources)
+    try:
+        return _shopify_resume_impl(request, db, run_id, requested)
+    finally:
+        # run 结束（成功/失败/取消/异常）即注销本线程登记的取消 token。
+        token_run_id = getattr(_sync_token_local, "run_id", None)
+        if token_run_id:
+            _unregister_sync_cancel_token(token_run_id)
+
+
 def external_orders_preview(payload: ExternalOrderPreviewRequest, request: Request):
     require_principal(request, permission="inventory.read")
     from app.connectors import load_orders

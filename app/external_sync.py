@@ -170,6 +170,22 @@ def record_resource_metadata(db: Session, run: ExternalSyncRun, resource: str, m
     return run
 
 
+def record_run_metadata(db: Session, run: ExternalSyncRun, metadata: dict) -> ExternalSyncRun:
+    """在 resource_status_json 的**顶层**记录 run 级链路元数据（如 resumed_from）。
+
+    只写非资源名的顶层键；资源条目由 record_resource_metadata 负责。
+    终态判定（calculate_overall_status / finalize_resource_run）只遍历 dict 条目，
+    因此顶层字符串键不影响状态计算。
+    """
+    statuses = resource_status(run)
+    for key, value in (metadata or {}).items():
+        if key == "schema_version" or isinstance(statuses.get(key), dict):
+            continue
+        statuses[key] = value
+    _save_resource_status(db, run, statuses)
+    return run
+
+
 def _as_int(value, default: int = 0) -> int:
     """把 JSON 里可能出现的脏值收敛成整数（不猜业务含义，只保证类型安全）。"""
     try:

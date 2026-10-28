@@ -137,7 +137,7 @@ reason 放 `message` 内以 `reason=<XXX>` 形式承载（**不扩 DomainError �
 | R4-3 | inventory 已 succeeded（complete=true）+ orders 失败，resume | **inventory 零上游调用**（SKIP 路径），台账标注；orders 照续 |
 | R4-4 | resume 新 run 超预算（预算调 0） | 新 run failed + `SHOPIFY_SYNC_BUDGET_EXCEEDED`；**源 run 字段不变**（status/cursor_json 均不动） |
 | R4-5 | 源 run 运行中（S4 卡页法）调 resume | 409 `SHOPIFY_SYNC_IN_PROGRESS`——**闸门共享**的直接证明 |
-| R4-6 | 源 run `cursor_json` 列为 NULL（手工 UPDATE 置 NULL） | 409，reason=`NO_CURSOR` |
+| R4-6 | 源 run `cursor_json` 无法识别（损坏串/空串）→ 409，reason=`NO_CURSOR`。**实施修正（2026-10-28）**：原写法"手工 UPDATE 置 NULL"在 R6 migration 0019 下不可达（列 NOT NULL，UPDATE 直接 IntegrityError）；用例改为损坏串/空串触发同一 NO_CURSOR 分支，并另用 `pytest.raises` 钉死"NULL 写入被约束拒绝" |
 | R4-6b | 源 run `cursor_json == "{}"`（未开始分页） | **不是 409**：新 run 全量重拉（RESTART），等同新 sync |
 | R4-7 | `cursor_json.schema_version=99` | 409，reason=`UNSUPPORTED_CURSOR_SCHEMA` |
 | R4-8 | `cursor_json` 缺 `schema_version` 键 | 409，reason=`UNSUPPORTED_CURSOR_SCHEMA` |
