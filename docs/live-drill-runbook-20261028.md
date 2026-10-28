@@ -5,7 +5,8 @@
 > `SHOPIFY_LIVE_ENABLED` 是否常开由用户单独裁定。
 >
 > **Gate 0（执行前置，用户逐项确认后截图/记录留证）**：
-> - G0-1 中转站 pro 档配额余量 **≥15 次**（本手册执行不耗 CLI 配额，配额留给缺陷应急修复）；
+> - G0-1 中转站 pro 档配额余量 **≥50 轮**（单位=轮，按次结算的"轮"；本手册执行本身
+>   不耗 CLI 配额，配额全部留给缺陷应急修复——每次修复开工前重报余量）；
 > - G0-2 **Shopify API 配额余量 ≥20 次调用**（演练全程含重试预计消耗 10~15 次
 >   GraphQL 调用：同步分页 + capabilities + 一次重试余量；Dev Store 桶按分钟恢复，
 >   低于 20 不开工）。
@@ -69,12 +70,22 @@ grep -c "SHOPIFY_LIVE_ENABLED=true" .env   # 确认恰好 1 处
 # 重启 uvicorn（杀掉旧进程再起）
 ```
 
-**路线乙（仅环境变量，不碰 `.env`）**——更安全，`.env` 全程零改动、无需还原：
+**路线乙（仅环境变量，不碰 `.env`）**——更安全，`.env` 全程零改动、无需还原。
+**启动命令逐字照抄**（shell 语法写死，两个 shell 二选一，与实际使用的终端一致）：
 
 ```bash
-SHOPIFY_LIVE_ENABLED=true uvicorn app.main:app --port 8000   # 以该前缀启动新进程
-# 先杀旧进程再以新前缀起；.env 保持 false 不动（步骤 9 无需还原 .env，只重启回基线）
+# Git Bash（本机默认终端）——单行，前缀=环境变量赋值：
+SHOPIFY_LIVE_ENABLED=true "D:/python/python/python.exe" -m uvicorn app.main:app --port 8000
 ```
+
+```powershell
+# PowerShell（若用 PS 启动）——两行，$env: 前缀只对当前会话生效：
+$env:SHOPIFY_LIVE_ENABLED = "true"
+D:\python\python\python.exe -m uvicorn app.main:app --port 8000
+```
+
+> 注意：乙路线必须**先杀旧进程**再以上述命令起新进程；`&&` 链式写法在 PS 5.1 不可用
+> （PS 里分开两条执行）。`.env` 保持 false 不动（步骤 9 无需还原 `.env`，只重启回基线）。
 
 **选择约束**：若走甲，步骤 9 必须做 `.env` 逐字节还原；若走乙，步骤 9 只需重启
 （不带前缀）即可回 false。**两条路线禁止混用**（半改半不改 = 排查地狱）。
@@ -89,14 +100,21 @@ curl -s http://127.0.0.1:8000/api/external/shopify/capabilities | tee "$EV/step3
 **止损**：进程起不来 / capabilities 仍 false → 若走甲立即还原 `.env`（`cp` + `cmp`），
 若走乙直接不带前缀重启；**不允许带病继续**。
 
-### 步骤 4：开热开关（运行期，不落盘）
+### 步骤 4：热开关状态**确认或跳过**（运行期，不落盘）
+
+运行期开关（`app/runtime_flags.py`）**默认就是放行态**——步骤 3 后 capabilities 已返回
+`live_enabled: true` 即含开关语义。本步只做**确认**：
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/api/admin/live-switch \
-  -b <cookie> -H "X-CSRF-Token: $CSRF" -H "Content-Type: application/json" \
-  -d '{"live_enabled": true}' | tee "$EV/step4-switch-on.json"
-# 预期：{"live_enabled": true, "source": "runtime_flag"}
+curl -s http://127.0.0.1:8000/api/external/shopify/capabilities | tee "$EV/step4-confirm.json"
+# capabilities live_enabled:true → 开关已确认放行，**跳过 POST**（少耗一次 Shopify 之外的调用）；
+# 仅当此前被显式关过（capabilities false）才执行显式开启：
+# curl -s -X POST http://127.0.0.1:8000/api/admin/live-switch \
+#   -b <cookie> -H "X-CSRF-Token: $CSRF" -H "Content-Type: application/json" \
+#   -d '{"live_enabled": true}' | tee "$EV/step4-switch-on.json"
 ```
+
+（把显式 POST 留给步骤 8 的反向验证与急停 E1——避免"为开而开"多打一次接口。）
 
 ### 步骤 5：演练 A——单资源小同步（orders only + 短预算）
 
@@ -168,15 +186,53 @@ curl -s -X POST "http://127.0.0.1:8000/api/external/sync/runs/<6a新run_id>/resu
 
 **分支 7-B（cursor 空：`"{}"` 或无任何资源条目——取消发生在首个检查点之前）**：
 
+若 6a 实际留下的 cursor 非空，7-B 用**手工构造**（真实 DB 插一条探针 run）：
+
 ```bash
-curl -s -X POST "http://127.0.0.1:8000/api/external/sync/runs/<6a新run_id>/resume" \
+"D:/python/python/python.exe" - <<'PY' | tee "$EV/step7B-seed.txt"
+from sqlalchemy import text
+from app.db import SessionLocal, ExternalSyncRun
+from datetime import datetime
+with SessionLocal() as db:
+    ws = db.execute(text("SELECT id FROM workspaces LIMIT 1")).scalar_one()
+    run = ExternalSyncRun(
+        workspace_id=ws, run_id="drillprobe7b0000000000000000", platform="shopify",
+        sync_type="shopify_live", account_ref="probe.myshopify.com",
+        store_ref="dianshang-dev.myshopify.com", source_mode="shopify_live",
+        simulated=False, status="failed", attempt=1,
+        resource_status_json='{"schema_version":1}',
+        retryable_resources_json="[]", cursor_json="{}", heartbeat_at=datetime.utcnow(),
+    )
+    db.add(run); db.commit()
+    print("seeded:", run.run_id)
+PY
+```
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/api/external/sync/runs/drillprobe7b0000000000000000/resume" \
   -b <cookie> -H "X-CSRF-Token: $CSRF" | tee "$EV/step7-resume-branchB.json"
 # 预期：**不是 409**（R4-6b 语义："{}" = 未开始，允许续跑 = 全量重拉 RESTART）；
 # 新 run attempt==2、全量从第 1 页开始。
 ```
 
-两条分支都要求实跑留证（若 6a 实际只落在其中一条，另一条用手工构造的
-failed run 复现——DB 里 seed 一条或重跑一次短取消，记入证据）。
+**7-B 构造件还原**（演练完立即执行，顺序不可颠倒）：
+
+```bash
+"D:/python/python/python.exe" - <<'PY' | tee "$EV/step7B-cleanup.txt"
+from app.db import SessionLocal
+from sqlalchemy import text
+with SessionLocal() as db:
+    # 先删子 run（有 retry_of_run_id 指向探针的），再删探针本体——FK 顺序。
+    db.execute(text("DELETE FROM external_sync_runs WHERE retry_of_run_id='drillprobe7b0000000000000000'"))
+    db.execute(text("DELETE FROM external_sync_runs WHERE run_id='drillprobe7b0000000000000000'"))
+    db.commit()
+    left = db.execute(text("SELECT count(*) FROM external_sync_runs WHERE run_id LIKE 'drillprobe7b%'")).scalar()
+    print("remaining:", left)   # 预期 0
+PY
+```
+
+> 还原失败（FK 残留）→ 不硬删，把残留 run_id 登记进 §15，留待统一清理。
+> 7-B 的 resume 会真实拉取 Dev Store 数据（只读、幂等去重兜底），消耗计入 G0-2。
 **止损**：409 reason 与实际状态矛盾 / 续跑把 pages 归零（分支 A 中 cursor 非空却从第 1 页重拉）→ 停，登记。
 
 ### 步骤 8：关闭态回归（反向）
@@ -200,38 +256,38 @@ cp "$EV/env.backup.pre-drill" .env && cmp .env "$EV/env.backup.pre-drill" && ech
 归档：`$EV/CONCLUSION.md` 写九步逐条结论；`docs/review-checklist-20261011.md` 新增 §15
 「受控 live 演练记录」（日期/九步结果/异常编号/留存目录路径）。
 
-## 3. 全局急停三连（**严格按此顺序执行，每步带独立验证**）
+## 3. 全局急停三连（**E1→E2→E3 严格按序执行，每步带独立验证，禁止跳序**）
 
-**急停第 1 击：热开关关闭**（最快、进程不重启、立即生效）：
+**E1：热开关关闭**（最快、进程不重启、立即生效）：
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/admin/live-switch \
   -b <cookie> -H "X-CSRF-Token: $CSRF" -H "Content-Type: application/json" \
-  -d '{"live_enabled": false}' | tee "$EV/estop1-switch-off.json"
-# 验证 1a：上一步返回 live_enabled:false；
-# 验证 1b：sync 立即被拒 → 预期 409 SHOPIFY_LIVE_NOT_CONFIGURED（存 $EV/estop1-denied.json）
+  -d '{"live_enabled": false}' | tee "$EV/estop-E1-switch-off.json"
+# E1 验证 1a：上一步返回 live_enabled:false；
+# E1 验证 1b：sync 立即被拒 → 预期 409 SHOPIFY_LIVE_NOT_CONFIGURED（存 $EV/estop-E1-denied.json）
 ```
 
-**急停第 2 击：`.env`/环境基线还原 + 重启**（第 1 击不够时执行）：
+**E2：`.env`/环境基线还原 + 重启**（E1 不够时执行）：
 
 ```bash
 # 走甲：cp "$EV/env.backup.pre-drill" .env && cmp .env "$EV/env.backup.pre-drill" && echo restored
 # 走乙：无需改 .env，直接不带前缀重启
-# 重启后验证 2a：
-curl -s http://127.0.0.1:8000/api/external/shopify/capabilities | tee "$EV/estop2-capabilities.json"
+# 重启后 E2 验证：
+curl -s http://127.0.0.1:8000/api/external/shopify/capabilities | tee "$EV/estop-E2-capabilities.json"
 # 预期：live_enabled: false（.env/无前缀基线回落）
 ```
 
-**急停第 3 击：杀 uvicorn 进程**（最后手段：进程失控 / 前两击无法执行时）：
+**E3：杀 uvicorn 进程**（最后手段：进程失控 / E1、E2 无法执行时）：
 
 ```bash
 ps -W | grep -i uvicorn          # 定位 PID
 taskkill //PID <pid> //F         # 杀
-ps -W | grep -i uvicorn          # 验证 3a：无输出 = 进程已死
-# 热开关是内存态：重启后必然回落 false。重启后验证 3b 同 2a。
+ps -W | grep -i uvicorn          # E3 验证 a：无输出 = 进程已死
+# 热开关是内存态：重启后必然回落 false。重启后 E3 验证 b 同 E2 验证。
 ```
 
-> 顺序依据：第 1 击零副作用即时生效 → 第 2 击消持久化状态 → 第 3 击兜底。
+> 顺序依据：E1 零副作用即时生效 → E2 消持久化状态 → E3 兜底。
 > 禁止跳序（先杀进程会丢失"取消是否落库"等现场证据）。
 
 ## 4. 缺陷处置、分工、耗时、证据落库
@@ -240,9 +296,20 @@ ps -W | grep -i uvicorn          # 验证 3a：无输出 = 进程已死
 
 | 级别 | 判定 | 处置 |
 |---|---|---|
-| 阻断 | 前置门失效（关闭态能同步）、取消永不生效、续跑把 pages 归零、越权/串 workspace | **立即急停三连**；登记新编号 R-3x；当天报告用户；未修复前不重跑 |
+| 阻断 | 前置门失效（关闭态能同步）、取消永不生效、续跑把 pages 归零、**任一权限异常（P-1/P-2/P-3，见下）** | **立即执行 E1→E2→E3**；登记新编号 R-3x；当天报告用户；未修复前不重跑 |
 | 非阻断 | 数字偏差（inserted 与预期差 ≤1）、留存 meta 字段缺失、告警噪音 | 记入 CONCLUSION.md + 编号；演练可继续；汇总后统一裁定 |
 | 观察 | 性能/时延、Dev Store 数据量级变化 | 只记录不处理 |
+
+**三类权限异常（写死判定，出现任一 = 阻断级）**：
+
+| 编号 | 异常 | 判定 |
+|---|---|---|
+| **P-1 权限提升** | 非 admin 会话触达 admin 接口 | operations 角色会话调 `POST /api/admin/live-switch` 返回**非 403** |
+| **P-2 跨租户** | 越过 workspace 隔离触达他人 run | 以 workspace A 的登录会话对 workspace B 的 run 调 `cancel`/`resume` 返回**非 404**（正确行为 = 按"不存在"处理） |
+| **P-3 写权限缺失** | 无 `inventory.write` 权限也能写外部事实 | 仅持 `inventory.read` 的会话成功发起 `sync`/`resume`（非 4xx） |
+
+> 三类在演练中不主动构造（超出本手册范围），但**任何步骤观察到疑似行为即升级阻断**；
+> 专项验证留待安全审计任务。
 
 - 缺陷编号从 **R-35** 起（R-34 已被模板占用）；
 - 修复属**实施任务**，走 dev_task 流程（R-34 分块），不在演练现场改代码；
