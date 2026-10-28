@@ -1158,3 +1158,28 @@ G0-1 耗 0 轮（全程手工操作，未调实施方 CLI）。
 - `app/connectors.py` 的死协议 `PlatformConnector`（零引用）已按 Q1 裁定删除，
   `ReadOnlyPlatformAdapter`（`app/platform_adapters/base.py`）成为唯一适配器契约；
   `tests/test_p2s1_connector.py` 的 C-10 锁死"全仓零命中"。
+
+### 16.3 复核结论（复核方自跑，2026-10-28 17:4x，通过）
+
+**判定：通过，P2-1 收口。** 提交 `47cda74`（7 files, +591/-32），工作区干净，交付说明与
+4 份分块说明均已落盘 `.testtmp/`。逐项核验：
+
+- **范围**：diff 与任务文件 §4 完全一致——`migrations/`、`app/db.py`、`external_sync.py`、
+  shopify/taobao/base 三个适配器实现文件**零改动**；7 文件 = registry 新增 + main/connectors/cli
+  修改 + 两个测试文件 + 本文档。
+- **等价搬移**：逐 diff 核对 5 处构造——live 分支 `ShopifyLiveTransport` 5 参数顺序逐字节一致、
+  fixture 分支 empty 结构逐字节一致、sync/resume 的 transport 句柄与后置
+  `live_enabled=True` 赋值原样保留、taobao 的 `enabled=True, simulated=True` 原样。
+  **既有测试文件零触碰**（tests/ 仅 test_connectors.py 翻转 + 新增文件）——C-9 的
+  "改构造不改旧测试"判据以 diff 面直接证实。
+- **独立验证（复核方自跑）**：定向 `tests/test_p2s1_connector.py + tests/test_connectors.py`
+  → **17 passed**；`grep -rn PlatformConnector` → clean（实施方已删两个 .pyc 残留使 grep
+  可信，构建产物不入库，处置正当）；路由 `/api/external/connectors` 注册在位；
+  **全量 393 passed / 0 failed（146.93s）**，与交付声明一致（基线 382 + 新增 11）。
+- **裁定落实**：Q1 删除死协议 ✓；Q3 翻转带 docstring 留痕且覆盖不减（17 例含原覆盖）✓；
+  Q4 `implemented:False` ✓；Q5 `CONNECTOR_DUPLICATE_PLATFORM` 报错 ✓。
+- **偏差认可**：① `runtime_flags.py` 实际函数名为 `live_enabled()`（任务文件 P5 写了
+  不存在的 `runtime_live_enabled`，属规划方调研误差；实施方沿用 main.py 既有别名导入、
+  未改该文件，处置正确）；② 能力清单 `live_enabled` 与平台专有端点 `live_ready` 口径
+  故意不同（§16.1 已留痕），认可。
+- **残留**：R-37/38/39 编号连续，已随本片入库；推送按阶段收口策略，随 P2-2/P2-3 收口后一并推。
