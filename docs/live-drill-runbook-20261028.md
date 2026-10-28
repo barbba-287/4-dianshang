@@ -4,9 +4,11 @@
 > 执行人不调实施方、不改仓库。演练通过**不等于** live 默认放开；
 > `SHOPIFY_LIVE_ENABLED` 是否常开由用户单独裁定。
 >
-> **Gate 0（执行前置，用户确认）**：中转站 pro 档配额余量 **≥15 次**（本手册执行本身
-> 不耗 CLI 配额——全部是手工操作；配额留给演练中暴露缺陷时的应急修复）。
-> **未确认前不得执行 §2 起的任何步骤。**
+> **Gate 0（执行前置，用户逐项确认后截图/记录留证）**：
+> - G0-1 中转站 pro 档配额余量 **≥15 次**（本手册执行不耗 CLI 配额，配额留给缺陷应急修复）；
+> - G0-2 **Shopify API 配额余量 ≥20 次调用**（演练全程含重试预计消耗 10~15 次
+>   GraphQL 调用：同步分页 + capabilities + 一次重试余量；Dev Store 桶按分钟恢复，
+>   低于 20 不开工）。
 
 ## 0. 演练目标与范围
 
@@ -57,18 +59,35 @@ curl -s -X POST "http://127.0.0.1:8000/api/external/shopify/sync?resources=order
 
 **止损**：任一预期不符（关闭态能同步 = 前置门失效）→ **立即停**，登记新编号，不进步骤 3。
 
-### 步骤 3：.env 切 live + 重启（R-23 全流程）
+### 步骤 3：切 live + 重启（**路线二选一**，任选其一并记录选择理由）
+
+**路线甲（改 `.env`，R-23 全流程）**——推荐，状态持久、重启不丢：
 
 ```bash
 # 只改 SHOPIFY_LIVE_ENABLED 一行 false→true；其余逐字节不动
-# 改完：grep -c "SHOPIFY_LIVE_ENABLED=true" .env 确认恰好 1 处
-# 然后重启 uvicorn（杀掉旧进程再起）
+grep -c "SHOPIFY_LIVE_ENABLED=true" .env   # 确认恰好 1 处
+# 重启 uvicorn（杀掉旧进程再起）
+```
+
+**路线乙（仅环境变量，不碰 `.env`）**——更安全，`.env` 全程零改动、无需还原：
+
+```bash
+SHOPIFY_LIVE_ENABLED=true uvicorn app.main:app --port 8000   # 以该前缀启动新进程
+# 先杀旧进程再以新前缀起；.env 保持 false 不动（步骤 9 无需还原 .env，只重启回基线）
+```
+
+**选择约束**：若走甲，步骤 9 必须做 `.env` 逐字节还原；若走乙，步骤 9 只需重启
+（不带前缀）即可回 false。**两条路线禁止混用**（半改半不改 = 排查地狱）。
+
+验证（两路线相同）：
+
+```bash
 curl -s http://127.0.0.1:8000/api/external/shopify/capabilities | tee "$EV/step3-capabilities.json"
 # 预期：live_enabled: true
 ```
 
-**止损**：进程起不来 / capabilities 仍 false → 还原 .env（`cp "$EV/env.backup.pre-drill" .env`
-+ `cmp` 核对）再排查；**不允许带病继续**。
+**止损**：进程起不来 / capabilities 仍 false → 若走甲立即还原 `.env`（`cp` + `cmp`），
+若走乙直接不带前缀重启；**不允许带病继续**。
 
 ### 步骤 4：开热开关（运行期，不落盘）
 
@@ -94,30 +113,71 @@ curl -s -X POST "http://127.0.0.1:8000/api/external/shopify/sync?resources=order
 **止损**：status=failed → 看 error_code：BUDGET_EXCEEDED→预算内正常中止（记录后可调预算重试一次）；
 其它 code → 停，登记。**遇 SHOPIFY_SYNC_IN_PROGRESS → 说明闸门误锁，停（新编号）。**
 
-### 步骤 6：演练 B——中途取消
+### 步骤 6：演练 B——中途取消（**三态拆 6a/6b/6c**，各留独立证据）
+
+**6a 取消运行中 run（主场景）**：
 
 ```bash
 # 后台发起 orders,inventory 同步（inventory 页数多，给取消留窗口），
 # 立即对新 run_id 发取消：
 curl -s -X POST "http://127.0.0.1:8000/api/external/sync/runs/<run_id>/cancel" \
-  -b <cookie> -H "X-CSRF-Token: $CSRF" | tee "$EV/step6-cancel.json"
+  -b <cookie> -H "X-CSRF-Token: $CSRF" | tee "$EV/step6a-cancel-202.json"
 # 预期：202 effective:true；随后查询 run：status=failed + SHOPIFY_SYNC_CANCELLED，
 # 且 cursor_json 中已完成页的游标已落库（DB 查询或 cli）
 ```
 
-对重复取消与终态 run 再各发一次：404（不存在 id）/ 409（已终态）各留证据。
-**止损**：cancel 返回 202 但 run 永远 running（>2 分钟无检查点生效）→ 停，登记（护栏未生效）。
-
-### 步骤 7：演练 C——断点续跑（R4 首次实弹）
+**6b 取消不存在的 run**：
 
 ```bash
-curl -s -X POST "http://127.0.0.1:8000/api/external/sync/runs/<步骤6的新run_id>/resume" \
-  -b <cookie> -H "X-CSRF-Token: $CSRF" | tee "$EV/step7-resume.json"
+curl -s -o "$EV/step6b-cancel-404.json" -w "%{http_code}" \
+  -X POST "http://127.0.0.1:8000/api/external/sync/runs/nonexistent000/cancel" \
+  -b <cookie> -H "X-CSRF-Token: $CSRF"
+# 预期：404 SYNC_RUN_NOT_FOUND
 ```
 
-核对：新 run `attempt==2`、`retry_of_run_id==源`、`resumed_from==源`；
-inventory 未取完则从落点继续（不重拉已取页）；已取完资源走 SKIP（响应体 `resumed:"skip"`）。
-**止损**：409 reason 与实际状态矛盾 / 续跑把 pages 归零 → 停，登记。
+**6c 取消已终态 run**（用步骤 5 已 succeeded 的 run_id）：
+
+```bash
+curl -s -o "$EV/step6c-cancel-409.json" -w "%{http_code}" \
+  -X POST "http://127.0.0.1:8000/api/external/sync/runs/<步骤5的run_id>/cancel" \
+  -b <cookie> -H "X-CSRF-Token: $CSRF"
+# 预期：409 SYNC_RUN_NOT_CANCELLABLE
+```
+
+**止损**：6a 返回 202 但 run 永远 running（>2 分钟无检查点生效）→ 停，登记（护栏未生效）；
+6b/6c 状态码与预期不符 → 停，登记。
+
+### 步骤 7：演练 C——断点续跑（R4 首次实弹，**cursor 空/非空两分支**）
+
+先查 6a 新 run 的 `cursor_json` 判定走哪条分支：
+
+```bash
+python -m app.cli retention list --run-id <6a新run_id>   # 辅助；cursor 以 DB 查询为准
+# DB：SELECT cursor_json FROM external_sync_runs WHERE run_id='<6a新run_id>';
+```
+
+**分支 7-A（cursor 非空：至少一个资源已有已取页记录）**——主路径：
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/api/external/sync/runs/<6a新run_id>/resume" \
+  -b <cookie> -H "X-CSRF-Token: $CSRF" | tee "$EV/step7-resume-branchA.json"
+# 预期：新 run attempt==2、retry_of_run_id==6a新run、resumed_from==6a新run；
+# 有已取页的资源从落点 cursor 续（不重拉已取页）；
+# 已取完（complete=true）的资源走 SKIP（响应体 resumed:"skip" + source_pages/source_fetched）。
+```
+
+**分支 7-B（cursor 空：`"{}"` 或无任何资源条目——取消发生在首个检查点之前）**：
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/api/external/sync/runs/<6a新run_id>/resume" \
+  -b <cookie> -H "X-CSRF-Token: $CSRF" | tee "$EV/step7-resume-branchB.json"
+# 预期：**不是 409**（R4-6b 语义："{}" = 未开始，允许续跑 = 全量重拉 RESTART）；
+# 新 run attempt==2、全量从第 1 页开始。
+```
+
+两条分支都要求实跑留证（若 6a 实际只落在其中一条，另一条用手工构造的
+failed run 复现——DB 里 seed 一条或重跑一次短取消，记入证据）。
+**止损**：409 reason 与实际状态矛盾 / 续跑把 pages 归零（分支 A 中 cursor 非空却从第 1 页重拉）→ 停，登记。
 
 ### 步骤 8：关闭态回归（反向）
 
@@ -140,14 +200,85 @@ cp "$EV/env.backup.pre-drill" .env && cmp .env "$EV/env.backup.pre-drill" && ech
 归档：`$EV/CONCLUSION.md` 写九步逐条结论；`docs/review-checklist-20261011.md` 新增 §15
 「受控 live 演练记录」（日期/九步结果/异常编号/留存目录路径）。
 
-## 3. 全局急停（任一时刻可执行）
+## 3. 全局急停三连（**严格按此顺序执行，每步带独立验证**）
 
-1. `POST /api/admin/live-switch {"live_enabled": false}`（即时生效，不重启）；
-2. `cp "$EV/env.backup.pre-drill" .env` + 重启（回 .env 基线）；
-3. 极端情况杀 uvicorn 进程（热开关是内存态，重启即回落 false）。
+**急停第 1 击：热开关关闭**（最快、进程不重启、立即生效）：
 
-## 4. 边界与裁定留白
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/admin/live-switch \
+  -b <cookie> -H "X-CSRF-Token: $CSRF" -H "Content-Type: application/json" \
+  -d '{"live_enabled": false}' | tee "$EV/estop1-switch-off.json"
+# 验证 1a：上一步返回 live_enabled:false；
+# 验证 1b：sync 立即被拒 → 预期 409 SHOPIFY_LIVE_NOT_CONFIGURED（存 $EV/estop1-denied.json）
+```
 
-- 演练全程 `.env` 的 `SHOPIFY_LIVE_ENABLED` 最终**必须还原为 false**；
+**急停第 2 击：`.env`/环境基线还原 + 重启**（第 1 击不够时执行）：
+
+```bash
+# 走甲：cp "$EV/env.backup.pre-drill" .env && cmp .env "$EV/env.backup.pre-drill" && echo restored
+# 走乙：无需改 .env，直接不带前缀重启
+# 重启后验证 2a：
+curl -s http://127.0.0.1:8000/api/external/shopify/capabilities | tee "$EV/estop2-capabilities.json"
+# 预期：live_enabled: false（.env/无前缀基线回落）
+```
+
+**急停第 3 击：杀 uvicorn 进程**（最后手段：进程失控 / 前两击无法执行时）：
+
+```bash
+ps -W | grep -i uvicorn          # 定位 PID
+taskkill //PID <pid> //F         # 杀
+ps -W | grep -i uvicorn          # 验证 3a：无输出 = 进程已死
+# 热开关是内存态：重启后必然回落 false。重启后验证 3b 同 2a。
+```
+
+> 顺序依据：第 1 击零副作用即时生效 → 第 2 击消持久化状态 → 第 3 击兜底。
+> 禁止跳序（先杀进程会丢失"取消是否落库"等现场证据）。
+
+## 4. 缺陷处置、分工、耗时、证据落库
+
+### 4.1 缺陷处置
+
+| 级别 | 判定 | 处置 |
+|---|---|---|
+| 阻断 | 前置门失效（关闭态能同步）、取消永不生效、续跑把 pages 归零、越权/串 workspace | **立即急停三连**；登记新编号 R-3x；当天报告用户；未修复前不重跑 |
+| 非阻断 | 数字偏差（inserted 与预期差 ≤1）、留存 meta 字段缺失、告警噪音 | 记入 CONCLUSION.md + 编号；演练可继续；汇总后统一裁定 |
+| 观察 | 性能/时延、Dev Store 数据量级变化 | 只记录不处理 |
+
+- 缺陷编号从 **R-35** 起（R-34 已被模板占用）；
+- 修复属**实施任务**，走 dev_task 流程（R-34 分块），不在演练现场改代码；
+- 修复消耗中转配额——**每次修复开工前向用户报当前余量**。
+
+### 4.2 执行人分工
+
+| 角色 | 职责 |
+|---|---|
+| **用户** | 执行人：所有手工操作（curl/CLI/`.env`/服务启停/急停）；Gate 0 配额确认与放行 |
+| **WorkBuddy（复核方）** | 陪跑：逐步核对响应与台账数字、证据文件完整性、异常初步定位；不碰 `.env`、不发请求 |
+| **实施方（claude CLI）** | 仅在缺陷裁定后按 dev_task 流程修复；不在演练中现场待命 |
+
+### 4.3 预计耗时（单次完整通过）
+
+| 段 | 步骤 | 估时 |
+|---|---|---|
+| 准备 | Gate 0 + 步骤 1-2 | 10 min |
+| 切换 | 步骤 3-4 | 5-10 min（含重启） |
+| 演练 | 步骤 5-7（A/B/C 三场景） | 20-30 min（含等待取消检查点与两分支复现） |
+| 收尾 | 步骤 8-9 + 归档 | 10-15 min |
+| **合计** | | **约 45-65 min**；含一次阻断缺陷返工按 +30 min 预留 |
+
+### 4.4 证据落库（区分"入库摘要"与"本地原始件"）
+
+- **入库（随 docs 提交）**：`docs/review-checklist-20261011.md` §15 演练记录——
+  日期、九步逐条结果、run_id 清单、资源级数字（inserted/no-op/pages_used）、
+  缺陷编号、结论（通过/不通过）；
+- **本地留存（不提交、`.testtmp` 已被 gitignore 覆盖）**：`$EV/` 全部原始输出
+  与 `artifacts/shopify_sync/<run_id>/` 留存文件——**live 响应原文与 cookie/CSRF
+  证据一律不入库**（防凭证与业务数据泄漏）；
+- 演练目录与台账 SQL 输出由 WorkBuddy 复核后写入 §15，用户过目后随阶段推送。
+
+## 5. 边界与裁定留白
+
+- 演练全程 `.env` 的 `SHOPIFY_LIVE_ENABLED` 最终**必须还原为 false**（走乙路线则验证基线回落）；
 - 演练通过 → 只登记「演练通过、具备放开条件」，**不自行放开**；
-- 放开 = 用户单独裁定（届时才有"常开 + 监控"议题，含 R-25/R-26 多 worker 限制的处置）。
+- **演练通过 ≠ live 放开**：放开 = 用户单独裁定（届时才有"常开 + 监控"议题，
+  含 R-25/R-26 多 worker 限制的处置）。
