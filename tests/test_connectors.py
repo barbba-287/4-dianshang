@@ -4,9 +4,28 @@ from app.connectors import ConnectorError, connector_capabilities, load_events, 
 
 
 def test_all_candidate_platforms_are_read_only():
-    platforms = {item["platform"] for item in connector_capabilities()}
-    assert {"taobao", "jd", "pdd", "douyin", "amazon"} <= platforms
-    assert all(item["read_only"] and not item["live_enabled"] and item["simulated"] for item in connector_capabilities())
+    """能力条目如实反映状态（P2-1 能力真实化后的收敛规格）。
+
+    旧断言锁的是"六个平台一律 live_enabled=False / simulated=True"这份**写死假数据**，
+    能力真实化后按 Q3 裁定翻转：现在锁的是——
+    ① 只读恒真；② 未接适配器实现的平台显式带 `implemented=False`；
+    ③ shopify 的 live 状态与运行期开关（.env 配置 + 进程内热开关）一致；
+    ④ taobao 如实报骨架态（未接真实 transport）。
+    """
+    from app.config import get_settings
+    from app.runtime_flags import live_enabled as runtime_live_enabled
+
+    items = {item["platform"]: item for item in connector_capabilities()}
+    assert {"taobao", "jd", "pdd", "douyin", "amazon"} <= set(items)
+    assert all(item["read_only"] for item in items.values())
+    for platform in ("jd", "pdd", "douyin", "amazon"):
+        assert items[platform]["implemented"] is False
+    settings = get_settings()
+    live_allowed = bool(settings.shopify_live_enabled and runtime_live_enabled())
+    assert items["shopify"]["live_enabled"] is live_allowed
+    assert items["shopify"]["simulated"] is (not live_allowed)
+    assert items["taobao"]["live_enabled"] is False
+    assert items["taobao"]["simulated"] is True
 
 
 def test_json_envelope_normalizes_defaults_and_amazon_fields():

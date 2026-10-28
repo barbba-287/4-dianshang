@@ -393,9 +393,11 @@ def cmd_replay_catalog(args: list[str]) -> int:
 
 
 def cmd_external_list_connectors(args: list[str]) -> int:
-    from app.connectors import connector_capabilities
+    # 取数来源统一到适配器注册表：与 GET /api/external/connectors 同一数据源，
+    # 输出的能力状态是真实状态（不再是对所有平台写死的模拟态）。
+    from app.platform_adapters.registry import platform_capabilities
 
-    print(json.dumps(connector_capabilities(), ensure_ascii=False, indent=2))
+    print(json.dumps(platform_capabilities(), ensure_ascii=False, indent=2))
     return 0
 
 

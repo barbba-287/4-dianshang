@@ -1129,3 +1129,32 @@ G0-1 耗 0 轮（全程手工操作，未调实施方 CLI）。
 **证据**（`.testtmp/drill-evidence-20261028/`，不入库）：
 `step6a-sync-response.json`（第一次全量成功）、`step7-resume-branchA.json`（conflict=28/inserted=0）、
 `step7-snapshot-attribution.txt`（57 行归因逐条核验）、`step7-inventory-check.txt`。
+
+## 16. P2-1 连接器生产化：R-37/38/39 登记（2026-10-28）
+
+切片：P2-1 Connector（任务文件 `dev_task.p2s1-connector.md`，实施方 Claude Code / 复核方 WorkBuddy）。
+本节登记本片新增的三条残留与限制，编号接 R-36 之后，**连续、不跳号、不复用**。
+
+| 编号 | 限制/残留 | 影响面 | 本期处置 | 后续归属 | 定级 |
+|---|---|---|---|---|---|
+| **R-37** | `jd` / `pdd` / `douyin` / `amazon` 四平台在 `PLATFORMS` 常量中存在，但**无适配器实现**；能力清单中以 `implemented=False` 如实暴露 | 仅能力展示层：调用方能看出"未实现"，不会误当成可用连接器发起拉取；无运行时影响（无适配器即无法取数） | 接受并登记（本片把写死的假能力改成如实标记，不再冒充可用） | 有真实授权需求时再立项 | P3（设计现状） |
+| **R-38** | 授权引用（凭证引用）仍未实体化：凭证仍在 `.env` / `Settings` 单文件态，无法回答"这次拉取用的是哪个授权" | P2-2 source batch 的归因能力（谁/哪个授权触发的拉取、逐源台账） | 接受并登记（本片明确不做，避免与 P2-2 抢范围与撞 migration） | 候选并入 P2-2（用户 2026-10-28 Q2 裁定） | P3（已知限制） |
+| **R-39** | 能力真实化的 `live_enabled` 判定含**进程内**热开关（`runtime_live_enabled()`），多 worker / 多副本部署下各进程状态可能不一致 | 多 worker 或多副本部署时，同一时刻不同进程报出不同的 live 状态（能力展示层不一致，不影响单进程内的同步护栏） | 接受并登记（单进程假设的既有形态延伸，非本片新增风险源；R-25/R-26 已登记同源限制） | P12 前随技术债"并发与多 worker"（D1）类统一外部化 | P3（已知限制） |
+
+### 16.1 能力真实化的口径说明（按任务文件 T2 原文执行）
+
+- `shopify`：`live_enabled = settings.shopify_live_enabled and runtime_live_enabled()`；
+  `simulated` 随传输形态取值（live 通道 → `false`，离线 fixture 形态 → `true`）；`read_only=true`。
+- `taobao`：`live_enabled=false, simulated=true`（骨架未接真实 transport，如实报）。
+- `jd` / `pdd` / `douyin` / `amazon`：一律带 `implemented=false`（Q4 裁定）。
+- **口径差异留痕**：能力清单的 `live_enabled` 只看「.env 配置 + 进程内热开关」；
+  而 `GET /api/external/shopify/capabilities`（平台专有端点）的 `live_enabled` 额外要求
+  店铺域名与 token 就绪（`live_ready`）。两者判定口径**故意不同**：能力清单回答
+  "这条通道是否被放行"，平台端点回答"现在能不能真的拉"。本片按任务文件 T2 原文执行，
+  不擅自加严。
+
+### 16.2 本片协议收敛与死代码处置
+
+- `app/connectors.py` 的死协议 `PlatformConnector`（零引用）已按 Q1 裁定删除，
+  `ReadOnlyPlatformAdapter`（`app/platform_adapters/base.py`）成为唯一适配器契约；
+  `tests/test_p2s1_connector.py` 的 C-10 锁死"全仓零命中"。

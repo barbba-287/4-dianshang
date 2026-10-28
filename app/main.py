@@ -1766,15 +1766,13 @@ def shopify_capabilities(request: Request):
 def shopify_preview(payload: ShopifyPreviewRequest, request: Request):
     require_principal(request, permission="inventory.read")
     settings = get_settings()
-    from app.platform_adapters.shopify import ShopifyFixtureTransport, ShopifyLiveTransport, ShopifyReadOnlyAdapter
+    from app.platform_adapters.registry import get_adapter
     if payload.live:
         if not (settings.shopify_live_enabled and runtime_live_enabled() and settings.shopify_store_domain and settings.shopify_access_token):
             raise DomainError(code="SHOPIFY_LIVE_NOT_CONFIGURED", message="Shopify live 未配置店铺、Token 或启用开关", http_status=409)
-        transport = ShopifyLiveTransport(settings.shopify_store_domain, settings.shopify_access_token, settings.shopify_api_version, settings.shopify_request_timeout_seconds, settings.shopify_max_retries)
-        adapter = ShopifyReadOnlyAdapter(transport, live_enabled=True, simulated=False, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
+        adapter = get_adapter("shopify", live=True, settings=settings, live_enabled=True, simulated=False, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
     else:
-        empty = {"data": {"products": {"edges": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}, "orders": {"edges": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}, "locations": {"edges": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
-        adapter = ShopifyReadOnlyAdapter(ShopifyFixtureTransport({"products": empty, "orders": empty, "inventory": empty}), simulated=True, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
+        adapter = get_adapter("shopify", simulated=True, page_size=settings.shopify_max_page_size, max_pages=settings.shopify_max_pages)
     records = getattr(adapter, f"fetch_{payload.resource}")()
     return ShopifyPreviewResponse(resource=payload.resource, live_enabled=adapter.live_enabled, simulated=adapter.simulated, store_domain=settings.shopify_store_domain or None, total=len(records), records=records, request_ids=[], limitations=["Preview 不写入内部事实层；使用 sync 入口才会写入订单/库存外部事实"])
 
@@ -1901,7 +1899,8 @@ def _shopify_sync_run(request: Request, db: Session, resources: str):
     if not (settings.shopify_live_enabled and runtime_live_enabled() and settings.shopify_store_domain and settings.shopify_access_token):
         raise DomainError(code="SHOPIFY_LIVE_NOT_CONFIGURED", message="Shopify live 未配置", http_status=409)
     from app.platform_adapters.base import AdapterError
-    from app.platform_adapters.shopify import ShopifyLiveTransport, ShopifyReadOnlyAdapter, canonical_store_domain
+    from app.platform_adapters.registry import get_adapter
+    from app.platform_adapters.shopify import ShopifyLiveTransport, canonical_store_domain
     from app.external_orders import ensure_external_account, ingest_orders
     from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, record_sync_cursor, ImportStats, ingest_inventory
     selected = [item.strip() for item in resources.split(",") if item.strip()]
@@ -1932,8 +1931,9 @@ def _shopify_sync_run(request: Request, db: Session, resources: str):
     )
     # 取消 token：run 建立后立即登记，run 结束（成功/失败/取消/异常）后注销。
     cancel_token = _register_sync_cancel_token(run.run_id)
-    adapter = ShopifyReadOnlyAdapter(
-        transport,
+    adapter = get_adapter(
+        "shopify",
+        transport=transport,
         live_enabled=True,
         simulated=False,
         page_size=settings.shopify_max_page_size,
@@ -2215,7 +2215,8 @@ def _shopify_resume_run(request: Request, db: Session, principal, source, plan, 
     if not (settings.shopify_live_enabled and runtime_live_enabled() and settings.shopify_store_domain and settings.shopify_access_token):
         raise DomainError(code="SHOPIFY_LIVE_NOT_CONFIGURED", message="Shopify live 未配置", http_status=409)
     from app.platform_adapters.base import AdapterError
-    from app.platform_adapters.shopify import ShopifyLiveTransport, ShopifyReadOnlyAdapter, canonical_store_domain
+    from app.platform_adapters.registry import get_adapter
+    from app.platform_adapters.shopify import ShopifyLiveTransport, canonical_store_domain
     from app.external_orders import ensure_external_account, ingest_orders
     from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, record_run_metadata, record_sync_cursor, ImportStats, ingest_inventory, CURSOR_ACTION_RESUME, CURSOR_ACTION_SKIP
     # 新 run 自己的 wall-clock 预算（不继承源 run 的剩余量）。
@@ -2255,8 +2256,9 @@ def _shopify_resume_run(request: Request, db: Session, principal, source, plan, 
     )
     # 取消 token：run 建立后立即登记，run 结束后注销。
     cancel_token = _register_sync_cancel_token(run.run_id)
-    adapter = ShopifyReadOnlyAdapter(
-        transport,
+    adapter = get_adapter(
+        "shopify",
+        transport=transport,
         live_enabled=True,
         simulated=False,
         page_size=settings.shopify_max_page_size,
@@ -3011,10 +3013,11 @@ def taobao_capabilities(request: Request):
 def taobao_preview(payload: TaobaoPreviewRequest, request: Request):
     require_principal(request, permission="inventory.read")
     from app.platform_adapters.base import AdapterError
-    from app.platform_adapters.taobao import TaobaoAdapter, fixture_transport
+    from app.platform_adapters.registry import get_adapter
+    from app.platform_adapters.taobao import fixture_transport
     from app.platform_sync import preview_adapter
     try:
-        adapter = TaobaoAdapter(enabled=True, simulated=True, transport=fixture_transport(payload.content, resource=payload.resource), max_page_size=payload.max_pages)
+        adapter = get_adapter("taobao", enabled=True, simulated=True, transport=fixture_transport(payload.content, resource=payload.resource), max_page_size=payload.max_pages)
         adapter.live_enabled = True
         result = preview_adapter(adapter, account_ref=payload.account_ref, store_ref=payload.store_ref, resource=payload.resource, max_pages=payload.max_pages)
     except AdapterError as exc:

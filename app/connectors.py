@@ -9,7 +9,7 @@ import csv
 import hashlib
 import io
 import json
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable
 
 PLATFORMS = ("taobao", "jd", "pdd", "douyin", "amazon", "shopify")
 MODES = ("json", "csv", "mock")
@@ -175,18 +175,6 @@ class CanonicalEvent:
 
 class ConnectorError(ValueError):
     pass
-
-
-class PlatformConnector(Protocol):
-    platform: str
-    source_mode: str
-    read_only: bool
-    live_enabled: bool
-    simulated: bool
-
-    def inventory_snapshots(self) -> list[InventorySnapshotRecord]: ...
-
-    def events(self) -> list[CanonicalEvent]: ...
 
 
 def _parse_time(value: Any, *, field: str) -> datetime:
@@ -478,7 +466,19 @@ def load_orders(content: str | bytes, *, platform: str, source_mode: str = "json
 
 
 def connector_capabilities() -> list[dict[str, Any]]:
-    return [{"platform": platform, "source_modes": list(MODES), "read_only": True, "live_enabled": False, "simulated": True} for platform in PLATFORMS]
+    """返回各平台的**真实**能力状态（P2-1 能力真实化）。
+
+    旧实现对六个平台一律返回写死的 `live_enabled=False / simulated=True`，
+    与真实适配器状态脱节（shopify 可真实 live 时能力端点在撒谎）。
+    现在改为从适配器注册表读取：已注册平台按运行期真实状态计算，
+    未接适配器实现的平台如实带 `implemented=False`（R-37）。
+
+    导入放在函数内：`app.platform_adapters.registry` 依赖本模块的
+    `PLATFORMS`/`MODES`，模块级互相导入会形成循环。
+    """
+    from app.platform_adapters.registry import platform_capabilities
+
+    return platform_capabilities()
 
 
 def records_to_json(records: Iterable[InventorySnapshotRecord]) -> str:
