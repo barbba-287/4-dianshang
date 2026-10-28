@@ -9,7 +9,9 @@
 >   不耗 CLI 配额，配额全部留给缺陷应急修复——每次修复开工前重报余量）；
 > - G0-2 **Shopify API 配额余量 ≥20 次调用**（演练全程含重试预计消耗 10~15 次
 >   GraphQL 调用：同步分页 + capabilities + 一次重试余量；Dev Store 桶按分钟恢复，
->   低于 20 不开工）。
+>   低于 20 不开工）。**任何 API 调用失败（含 429 节流）不自动重试**——记录响应原文、
+>   等桶恢复（Dev Store 每 分钟回补）后人工重发；禁止循环/退避脚本自动重试
+>   （防止节流放大，消耗失控）。
 
 ## 0. 演练目标与范围
 
@@ -86,6 +88,11 @@ D:\python\python\python.exe -m uvicorn app.main:app --port 8000
 
 > 注意：乙路线必须**先杀旧进程**再以上述命令起新进程；`&&` 链式写法在 PS 5.1 不可用
 > （PS 里分开两条执行）。`.env` 保持 false 不动（步骤 9 无需还原 `.env`，只重启回基线）。
+>
+> **乙路线演练期间禁止重启**：热开关与运行态都是进程内存，重启即回落 false——
+> 演练步骤 3~8 之间**任何情况下不得重启进程**（包括"顺手重启清状态"）。
+> 若进程崩溃：**立即止损回步骤②**（关闭态基线回归确认 false 态完好），
+> 再从头走 3~8；崩溃现场照常归档（崩溃本身可能就是登记项）。
 
 **选择约束**：若走甲，步骤 9 必须做 `.env` 逐字节还原；若走乙，步骤 9 只需重启
 （不带前缀）即可回 false。**两条路线禁止混用**（半改半不改 = 排查地狱）。
@@ -205,6 +212,12 @@ with SessionLocal() as db:
     )
     db.add(run); db.commit()
     print("seeded:", run.run_id)
+    # 复核断言：NOT_LIVE_RUN 闸门字段必须满足（main.py 前置判定：
+    # platform=="shopify" 且 source_mode=="shopify_live"；模型无 is_live 字段，
+    # source_mode 即 live 语义的唯一载体——此行若被改，resume 必 409 NOT_LIVE_RUN）。
+    db.expire(run)
+    assert run.platform == "shopify" and run.source_mode == "shopify_live", "seed 未过 live 闸门字段校验"
+    print("live-gate fields OK:", run.platform, run.source_mode)
 PY
 ```
 
