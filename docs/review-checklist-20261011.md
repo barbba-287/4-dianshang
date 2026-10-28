@@ -1083,3 +1083,18 @@ fixture 收走，中间插入会自行清理的用例不影响检出力。
 | drill-admin 建号 | 10-28 14:35 | 成功（admin@默认商家；随机密码仅存 .testtmp/，未入对话/未入 git）；登录 303，session+CSRF 双 cookie 入 `.testtmp/drill-cookies.txt`（curl 自持会话，等效浏览器登录） | （凭据文件不入库） |
 | 步骤 2a 关闭态 capabilities | 10-28 14:36 | **live_enabled:false** ✓（read_only:true、scopes 四读齐） | step2-capabilities.json |
 | 步骤 2b 关闭态 sync 拒绝 | 10-28 14:36 | **409 SHOPIFY_LIVE_NOT_CONFIGURED** ✓（前置门完好） | step2-sync-denied.json |
+| 步骤 3 切 live（乙） | 10-28 14:48 | capabilities **true + simulated:false** ✓（双前缀启动，命令原文落盘） | step3-start.txt、step3-capabilities.json |
+| 步骤 4 热开关确认 | 10-28 14:49 | true 确认，按手册跳过显式 POST | step4-confirm.json |
+| 步骤 5 演练A orders | 10-28 14:49 | **succeeded**、3/3 入库、pages_used=1；留存 1 件未截断；cursor complete:true 落库（R6 生产首验） | step5-*.json/txt |
+| 步骤 6a/6b/6c 取消三态 | 10-28 14:52 | **202 effective:true**（检查点生效）/ **404** / **409** 全对；取消 run failed+SHOPIFY_SYNC_CANCELLED | step6a~c-*.json |
+| 步骤 7-A 续跑 | 10-28 14:53 | 200；orders **SKIP 台账逐字符合格**；inventory RESTART 28 项→conflict=28/inserted=0（**R-31 生产实锤**）；attempt=2、链路字段正确 | step7-resume-branchA.json、step7-snapshot-attribution.txt |
+| 步骤 7-B 续跑（"{}"） | 10-28 14:55 | **200 非 409**（R4-6b 语义）、全量重拉、no_op=3；构造件还原 remaining:0 | step7-resume-branchB.json、step7B-*.txt |
+| 步骤 8 关闭态反向 | 10-28 14:56 | 热开关关→**即时** 409 拒绝 ✓ | step8-*.json |
+| 步骤 9 还原与清理 | 10-28 14:58 | .env cmp 一致；基线 false；**drill-admin 六步清理完成**（remaining:0）；凭据/cookie 文件已删 | step9-*.json/txt |
+
+### 15.4 演练结论（2026-10-28）
+
+**演练通过，全部九步无阻断缺陷。** 结论文件：`.testtmp/drill-evidence-20261028/CONCLUSION.md`。
+核心：R-31 去重兜底、R6 游标、R4 两分支、取消检查点语义、热开关即时性——全部生产实弹验证。
+**只登记"具备放开条件"；live 放开由用户单独裁定。** G0-2 实耗约 8 次 API 调用（预算 10~15）；
+G0-1 耗 0 轮（全程手工操作，未调实施方 CLI）。
