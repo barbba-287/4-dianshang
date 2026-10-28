@@ -1050,3 +1050,33 @@ fixture 收走，中间插入会自行清理的用例不影响检出力。
 - 2026-10-27 新增 §14.7–14.9（R-19 修复关闭、A3 假绿教训、flaky 清单降级）。
 
 
+
+## 15. 受控 live 演练记录（2026-10-28 开工）
+
+手册：`docs/live-drill-runbook-20261028.md`（v1.3，Gate 0 双项已过/口径见 §15.1）。
+证据目录：`.testtmp/drill-evidence-20261028/`（不入库，路径留痕）。
+
+### 15.1 Gate 0 实测与口径
+
+- **G0-1（中转轮次）**：权威余额无查询通道，用户认可**台账估算口径**（本周实施约
+  25~30 轮 / 周配额 2000）。止损线：**本轮累计 55~60 轮强制暂停一次**，重报台账确认后继续。
+- **G0-2（Shopify API）**：实测探针（graphql `{shop{name}}`，cost=1）→
+  `currentlyAvailable=1999 / maximumAvailable=2000，restoreRate=100/min` →
+  阈值 ≥20 满足（余 1999）。证据：`gate0-shopify-throttle.json`。
+- **live_enabled 实际值（进程外确认）**：`shopify_live_enabled=False` + runtime flag
+  默认放行 → 生效 false。
+
+### 15.2 偏差与新编号
+
+| 编号 | 内容 | 定级 |
+|---|---|---|
+| **R-35** | `GET /api/external/shopify/capabilities` 位于鉴权墙之后（未带会话 → `UNAUTHORIZED`），手册步骤 2a 原文"免鉴权可直接探"不成立。文档错误非代码缺陷，不阻断；2a 改为会话建立后断言 `live_enabled:false` | P3（文档） |
+| （无编号，流程留痕） | 演练专用号 `drill-admin` 经 `init-admin` 创建（随机密码仅存本地 `.testtmp/`，不入 git/对话），原因是用户裁定"凭据不过对话"；**演练收口时禁用并在此登记** | 授权的临时 DB 变更 |
+
+### 15.3 执行台账（逐步追加）
+
+| 步骤 | 时间 | 结果 | 证据文件 |
+|---|---|---|---|
+| 步骤 1 预检+备份 | 10-28 11:14 | 全绿（git 干净/R-29 干净/.env 备份一致/基线 false×1） | step1-precheck.txt |
+| Gate 0 探针 | 10-28 11:14 | G0-2 余 1999（耗 1 次） | gate0-shopify-throttle.json |
+| 服务器首启 | 10-28 11:15 | 乙路线 ：8000；11:15→14:28 间被环境收割（R-22 已知形态），按协议在步骤 2 完成前重启 | uvicorn.log |
