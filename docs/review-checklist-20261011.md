@@ -1080,3 +1080,6 @@ fixture 收走，中间插入会自行清理的用例不影响检出力。
 | 步骤 1 预检+备份 | 10-28 11:14 | 全绿（git 干净/R-29 干净/.env 备份一致/基线 false×1） | step1-precheck.txt |
 | Gate 0 探针 | 10-28 11:14 | G0-2 余 1999（耗 1 次） | gate0-shopify-throttle.json |
 | 服务器首启 | 10-28 11:15 | 乙路线 ：8000；11:15→14:28 间被环境收割（R-22 已知形态），按协议在步骤 2 完成前重启 | uvicorn.log |
+| drill-admin 建号 | 10-28 14:35 | 成功（admin@默认商家；随机密码仅存 .testtmp/，未入对话/未入 git）；登录 303，session+CSRF 双 cookie 入 `.testtmp/drill-cookies.txt`（curl 自持会话，等效浏览器登录） | （凭据文件不入库） |
+| 步骤 2a 关闭态 capabilities | 10-28 14:36 | **live_enabled:false** ✓（read_only:true、scopes 四读齐） | step2-capabilities.json |
+| 步骤 2b 关闭态 sync 拒绝 | 10-28 14:36 | **409 SHOPIFY_LIVE_NOT_CONFIGURED** ✓（前置门完好） | step2-sync-denied.json |
