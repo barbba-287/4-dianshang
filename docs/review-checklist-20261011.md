@@ -1240,3 +1240,34 @@ R-38（授权引用未实体化）在本片关闭：`external_credential_refs` �
 残留（不阻断）：`external_credential_refs` 保留一行 `shopify-dev-store`（id=1，**不含任何凭据材料**，
 只有 env 键名 + 8 位指纹），保留可让 live run 行的 `credential_ref_id=1` 保持可解析；
 如需清空用 `python -m app.cli credential-ref remove --ref-name shopify-dev-store`。
+
+### 17.3 复核结论（复核方自跑，2026-10-29 11:1x，通过）
+
+**判定：通过，P2-2 收口。** 提交 `e3c898f`（11 files, +1847/−33）+ `b5db957`（live 台账），
+工作区干净，交付说明 + 5 份分块说明 + 15 份演练证据均已落盘。逐项核验：
+
+- **独立验证（复核方自跑）**：定向（P2-2 + R6 + alembic）→ **38 passed**；
+  **全量 407 passed / 0 failed（187.94s）** = 基线 393 + 新增 14（S-1..S-14），与交付一致。
+- **范围**：11 文件中 3 处超出 §4 字面清单，逐处判定为必要连带并**认可**：
+  ① `tests/test_r6_cursor_persistence.py`（禁止清单上）——R6-4 用 `upgrade head`，head 推进
+  到 0020 后逐列断言必炸；改法是**把被测对象钉死 0019**，断言与 R6 语义零变化，注释留痕；
+  ② `tests/test_alembic.py`——head 断言跟随推进（R6 收口时同款模式）；③ `app/schemas.py`
+  ——T3"run 响应追加字段"的实现文件，只增 `actor/request_id/upstream_request_count` 三键。
+- **裁定落实（逐条亲验）**：`req-bg-` 前缀 / `system:` 前缀 / 上限 50 均以常量写死；
+  ContextVar 归因**唯一赋值点=HTTP 中间件**（docstring 写明），非 HTTP 路径走
+  `background_request_id()`；落库形态 `{ids, truncated, total}` 与 T1 逐字一致；
+  S-6 三层断言（引用表 / run 全行 / SQLite 文件字节 × 明文+全文 hash）在位且定向全绿。
+- **R-38 关闭确认**：`external_credential_refs` 只存 env 键名 + 8 位指纹；R-41 失配分支
+  在 live 路径实测 409（沿用既有错误码）且零 API 消耗、不留孤儿 run 行。
+- **live 证据链**：§17.2 九步齐全，四条件满足，配额 2 次 API / 0 轮中转，
+  `.env` sha256 还原一致，基线 false 双证据。
+- **两处执行偏离认可**：① `.env` 备份改 sha256 指纹留痕（权限分类器拦截凭据副本；
+  同指纹比对与 cmp 等价，且避免明文副本本身更安全）；② 复用 README 公开的 demo-admin
+  而非新建临时账号（无清理面）。教训归档：**证据采集方式本身可能触发凭据安全拦截，
+  指纹留痕是可接受的等价替代**。
+- **新登记**：R-44（`demo_seed.py` import 期绑定 ORM 的既有隐患，本片测试侧规避、未改产品
+  代码——处置正确）。编号 R-40..44 连续。
+- **遗留观察（不阻断）**：`external_credential_refs` 保留 `shopify-dev-store`（id=1）一行
+  供 live run 归因可解析——**无凭据材料，符合红线**；是否清空由用户后续裁定。
+- **对 P2-3 的入口确认**：P2-3 任务文件已定稿（`5862806`+`67c702c`），**基线更新为
+  407 passed / 0 failed**；P2-3 开工前置 P1 已写死"P2-2 收口提交（b5db957）为 HEAD 祖先"。
