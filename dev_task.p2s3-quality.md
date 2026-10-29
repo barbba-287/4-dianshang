@@ -1,9 +1,13 @@
 # dev_task.p2s3-quality — P2-3 数据质量门禁（留存回放 + 六维校验 + 观察态门禁）
 
-> 生成时间：2026-10-28
+> 生成时间：2026-10-28（2026-10-29 修订：串行定调）
 > 生成方式：WorkBuddy 只读调研（`shopify.py _retain_response`、`docs/p2-retention-design-20261027.md`、`app/connectors.py normalize 族`、`app/analytics.py data_completeness 先例`、run 表统计列）
 > 执行角色：Claude Code（实施）；WorkBuddy（复核）
 > 阶段归属：P2 主体 · 切片 3/4（P2-3 质量）——**零 live 依赖**
+> **执行顺序（用户裁定写死）**：严格串行——**P2-2 收口复核入库后本片才允许开工**，
+> 且必须基于包含 P2-2 提交的新 HEAD 起步（两片共用 `external_sync.py` 挂接点与
+> migration 链，并行必致 git 冲突 + alembic 多 head）。开工先 `git log -1` 与
+> `alembic heads` 双确认，见 §3b。
 > 上位依据：`docs/engineering-roadmap.md` P2 行；`docs/p2-entry-readiness-20261028.md` B2 裁定（P2-3 在 fixture + 关闭态完成）；B3 裁定（R-36 与本片无依赖）
 
 ---
@@ -99,7 +103,7 @@ truncated 文件按 T1「truncated 与 unknown 的分界」处理（跳过校验
 
 | # | 前置条件 | 校验命令 | 期望 | 实测结果 |
 |---|---|---|---|---|
-| P1 | P2-1 已合入（P2-2 可未合入——本片与 P2-2 无文件冲突，若 P2-2 已先行合入则以其实际 head 为基线） | `git merge-base --is-ancestor 6bed25a HEAD && echo OK` | OK | 待贴 |
+| P1 | **P2-2 已合入（串行定调，2026-10-29 用户裁定：严禁并行）** | `git log -1 --oneline` 确认 HEAD 包含 P2-2 收口提交；`git merge-base --is-ancestor <p2s2提交SHA> HEAD && echo OK` | OK | 待贴 |
 | P2/P3 | 工作区干净 / 无并行 CLI | 照模板 | 照模板 | 待贴 |
 | P4 | 基线全量绿 | 照模板命令 | **393 passed**（若 P2-2 已合入则按其收口数字） | 待贴 |
 | P5 | F1–F7 成立 | 逐条跑 §2 实测列 | 一致 | 待贴 |
