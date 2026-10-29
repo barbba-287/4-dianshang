@@ -361,8 +361,11 @@ def test_s1_migration_0020_up_and_down_restores_0019_shape(tmp_path):
             "'{\"schema_version\": 1}', '[]')"
         ))
 
-    upgrade_head = _run_alembic(["upgrade", "head"], database_url=db_url)
-    assert upgrade_head.returncode == 0, upgrade_head.stdout + upgrade_head.stderr
+    # 被测对象钉死 **0020**（P2-3 新增 0021 之后 head 已推进；
+    # 若继续用 `upgrade head`，本用例断言的"四列追加"会被后续切片的新列冲掉——
+    # 与 R6-4 同款处置：把目标钉死，断言与 0020 语义零变化）。
+    upgrade_0020 = _run_alembic(["upgrade", "0020_external_sync_attribution"], database_url=db_url)
+    assert upgrade_0020.returncode == 0, upgrade_0020.stdout + upgrade_0020.stderr
 
     after_up = _table_snapshot(eng, "external_sync_runs")
     after_up_names = [item["name"] for item in after_up["columns"]]
@@ -843,7 +846,7 @@ def test_s9_resume_uses_current_actor_and_source_credential_ref(harness, monkeyp
 
 
 def test_s10_run_response_appends_attribution_fields_only(harness, monkeypatch):
-    """S-10：run 详情响应只新增三个键，既有键值逐字节不变。"""
+    """S-10：run 详情响应只新增归因三键（+ P2-3 的 quality_status），既有键值逐字节不变。"""
     _install_fake_transport(monkeypatch, FakeShopifyTransport(pages=2))
 
     response = harness.client.post("/api/external/shopify/sync?resources=orders")
@@ -862,8 +865,9 @@ def test_s10_run_response_appends_attribution_fields_only(harness, monkeypatch):
         "inserted", "updated", "no_op", "conflict", "stale", "error_code", "error_message",
         "resource_status", "retryable_resources",
     }
-    # 只增不改：既有键一个不多一个不少，新增键恰好三个。
-    assert set(body) == legacy_keys | {"actor", "request_id", "upstream_request_count"}
+    # 只增不改：既有键一个不多一个不少，新增键为归因三键。
+    # P2-3 必要连带：run 详情响应追加 `quality_status`（观察态质量结论），键集断言同步跟进。
+    assert set(body) == legacy_keys | {"actor", "request_id", "upstream_request_count", "quality_status"}
     # 既有键值不变。
     assert body["run_id"] == run_id
     assert body["platform"] == "shopify"
@@ -884,7 +888,7 @@ def test_s10_run_response_appends_attribution_fields_only(harness, monkeypatch):
     items = listing.json()
     assert items
     first = items[0]
-    assert set(first) == legacy_keys | {"actor", "request_id", "upstream_request_count"}
+    assert set(first) == legacy_keys | {"actor", "request_id", "upstream_request_count", "quality_status"}
 
 
 # ---------------------------------------------------------------------------

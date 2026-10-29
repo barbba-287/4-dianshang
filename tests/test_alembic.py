@@ -103,8 +103,9 @@ def test_alembic_current_shows_head(tmp_path):
     current = _run_alembic(["current"], database_url=db_url)
     assert current.returncode == 0
     # 该断言必须跟随仓库当前的唯一 head（R6 新增 0019_external_sync_run_cursor 后更新；
-    # P2-2 新增 0020_external_sync_attribution 后再次更新）。
-    assert "0020_external_sync_attribution" in current.stdout
+    # P2-2 新增 0020_external_sync_attribution 后再次更新；
+    # P2-3 新增 0021_external_sync_quality 后再次更新）。
+    assert "0021_external_sync_quality" in current.stdout
     assert "head" in current.stdout
 
 

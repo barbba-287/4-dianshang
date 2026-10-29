@@ -30,6 +30,10 @@ python -m app.cli retention get --run-id <run-id> --request-id <request-id>
 python -m app.cli credential-ref list
 python -m app.cli credential-ref add --platform shopify --ref-name shopify-dev-store --env-key SHOPIFY_ACCESS_TOKEN
 python -m app.cli credential-ref remove --ref-name shopify-dev-store
+
+# 数据质量门禁（只读：show 读库内报告，replay 只读本地留存重算）
+python -m app.cli quality show <run-id>
+python -m app.cli quality replay <run-id>
 ```
 """
 
@@ -812,6 +816,92 @@ def cmd_retention(args: list[str]) -> int:
     return cmd_retention_get(run_id, request_id, directory)
 
 
+def cmd_quality_show(run_id: str) -> int:
+    """读某个 run 已落库的质量报告全文（数据库只读）。"""
+    from sqlalchemy import select
+    from app.db import ExternalSyncRun, SessionLocal
+
+    db = SessionLocal()
+    try:
+        run = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.run_id == run_id))
+        if run is None:
+            print(json.dumps({
+                "ok": False,
+                "run_id": run_id,
+                "error_code": "SYNC_RUN_NOT_FOUND",
+                "error": "同步运行不存在",
+            }, ensure_ascii=False))
+            return 2
+        raw = getattr(run, "quality_json", None)
+        if not raw:
+            print(json.dumps({
+                "ok": False,
+                "run_id": run_id,
+                "quality_status": getattr(run, "quality_status", None),
+                "error_code": "QUALITY_NOT_AVAILABLE",
+                "error": "该 run 没有质量报告（失败 / 取消 / 部分成功的 run 不跑质量）",
+            }, ensure_ascii=False))
+            return 2
+        try:
+            report = json.loads(raw)
+        except (TypeError, ValueError):
+            report = None
+        if not isinstance(report, dict):
+            print(json.dumps({
+                "ok": False,
+                "run_id": run_id,
+                "quality_status": getattr(run, "quality_status", None),
+                "error_code": "QUALITY_REPORT_CORRUPTED",
+                "error": "质量报告不是合法 JSON",
+            }, ensure_ascii=False))
+            return 2
+        print(json.dumps({
+            "ok": True,
+            "run_id": run_id,
+            "quality_status": getattr(run, "quality_status", None),
+            "report": report,
+        }, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    finally:
+        db.close()
+
+
+def cmd_quality_replay(run_id: str) -> int:
+    """只读本地留存重算某个 run 的质量报告（零网络、零数据库写）。"""
+    from app.source_quality import replay_quality
+
+    report = replay_quality(run_id)
+    print(json.dumps({
+        "ok": True,
+        "run_id": run_id,
+        "report": report.to_dict(),
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_quality(args: list[str]) -> int:
+    """数据质量门禁命令。
+
+    用法：
+      python -m app.cli quality show <run_id>     # 读库内已落库的质量报告全文
+      python -m app.cli quality replay <run_id>   # 只读本地留存重算（零网络）
+    """
+    if not args:
+        print(json.dumps({"ok": False, "error_code": "INVALID_QUALITY_INPUT", "error": "缺少子命令（show / replay）"}, ensure_ascii=False))
+        return 2
+    action = args[0]
+    if action not in {"show", "replay"}:
+        print(json.dumps({"ok": False, "error_code": "INVALID_QUALITY_INPUT", "error": "子命令只支持 show / replay"}, ensure_ascii=False))
+        return 2
+    run_id = args[1] if len(args) > 1 else None
+    if not run_id:
+        print(json.dumps({"ok": False, "error_code": "INVALID_QUALITY_INPUT", "error": "缺少 run_id"}, ensure_ascii=False))
+        return 2
+    if action == "show":
+        return cmd_quality_show(run_id)
+    return cmd_quality_replay(run_id)
+
+
 def cmd_status(args: list[str]) -> int:
     """打印运行时配置与数据库 / 向量库规模。"""
     from sqlalchemy import func, inspect, select
@@ -862,6 +952,7 @@ COMMANDS = {
     "external-import": cmd_external_import,
     "credential-ref": cmd_credential_ref,
     "retention": cmd_retention,
+    "quality": cmd_quality,
 }
 
 
@@ -880,6 +971,7 @@ COMMAND_HELP = {
     "external-import": "导入外部库存快照（不修改内部库存，可用 --workspace 指定商家）",
     "credential-ref": "管理授权引用（list / add / remove；只存 env 键名与 8 位指纹，不收明文）",
     "retention": "读取 Shopify live 响应留存（list --run-id / get --run-id --request-id，仅本地只读）",
+    "quality": "数据质量门禁（show <run_id> 读库内报告 / replay <run_id> 只读留存重算）",
 }
 
 

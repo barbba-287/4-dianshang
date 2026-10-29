@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 import json
+import logging
 from typing import Any
 from uuid import uuid4
 from datetime import datetime, timezone
@@ -13,7 +14,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.connectors import CanonicalEvent, InventorySnapshotRecord
-from app.db import ExternalEventInbox, ExternalInventorySnapshot, ExternalSyncRun
+from app.db import (
+    ExternalEventInbox,
+    ExternalInventorySnapshot,
+    ExternalOrder,
+    ExternalOrderLine,
+    ExternalSyncRun,
+)
+
+logger = logging.getLogger(__name__)
 
 
 RESOURCE_SCHEMA_VERSION = 1
@@ -582,6 +591,8 @@ def finalize_resource_run(
         run.error_message = str(getattr(error, "message", error))[:500]
     db.commit()
     db.refresh(run)
+    # P2-3：run finalize 成功路径之后挂质量门禁（观察态；失败/取消路径不跑，两列保持 NULL）。
+    apply_quality_gate(db, run)
     return run
 
 
@@ -970,3 +981,221 @@ def reconcile_inventory(
         "classification": classification,
         "reason": reason,
     }]
+
+
+# ---------------------------------------------------------------------------
+# P2-3 数据质量门禁（观察态）
+#
+# 口径（与 dev_task.p2s3-quality.md T1 对齐）：
+# - 数据来源：**本 run 已入库行** + **台账宣告** + **本地留存件**（不访问网络）。
+# - integrity 走 normalize 预检（app/source_quality.py 调 app/connectors.py 的 normalize 函数），
+#   只统计"它会抛的错"，**不替代** normalize 在写入路径上的既有语义。
+# - 观察态：质量结论**不改** run 的 status / error_code / HTTP 语义，只写两列。
+# - 挂接点只有一个：finalize_resource_run（覆盖 live / 续跑 / fixture / mock 各路径）。
+# ---------------------------------------------------------------------------
+
+
+def _iso(value: datetime | None) -> str | None:
+    """把库里读出的时间转成 ISO-8601 文本（None 原样返回，交给 normalize 去判非法）。"""
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
+def _quality_rows(db: Session, run: ExternalSyncRun) -> list:
+    """收集本次 run 已入库的行（只读）；每行按 normalize 口径做一次预检。"""
+    from app.source_quality import QualityRow, event_precheck, inventory_precheck, order_precheck
+
+    rows: list[QualityRow] = []
+    snapshots = db.scalars(select(ExternalInventorySnapshot).where(
+        ExternalInventorySnapshot.sync_run_id == run.run_id,
+        ExternalInventorySnapshot.workspace_id == run.workspace_id,
+    )).all()
+    for row in snapshots:
+        raw = {
+            "external_sku": row.external_sku,
+            "account_ref": row.account_ref,
+            "store_ref": row.store_ref,
+            "warehouse_ref": row.warehouse_ref,
+            "as_of": _iso(row.as_of),
+            "received_at": _iso(row.received_at),
+            "available_qty": row.available_qty,
+            "reserved_qty": row.reserved_qty,
+            "inbound_qty": row.inbound_qty,
+        }
+        errors = inventory_precheck(raw, platform=row.platform, source_mode=row.source_mode)
+        rows.append(QualityRow(
+            resource="inventory",
+            key=row.idempotency_key,
+            payload_hash=row.payload_hash,
+            as_of=row.as_of,
+            origin="stored",
+            errors=tuple(errors),
+        ))
+
+    orders = db.scalars(select(ExternalOrder).where(
+        ExternalOrder.sync_run_id == run.run_id,
+        ExternalOrder.workspace_id == run.workspace_id,
+    )).all()
+    lines_by_order: dict[int, list[ExternalOrderLine]] = {}
+    order_ids = [row.id for row in orders]
+    if order_ids:
+        for line in db.scalars(select(ExternalOrderLine).where(
+            ExternalOrderLine.external_order_id.in_(order_ids),
+        )).all():
+            lines_by_order.setdefault(line.external_order_id, []).append(line)
+    for row in orders:
+        raw = {
+            "account_ref": row.account_ref,
+            "external_order_no": row.external_order_no,
+            "store_ref": row.store_ref,
+            "external_created_at": _iso(row.external_created_at),
+            "external_updated_at": _iso(row.external_updated_at),
+            "paid_at": _iso(row.paid_at),
+            "order_status": row.order_status,
+            "event_version": row.event_version,
+            "gross_amount": str(row.gross_amount) if row.gross_amount is not None else None,
+            "refund_amount": str(row.refund_amount) if row.refund_amount is not None else None,
+            "currency": row.currency,
+            "lines": [
+                {
+                    "external_line_id": line.external_line_id,
+                    "external_sku": line.external_sku,
+                    "ordered_qty": line.ordered_qty,
+                    "cancelled_qty": line.cancelled_qty,
+                    "refunded_qty": line.refunded_qty,
+                    "gross_amount": str(line.gross_amount) if line.gross_amount is not None else None,
+                    "refund_amount": str(line.refund_amount) if line.refund_amount is not None else None,
+                    "currency": line.currency,
+                }
+                for line in lines_by_order.get(row.id, [])
+            ],
+        }
+        errors = order_precheck(raw, platform=row.platform, source_mode=row.source_mode)
+        rows.append(QualityRow(
+            resource="orders",
+            key=row.idempotency_key,
+            payload_hash=row.payload_hash,
+            as_of=row.external_updated_at,
+            origin="stored",
+            errors=tuple(errors),
+        ))
+
+    events = db.scalars(select(ExternalEventInbox).where(
+        ExternalEventInbox.sync_run_id == run.run_id,
+    )).all()
+    for row in events:
+        try:
+            payload = json.loads(row.payload_json or "")
+        except (TypeError, ValueError):
+            payload = None
+        raw = {
+            "external_event_id": row.external_event_id,
+            "account_ref": row.account_ref,
+            "event_type": row.event_type,
+            "event_version": row.event_version,
+            "external_object_no": row.external_object_no,
+            "occurred_at": _iso(row.occurred_at),
+            "received_at": _iso(row.received_at),
+            "idempotency_key": row.idempotency_key,
+            "payload": payload if isinstance(payload, dict) else None,
+        }
+        errors = event_precheck(raw, platform=row.platform, source_mode=row.source_mode)
+        rows.append(QualityRow(
+            resource="events",
+            key=row.idempotency_key,
+            payload_hash=row.payload_hash,
+            as_of=row.occurred_at,
+            origin="stored",
+            errors=tuple(errors),
+        ))
+    return rows
+
+
+def _quality_existing_hashes(db: Session, run: ExternalSyncRun, keys: set[str]) -> dict[str, tuple[str, ...]]:
+    """取库中**既有行**（不属于本 run）的 payload_hash：consistency 维度的对照面。"""
+    if not keys:
+        return {}
+    found: dict[str, list[str]] = {}
+    for model in (ExternalInventorySnapshot, ExternalOrder, ExternalEventInbox):
+        for row in db.scalars(select(model).where(
+            model.workspace_id == run.workspace_id,
+            model.idempotency_key.in_(sorted(keys)),
+        )).all():
+            if row.sync_run_id == run.run_id:
+                continue  # 本次 run 自己落的行不算"既有行"
+            bucket = found.setdefault(row.idempotency_key, [])
+            if row.payload_hash and row.payload_hash not in bucket:
+                bucket.append(row.payload_hash)
+    return {key: tuple(values) for key, values in found.items()}
+
+
+def _retention_expected(run: ExternalSyncRun) -> bool:
+    """本次运行是否"应当有留存"：live 路径恒为真；fixture/mock 路径看台账是否留了留存条目。"""
+    if getattr(run, "source_mode", "") == "shopify_live":
+        return True
+    for name, item in resource_status(run).items():
+        if name == "schema_version" or not isinstance(item, dict):
+            continue
+        if "retention" in item:
+            return True
+    return False
+
+
+def quality_report_for_run(db: Session, run: ExternalSyncRun, *, now: datetime | None = None):
+    """按"已入库行 + 台账 + 本地留存"算出本次 run 的六维质量报告（只读，不改数据）。"""
+    from app.source_quality import (
+        QualityEvidence,
+        default_stale_seconds,
+        evaluate,
+        load_retention_pages,
+        retention_dir_for_run,
+    )
+
+    rows = _quality_rows(db, run)
+    existing = _quality_existing_hashes(db, run, {row.key for row in rows})
+    pages = load_retention_pages(retention_dir_for_run(run.run_id))
+    declared = tuple(
+        name for name, item in resource_status(run).items()
+        if name != "schema_version" and isinstance(item, dict)
+    )
+    retention_expected = _retention_expected(run)
+    unknown_reason = None
+    if not pages and not rows:
+        # 根本没得校验：既没有留存页，也没有已入库行 → unknown（不冒充 warn）。
+        unknown_reason = "既无可用留存页，也没有已入库行"
+    elif not pages and retention_expected:
+        # 严格分界（T1）：本次运行**应当有**留存件却完全缺失 = 根本没得校验 → unknown；
+        # 有留存但被截断 → 跳过该页 + completeness finding → warn（两者不得互相冒充）。
+        unknown_reason = "本次运行应有留存件但留存目录缺失（无法校验）"
+    evidence = QualityEvidence(
+        run_id=run.run_id,
+        pages=pages,
+        rows=tuple(rows),
+        declared_resources=declared,
+        existing_hashes=existing,
+        retention_expected=retention_expected,
+        unknown_reason=unknown_reason,
+        now=now,
+        stale_seconds=default_stale_seconds(),
+    )
+    return evaluate(evidence)
+
+
+def apply_quality_gate(db: Session, run: ExternalSyncRun):
+    """P2-3 质量门禁（观察态）：把六维结论写进 run 的两列。
+
+    - 只在 **succeeded** 的 run 上跑：失败 / 取消 / 部分成功的 run 两列保持 NULL。
+    - 质量结论**不改** run 的 status / error_code / HTTP 语义——观察态，不阻断同步。
+    - 质量层自身出错时也只留两列 NULL（不得让质量层拖垮同步）。
+    """
+    if getattr(run, "status", None) != "succeeded":
+        return None
+    try:
+        report = quality_report_for_run(db, run)
+    except Exception as exc:  # 质量层不得影响同步成败
+        logger.warning("P2-3 质量门禁计算失败 run_id=%s error=%s", getattr(run, "run_id", None), exc)
+        return None
+    run.quality_status = report.status
+    run.quality_json = json.dumps(report.to_dict(), ensure_ascii=False, sort_keys=True)
+    db.commit()
+    db.refresh(run)
+    return report

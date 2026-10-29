@@ -139,6 +139,8 @@ class ExternalSyncRunResponse(BaseModel):
     actor: str | None = None
     request_id: str | None = None
     upstream_request_count: int = 0
+    # P2-3 数据质量门禁（观察态）：只透出结论，全量报告走 CLI `quality show <run_id>`。
+    quality_status: str | None = None
 
 
 class ExternalSyncRetryResponse(ExternalSyncRunResponse):

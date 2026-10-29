@@ -435,6 +435,11 @@ class ExternalSyncRun(Base):
     )
     # upstream_request_ids_json：本次运行各页上游请求 id（JSON，只保留最近 50 条）。
     upstream_request_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # P2-3 数据质量门禁（观察态）：quality_status = ok | warn | failed | unknown；
+    # NULL = 本次运行没跑质量（失败 / 取消 / 部分成功的 run 两列都保持 NULL）。
+    quality_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # quality_json：六维质量报告全文（JSON 文本）；对外只透出 quality_status，全量走 CLI 读。
+    quality_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ExternalCredentialRef(Base):

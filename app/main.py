@@ -2988,6 +2988,8 @@ def _external_sync_run_response(run):
         # P2-2 归因可见（只增不改：既有键值逐字节不变）。
         actor=getattr(run, "actor", None), request_id=getattr(run, "request_id", None),
         upstream_request_count=upstream_request_count(run),
+        # P2-3 数据质量门禁结论（只增不改：全量报告走 CLI `quality show <run_id>`）。
+        quality_status=getattr(run, "quality_status", None),
     )
 
 
