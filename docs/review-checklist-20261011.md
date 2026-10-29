@@ -1204,11 +1204,39 @@ R-38（授权引用未实体化）在本片关闭：`external_credential_refs` �
 可维护引用（只登记 env 键名与 8 位指纹），live 同步/续跑按当前凭据指纹解析引用并把 `credential_ref_id`
 落到 `external_sync_runs`。**明文凭据任何形态（值、可逆编码、全文 hash）不入库**。
 
-### 17.2 P2-2 live 演练台账（待用户事前单独书面裁定后逐步追加）
+### 17.2 P2-2 live 演练台账（2026-10-29 已裁定并执行）
 
 任务文件 §5 规定：先报配额台账，再跑**恰好一次** orders-only 同步（`SHOPIFY_SYNC_BUDGET_SECONDS=120`），
 取消/续跑**不重复跑**（P2-0 已证明）；每轮都登记到本表。
+**用户事前裁定：已取得**（2026-10-29 对话留痕，批准"跑一次 orders-only"）。
+证据目录：`.testtmp/drill-evidence-20261029/`（不入库，路径留痕）；结论：同目录 `CONCLUSION.md`。
 
 | 步骤 | 时间 | 结果 | 证据文件 |
 |---|---|---|---|
-| （待裁定后追加） | | | |
+| 步骤 1 预检 | 10-29 09:17 | git 干净（HEAD `e3c898f`）/ .env **指纹**留痕 `3b4f476d…`（R-23：只记指纹不复制凭据副本）/ 基线 `SHOPIFY_LIVE_ENABLED=false` 恰好 1 处 / 无并行 pytest·uvicorn（R-29 干净） | step1-precheck.txt |
+| Gate 0 探针 | 10-29 09:23 | `actualQueryCost=1`，余 **1999**/2000（耗 1 次，失败不自动重试）→ 阈值 ≥20 满足 | gate0-shopify-throttle.json |
+| 步骤 2 关闭态回归 | 10-29 09:22 | capabilities `live_enabled:false` ✓；sync **409 SHOPIFY_LIVE_NOT_CONFIGURED** ✓（前置门完好） | step2-closed-state.txt |
+| 步骤 3 切 live（乙路线·双前缀） | 10-29 09:24 | capabilities `live_enabled:true` + `simulated:false` ✓（命令原文落盘，`.env` 零改动） | step3-start.txt、step3-step4-capabilities.txt |
+| 步骤 4 热开关确认 | 10-29 09:24 | capabilities 仍 true → **跳过显式 POST**（少打一次接口） | step3-step4-capabilities.txt |
+| 步骤 5a 登记授权引用 | 10-29 09:25 | `credential-ref add --ref-name shopify-dev-store` → id=1、指纹 `b912a5e4`（**只存键名 + 8 位指纹**） | step5a-credential-ref-add.txt |
+| 步骤 5 演练 A orders | 10-29 09:25 | **succeeded**、total=3、**no_op=3（幂等零重复写）**、pages_used=1、预算 120s 生效 | step5-sync-orders.txt |
+| 步骤 5 归因四件套 | 10-29 09:25 | `actor='demo-admin'`（操作者 subject）✓；`request_id='req-f41c7fc19ab8'`==响应头 `X-Request-ID` ✓；`credential_ref_id=1`→`shopify-dev-store` ✓；`upstream_request_ids_json={"ids":["shopify-4e385a3390b9"],"truncated":false,"total":1}`（≥1 且 `shopify-` 前缀）✓ | step5-run-row.txt |
+| 步骤 5 响应只增不改 | 10-29 09:26 | run 详情响应追加 `actor`/`request_id`/`upstream_request_count:1`，既有键值逐字节不变 ✓ | step5d-run-detail.json |
+| 步骤 5 留存产出 | 10-29 09:25 | `artifacts/shopify_sync/<run_id>/shopify-4e385a3390b9.json`（**与上游 request id 同名**，链路自证）✓ | step5-retention-list.txt |
+| 步骤 5b R-41 失配分支 | 10-29 09:27 | 换成失配指纹 → **409 SHOPIFY_LIVE_NOT_CONFIGURED**（沿用既有码，消息注明"授权引用与当前凭据指纹不匹配"）且**不留孤儿 run 行**；**零 API 消耗**（在建 transport 前拒绝） | step5b-r41-conflict-409.txt |
+| 步骤 5c 引用复原 | 10-29 09:27 | 撤失配引用、重登记正确引用 → id=1、指纹回到 `b912a5e4` | step5c-credential-ref-restore.txt |
+| 步骤 6/7 取消·续跑 | — | **按配额纪律不重跑**（P2-0 已实弹证明；本片不碰取消/预算/留存实现） | — |
+| 步骤 8 关闭态反向 | 10-29 09:27 | 热开关关 → capabilities false ✓、sync **立即 409** ✓（无需重启） | step8-closed-reverse.txt |
+| 步骤 9 还原与清理 | 10-29 09:28 | 无前缀重启 → capabilities false ✓、sync 409 ✓；`.env` sha256 与预检**完全一致**（基线未动）；会话 cookie 文件已删；演练进程已停 | step9-restore.txt |
+
+**配额结算**：G0-1 中转轮次 **本轮 0 轮**（P2-2 全程离线）；G0-2 Shopify API 调用 **2 次**
+（Gate 0 探针 1 次 + orders 同步 1 页；R-41 失配验证 0 次）；距上次实测余量约 **1997**；
+未触及 55~60 轮止损线。
+
+**结论**：**P2-2 live 验证通过**——归因四件套在**真实上游**首次生产实锤，四项全部落库且与
+响应头、留存文件名互相印证；R-41「指纹失配 → 409 且不留孤儿 run 行」在 live 路径同样成立。
+**只登记"具备放开条件"，live 放开仍由用户单独裁定**（runbook §5.1）；`.env` 基线保持 `false`，
+本轮结束已回 false 并留 capabilities + sync-409 双证据。
+残留（不阻断）：`external_credential_refs` 保留一行 `shopify-dev-store`（id=1，**不含任何凭据材料**，
+只有 env 键名 + 8 位指纹），保留可让 live run 行的 `credential_ref_id=1` 保持可解析；
+如需清空用 `python -m app.cli credential-ref remove --ref-name shopify-dev-store`。
