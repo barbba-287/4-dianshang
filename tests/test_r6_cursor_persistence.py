@@ -646,8 +646,11 @@ def test_r6_4_migration_up_and_down_keeps_other_columns(tmp_path):
             "'{\"schema_version\": 1}', '[]')"
         ))
 
-    # up 到 head。
-    upgrade_head = _run_alembic(["upgrade", "head"], database_url=db_url)
+    # up 到 0019（R6 迁移本身）。
+    # 说明（P2-2）：本测试针对 0019 迁移；仓库 head 已推进到 0020（归因四件套），
+    # 这里由 "head" 改为显式指向 0019 revision——**断言与 R6 语义零变化**，
+    # 只是把被测对象钉死在 0019，避免后续迁移改变列集合。
+    upgrade_head = _run_alembic(["upgrade", "0019_external_sync_run_cursor"], database_url=db_url)
     assert upgrade_head.returncode == 0, upgrade_head.stdout + upgrade_head.stderr
 
     after_up = _table_snapshot(eng)
@@ -671,8 +674,8 @@ def test_r6_4_migration_up_and_down_keeps_other_columns(tmp_path):
     assert after_up["indexes"] == before["indexes"]
     assert after_up["uniques"] == before["uniques"]
 
-    # down：只丢 cursor_json。
-    downgrade = _run_alembic(["downgrade", "-1"], database_url=db_url)
+    # down：只丢 cursor_json（回到 0018；见上方说明）。
+    downgrade = _run_alembic(["downgrade", "0018_repair_service_ticket_schema"], database_url=db_url)
     assert downgrade.returncode == 0, downgrade.stdout + downgrade.stderr
 
     after_down = _table_snapshot(eng)
@@ -689,7 +692,7 @@ def test_r6_4_migration_up_and_down_keeps_other_columns(tmp_path):
     assert tuple(row) == ("legacy-run-1", "shopify", '{"schema_version": 1}', "[]")
 
     # down → up 可重复（列可再次加回，既有行仍回填 "{}"）。
-    upgrade_again = _run_alembic(["upgrade", "head"], database_url=db_url)
+    upgrade_again = _run_alembic(["upgrade", "0019_external_sync_run_cursor"], database_url=db_url)
     assert upgrade_again.returncode == 0, upgrade_again.stdout + upgrade_again.stderr
     with eng.connect() as conn:
         legacy_cursor = conn.execute(text(

@@ -135,6 +135,10 @@ class ExternalSyncRunResponse(BaseModel):
     error_message: str | None = None
     resource_status: dict = Field(default_factory=dict)
     retryable_resources: list[str] = Field(default_factory=list)
+    # P2-2 归因可见（只增不改：既有键值逐字节不变）。
+    actor: str | None = None
+    request_id: str | None = None
+    upstream_request_count: int = 0
 
 
 class ExternalSyncRetryResponse(ExternalSyncRunResponse):

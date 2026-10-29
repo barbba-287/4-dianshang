@@ -25,6 +25,11 @@ python -m app.cli status
 # 读取 Shopify live 响应留存（本地只读）
 python -m app.cli retention list --run-id <run-id>
 python -m app.cli retention get --run-id <run-id> --request-id <request-id>
+
+# 管理授权引用（只存 env 键名 + 8 位指纹，明文凭据不入库）
+python -m app.cli credential-ref list
+python -m app.cli credential-ref add --platform shopify --ref-name shopify-dev-store --env-key SHOPIFY_ACCESS_TOKEN
+python -m app.cli credential-ref remove --ref-name shopify-dev-store
 ```
 """
 
@@ -429,6 +434,117 @@ def cmd_external_import(args: list[str]) -> int:
     return 0
 
 
+def cmd_credential_ref(args: list[str]) -> int:
+    """管理授权引用（P2-2）：只记 env 键名 + 8 位指纹，明文凭据不入库。
+
+    用法：
+      python -m app.cli credential-ref list [--platform shopify] [--workspace <id>]
+      python -m app.cli credential-ref add --platform shopify --ref-name shopify-dev-store --env-key SHOPIFY_ACCESS_TOKEN
+      python -m app.cli credential-ref remove --ref-name shopify-dev-store
+
+    红线：`add` **不收明文**——指纹由当前 env 键值自动计算；
+    任何形如 `--secret/--token/--value` 的入参一律拒绝。
+    """
+    from app.credential_refs import (
+        FORBIDDEN_SECRET_OPTIONS,
+        CredentialRefError,
+        add_credential_ref,
+        list_credential_refs,
+        remove_credential_ref,
+    )
+
+    if not args:
+        print(json.dumps({"ok": False, "error_code": "INVALID_REPLAY_INPUT", "error": "缺少子命令（list / add / remove）"}, ensure_ascii=False))
+        return 2
+    action = args[0]
+    if action not in {"list", "add", "remove"}:
+        print(json.dumps({"ok": False, "error_code": "INVALID_REPLAY_INPUT", "error": "子命令只支持 list / add / remove"}, ensure_ascii=False))
+        return 2
+    for forbidden in FORBIDDEN_SECRET_OPTIONS:
+        if forbidden in args:
+            print(json.dumps({"ok": False, "error_code": "CREDENTIAL_REF_PLAINTEXT_FORBIDDEN", "error": f"管理面不收明文凭据（禁止 {forbidden}）"}, ensure_ascii=False))
+            return 2
+
+    _ensure_schema()
+    db = SessionLocal()
+    try:
+        if action == "list":
+            platform = _option(args, "--platform")
+            workspace_id = None
+            if _option(args, "--workspace"):
+                workspace_id = _resolve_cli_workspace(db, args)
+            refs = list_credential_refs(db, platform=platform, workspace_id=workspace_id)
+            print(json.dumps({
+                "ok": True,
+                "refs": [
+                    {
+                        "id": item.id,
+                        "ref_name": item.ref_name,
+                        "platform": item.platform,
+                        "env_key": item.env_key,
+                        "secret_fingerprint": item.secret_fingerprint,
+                        "workspace_id": item.workspace_id,
+                        "created_by": item.created_by,
+                        "created_at": item.created_at.isoformat() if item.created_at else None,
+                    }
+                    for item in refs
+                ],
+            }, ensure_ascii=False, sort_keys=True))
+            return 0
+
+        if action == "add":
+            platform = _option(args, "--platform")
+            ref_name = _option(args, "--ref-name")
+            env_key = _option(args, "--env-key")
+            missing = [
+                name
+                for name, value in (("--platform", platform), ("--ref-name", ref_name), ("--env-key", env_key))
+                if not value
+            ]
+            if missing:
+                print(json.dumps({"ok": False, "error_code": "CREDENTIAL_REF_ARG_MISSING", "error": f"缺少参数: {', '.join(missing)}"}, ensure_ascii=False))
+                return 2
+            workspace_id = None
+            if _option(args, "--workspace"):
+                workspace_id = _resolve_cli_workspace(db, args)
+            ref = add_credential_ref(
+                db,
+                platform=platform,
+                ref_name=ref_name,
+                env_key=env_key,
+                workspace_id=workspace_id,
+                created_by="cli",
+            )
+            print(json.dumps({
+                "ok": True,
+                "id": ref.id,
+                "ref_name": ref.ref_name,
+                "platform": ref.platform,
+                "env_key": ref.env_key,
+                "secret_fingerprint": ref.secret_fingerprint,
+                "workspace_id": ref.workspace_id,
+            }, ensure_ascii=False, sort_keys=True))
+            return 0
+
+        ref_name = _option(args, "--ref-name")
+        if not ref_name:
+            print(json.dumps({"ok": False, "error_code": "CREDENTIAL_REF_ARG_MISSING", "error": "缺少参数: --ref-name"}, ensure_ascii=False))
+            return 2
+        removed = remove_credential_ref(db, ref_name=ref_name)
+        print(json.dumps({"ok": True, "removed": removed is not None, "ref_name": ref_name}, ensure_ascii=False, sort_keys=True))
+        return 0 if removed is not None else 2
+    except CredentialRefError as exc:
+        db.rollback()
+        print(json.dumps({"ok": False, "error_code": exc.code, "error": exc.message}, ensure_ascii=False))
+        return 2
+    except ValueError as exc:
+        db.rollback()
+        print(json.dumps({"ok": False, "error_code": "WORKSPACE_NOT_FOUND", "error": str(exc)}, ensure_ascii=False))
+        return 2
+    finally:
+        db.close()
+
+
 def cmd_init_admin(args: list[str]) -> int:
     """创建首个管理员账户；仅显式调用，不自动创建生产账户。"""
     import getpass
@@ -506,8 +622,25 @@ def cmd_seed_demo(args: list[str]) -> int:
         as_of_text = _option(args, "--as-of-date", "2026-09-07")
         as_of = date.fromisoformat(as_of_text)
         result = seed_demo_workspace(db, tenant_key=workspace_key, workspace_name=_option(args, "--workspace-name", "[虚构] 电商演示商家"), as_of_date=as_of)
+        # P2-2 归因：demo seed 是**无 principal 的系统路径**——
+        # actor 走固定常量 `system:seed-demo`，request_id 走 `req-bg-<uuid12>` 生成器，
+        # 使"系统造的演示数据"与"用户触发的批次"在 run 台账上可区分。
+        from app.external_sync import ImportStats, background_request_id, begin_sync_run, complete_sync_run, system_actor
+
+        run = begin_sync_run(
+            db,
+            workspace_id=result.workspace_id,
+            platform="mock",
+            sync_type="demo_seed",
+            source_mode="fixture",
+            simulated=True,
+            actor=system_actor("seed-demo"),
+            request_id=background_request_id(),
+        )
+        complete_sync_run(db, run, ImportStats())
         output = result.as_dict()
-        print(_json.dumps(output, ensure_ascii=False, indent=2, default=str) if "--json" in args else f"seed-demo 完成: workspace={result.tenant_key}, products={len(result.product_ids)}, suggestions={len(result.suggestion_ids)}, drafts={len(result.purchase_request_ids)}")
+        output["sync_run_id"] = run.run_id
+        print(_json.dumps(output, ensure_ascii=False, indent=2, default=str) if "--json" in args else f"seed-demo 完成: workspace={result.tenant_key}, products={len(result.product_ids)}, suggestions={len(result.suggestion_ids)}, drafts={len(result.purchase_request_ids)}, sync_run_id={run.run_id}")
         return 0
     except Exception as exc:
         db.rollback()
@@ -727,6 +860,7 @@ COMMANDS = {
     "external-list-connectors": cmd_external_list_connectors,
     "external-preview": cmd_external_preview,
     "external-import": cmd_external_import,
+    "credential-ref": cmd_credential_ref,
     "retention": cmd_retention,
 }
 
@@ -744,6 +878,7 @@ COMMAND_HELP = {
     "external-list-connectors": "列出离线平台连接器能力",
     "external-preview": "预览并标准化外部库存文件（不落库）",
     "external-import": "导入外部库存快照（不修改内部库存，可用 --workspace 指定商家）",
+    "credential-ref": "管理授权引用（list / add / remove；只存 env 键名与 8 位指纹，不收明文）",
     "retention": "读取 Shopify live 响应留存（list --run-id / get --run-id --request-id，仅本地只读）",
 }
 

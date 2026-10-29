@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 import json
+from typing import Any
 from uuid import uuid4
 from datetime import datetime, timezone
 
@@ -28,6 +30,108 @@ CURSOR_REASON_UNSUPPORTED_SCHEMA = "UNSUPPORTED_CURSOR_SCHEMA"
 CURSOR_ACTION_RESTART = "restart"
 CURSOR_ACTION_RESUME = "resume"
 CURSOR_ACTION_SKIP = "skip"
+
+
+# ---------------------------------------------------------------------------
+# P2-2 归因四件套（actor / request_id / credential_ref_id / upstream ids）
+# ---------------------------------------------------------------------------
+
+# 非 HTTP 路径（CLI / 后台 / 定时）的请求 id 前缀——写死，不随机应变。
+BACKGROUND_REQUEST_ID_PREFIX = "req-bg-"
+# 系统路径的 actor 前缀——写死。
+SYSTEM_ACTOR_PREFIX = "system:"
+# 上游请求 id 落库上限：ids 只保留最近 50 个（无界增长字段必须封顶）。
+UPSTREAM_REQUEST_IDS_LIMIT = 50
+
+# 本次请求的归因上下文（HTTP 路径由中间件写入，见 app/main.py 的 request_context_middleware）。
+# 单进程定调（R-27）：归因靠请求上下文传递，不引入跨进程机制。
+_ATTRIBUTION: ContextVar[dict[str, str] | None] = ContextVar("external_sync_attribution", default=None)
+
+
+def background_request_id() -> str:
+    """非 HTTP 路径（CLI / 后台 / 定时）的请求 id：`req-bg-<uuid12>`。"""
+    return f"{BACKGROUND_REQUEST_ID_PREFIX}{uuid4().hex[:12]}"
+
+
+def system_actor(source: str) -> str:
+    """系统路径的 actor 常量：`system:<来源>`（如 `system:seed-demo`）。"""
+    return f"{SYSTEM_ACTOR_PREFIX}{source}"
+
+
+def set_request_attribution(*, actor: str | None, request_id: str | None) -> Token:
+    """写入本次请求的归因上下文（唯一赋值点：HTTP 中间件）。"""
+    return _ATTRIBUTION.set({"actor": actor or "", "request_id": request_id or ""})
+
+
+def reset_request_attribution(token: Token) -> None:
+    """还原归因上下文（请求结束或异常时调用）。"""
+    _ATTRIBUTION.reset(token)
+
+
+def current_attribution() -> dict[str, str]:
+    """取当前归因上下文（无请求上下文时返回空字典）。"""
+    return dict(_ATTRIBUTION.get() or {})
+
+
+class UpstreamRequestIdRecorder:
+    """记录本次 run 各页的上游请求 id。
+
+    落库形态写死：`{"ids": [...], "truncated": bool, "total": N}`；
+    `ids` 只保留**最近 50 个**，超出时 `truncated=true` 且 `total` 记全量页数。
+    """
+
+    def __init__(self) -> None:
+        self._ids: list[str] = []
+
+    def record(self, request_id: str | None) -> None:
+        if request_id:
+            self._ids.append(request_id)
+
+    @property
+    def ids(self) -> list[str]:
+        return list(self._ids)
+
+    @property
+    def total(self) -> int:
+        return len(self._ids)
+
+    def payload(self) -> str:
+        """落库用的 JSON 文本（ids 封顶最近 50 个）。"""
+        keep = self._ids[-UPSTREAM_REQUEST_IDS_LIMIT:]
+        return json.dumps(
+            {
+                "ids": keep,
+                "truncated": len(self._ids) > UPSTREAM_REQUEST_IDS_LIMIT,
+                "total": len(self._ids),
+            },
+            ensure_ascii=False,
+        )
+
+
+class RecordingTransport:
+    """传输层代理：转发调用，同时记录每次上游请求的 request_id。
+
+    为什么需要代理：适配器（`app/platform_adapters/*`）是本轮红线不可改动的位置，
+    而上游 request_id 只出现在传输层的 `query(request_id=...)` 形参上。
+    这里用代理在**不动适配器**的前提下把 id 收集起来，其余属性/方法原样转发。
+    """
+
+    def __init__(self, inner: Any, recorder: UpstreamRequestIdRecorder) -> None:
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_recorder", recorder)
+
+    def query(self, *args: Any, **kwargs: Any) -> Any:
+        request_id = kwargs.get("request_id")
+        if request_id is None and args:
+            request_id = args[-1] if isinstance(args[-1], str) else None
+        object.__getattribute__(self, "_recorder").record(request_id)
+        return object.__getattribute__(self, "_inner").query(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(object.__getattribute__(self, "_inner"), name, value)
 
 
 @dataclass
@@ -448,7 +552,13 @@ def calculate_overall_status(run: ExternalSyncRun) -> str:
     return "succeeded" if successful == len(statuses) else "failed"
 
 
-def finalize_resource_run(db: Session, run: ExternalSyncRun, *, error: Exception | None = None) -> ExternalSyncRun:
+def finalize_resource_run(
+    db: Session,
+    run: ExternalSyncRun,
+    *,
+    error: Exception | None = None,
+    upstream_ids: UpstreamRequestIdRecorder | None = None,
+) -> ExternalSyncRun:
     statuses = resource_status(run)
     totals = {key: 0 for key in ("total", "inserted", "updated", "no_op", "conflict", "stale")}
     for name, item in statuses.items():
@@ -464,12 +574,29 @@ def finalize_resource_run(db: Session, run: ExternalSyncRun, *, error: Exception
     run.heartbeat_at = run.finished_at
     for key, value in totals.items():
         setattr(run, key, value)
+    # P2-2：上游请求 id 随 finalize 落库（ids 封顶最近 50 个）。
+    if upstream_ids is not None:
+        run.upstream_request_ids_json = upstream_ids.payload()
     if error is not None:
         run.error_code = str(getattr(error, "code", type(error).__name__))[:64]
         run.error_message = str(getattr(error, "message", error))[:500]
     db.commit()
     db.refresh(run)
     return run
+
+
+def upstream_request_count(run: ExternalSyncRun) -> int:
+    """本次 run 的上游请求 id 总数（页数）；没有留痕时为 0。"""
+    raw = getattr(run, "upstream_request_ids_json", None)
+    if not raw:
+        return 0
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    return int(payload.get("total") or 0)
 
 
 def begin_sync_run(
@@ -486,7 +613,16 @@ def begin_sync_run(
     retry_of_run_id: str | None = None,
     retry_idempotency_key: str | None = None,
     retry_payload_hash: str | None = None,
+    actor: str | None = None,
+    request_id: str | None = None,
+    credential_ref_id: int | None = None,
 ) -> ExternalSyncRun:
+    """建立一个同步 run。
+
+    P2-2 归因：未显式给 `actor` / `request_id` 时，取当前请求上下文
+    （HTTP 路径由中间件写入；CLI / 后台路径没有上下文，保持为空）。
+    """
+    attribution = current_attribution()
     run = ExternalSyncRun(
         workspace_id=workspace_id,
         run_id=uuid4().hex,
@@ -506,6 +642,10 @@ def begin_sync_run(
         # R6：显式写死初始值 "{}"（"未开始分页"的合法初始态，R6-8 的判定依据）。
         cursor_json="{}",
         heartbeat_at=datetime.utcnow(),
+        # P2-2 归因四件套：actor / request_id / credential_ref_id（上游 id 随 finalize 落库）。
+        actor=actor if actor is not None else (attribution.get("actor") or None),
+        request_id=request_id if request_id is not None else (attribution.get("request_id") or None),
+        credential_ref_id=credential_ref_id,
     )
     db.add(run)
     db.commit()

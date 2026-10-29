@@ -424,6 +424,44 @@ class ExternalSyncRun(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # P2-2 归因四件套：全部可空，既有行不受影响（历史行没有归因信息）。
+    # actor：操作者标识（HTTP 走 principal.subject，系统路径走 `system:<来源>` 常量）。
+    actor: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # request_id：本次运行的请求 id（HTTP 复用 X-Request-ID，非 HTTP 走 `req-bg-<uuid12>`）。
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # credential_ref_id：本次运行使用的授权引用（只留引用，明文凭据不入库）。
+    credential_ref_id: Mapped[int | None] = mapped_column(
+        ForeignKey("external_credential_refs.id"), nullable=True
+    )
+    # upstream_request_ids_json：本次运行各页上游请求 id（JSON，只保留最近 50 条）。
+    upstream_request_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ExternalCredentialRef(Base):
+    """授权引用实体（P2-2）：只记"哪把钥匙"，不记钥匙本身。
+
+    红线：明文凭据任何形态都不得入库——本表只存 env 键名 + 8 位 sha256 指纹，
+    不存值、不存可逆编码、不存全文 hash。
+    """
+
+    __tablename__ = "external_credential_refs"
+    __table_args__ = (
+        UniqueConstraint("ref_name", name="uq_external_credential_ref_ref_name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workspaces.id"), nullable=True, index=True
+    )
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    # 唯一引用名（如 shopify-dev-store）：全局唯一，便于运维口头指认。
+    ref_name: Mapped[str] = mapped_column(String(64))
+    # 凭据所在的 env 键名（只存键名，不存值）。
+    env_key: Mapped[str] = mapped_column(String(128))
+    # 凭据指纹：sha256(明文) 的前 8 位十六进制。
+    secret_fingerprint: Mapped[str] = mapped_column(String(16))
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class ExternalInventorySnapshot(Base):

@@ -361,6 +361,16 @@ async def request_context_middleware(request: Request, call_next):
             )
             response.headers["X-Request-ID"] = request_id
             return response
+    # P2-2 归因：把"谁发起了这次请求"写进请求上下文（归因四件套的唯一赋值点）。
+    # 取身份统一走 request.state.principal——各分支都已写入它，
+    # 而局部变量 principal 在"会话鉴权分支"里并未赋值（直接引用会 UnboundLocalError）。
+    from app.external_sync import reset_request_attribution, set_request_attribution
+
+    attribution_principal = getattr(request.state, "principal", None)
+    attribution_token = set_request_attribution(
+        actor=getattr(attribution_principal, "subject", None),
+        request_id=request_id,
+    )
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -369,6 +379,9 @@ async def request_context_middleware(request: Request, call_next):
             status_code=500,
             content={"detail": {"code": "INTERNAL_ERROR", "message": "服务内部错误"}},
         )
+    finally:
+        # 请求上下文用完即还原（不跨请求残留）。
+        reset_request_attribution(attribution_token)
     response.headers["X-Request-ID"] = request_id
     return response
 
@@ -1839,6 +1852,25 @@ def _unregister_sync_cancel_token(run_id: str) -> None:
         _sync_token_local.run_id = None
 
 
+def _resolve_live_credential_ref(db: Session, *, platform: str, env_key: str, secret: str | None):
+    """live 路径解析本次运行用的授权引用（P2-2 / R-38）。
+
+    口径：已登记的引用里必须有一把与当前凭据指纹匹配，否则按既有
+    `409 SHOPIFY_LIVE_NOT_CONFIGURED` 语义拒绝（**不新增错误码**）。
+    该平台一把引用都没登记时**不阻塞**（历史行为不变，只是 run 行没有引用）。
+    """
+    from app.credential_refs import resolve_credential_ref
+
+    resolution = resolve_credential_ref(db, platform=platform, env_key=env_key, secret=secret)
+    if resolution.conflict:
+        raise DomainError(
+            code="SHOPIFY_LIVE_NOT_CONFIGURED",
+            message="Shopify live 未配置：授权引用与当前凭据指纹不匹配",
+            http_status=409,
+        )
+    return resolution.ref
+
+
 def _shopify_retention_meta(transport, resource: str) -> dict:
     """取某个资源的 live 响应留存留痕，写进 resource_status_json。
 
@@ -1902,7 +1934,7 @@ def _shopify_sync_run(request: Request, db: Session, resources: str):
     from app.platform_adapters.registry import get_adapter
     from app.platform_adapters.shopify import ShopifyLiveTransport, canonical_store_domain
     from app.external_orders import ensure_external_account, ingest_orders
-    from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, record_sync_cursor, ImportStats, ingest_inventory
+    from app.external_sync import RecordingTransport, UpstreamRequestIdRecorder, begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, record_sync_cursor, ImportStats, ingest_inventory
     selected = [item.strip() for item in resources.split(",") if item.strip()]
     allowed = {"orders", "inventory"}
     if not selected or not set(selected).issubset(allowed):
@@ -1915,19 +1947,33 @@ def _shopify_sync_run(request: Request, db: Session, resources: str):
     # transport 必须在 run 建立后构造，但域名非法仍须在建 run 之前报错，
     # 否则会留下一个永远 running 的孤儿 run。
     canonical_store_domain(settings.shopify_store_domain)
-    run = begin_sync_run(db, workspace_id=principal.workspace_id, platform="shopify", sync_type="shopify_live", account_ref=account_ref, store_ref=settings.shopify_store_domain, source_mode="shopify_live", simulated=False)
+    # P2-2 授权引用解析：当前凭据指纹必须与已登记的引用匹配；
+    # 失配（换过钥匙）按既有 409 SHOPIFY_LIVE_NOT_CONFIGURED 语义拒绝，
+    # 且**在建 run 之前**拒绝——不留下孤儿 run 行。
+    credential_ref = _resolve_live_credential_ref(
+        db,
+        platform="shopify",
+        env_key="SHOPIFY_ACCESS_TOKEN",
+        secret=settings.shopify_access_token,
+    )
+    run = begin_sync_run(db, workspace_id=principal.workspace_id, platform="shopify", sync_type="shopify_live", account_ref=account_ref, store_ref=settings.shopify_store_domain, source_mode="shopify_live", simulated=False, credential_ref_id=credential_ref.id if credential_ref is not None else None)
     # 槽位归属回填：run 已建立，把 run_id 记到闸门上（仅用于 409 日志与排查）。
     _sync_gate_owner = run.run_id
     # live 响应原样留存：按 run 分目录落到 artifacts 下（该目录已被 .gitignore 覆盖）。
     retention_dir = settings.resolve_path(settings.artifacts_dir) / "shopify_sync" / run.run_id
-    transport = ShopifyLiveTransport(
-        settings.shopify_store_domain,
-        settings.shopify_access_token,
-        settings.shopify_api_version,
-        settings.shopify_request_timeout_seconds,
-        settings.shopify_max_retries,
-        retention_dir=str(retention_dir),
-        retention_max_bytes=settings.shopify_retention_max_bytes,
+    # P2-2：上游请求 id 收集器（适配器不可改动，用传输层代理拿 request_id）。
+    upstream_recorder = UpstreamRequestIdRecorder()
+    transport = RecordingTransport(
+        ShopifyLiveTransport(
+            settings.shopify_store_domain,
+            settings.shopify_access_token,
+            settings.shopify_api_version,
+            settings.shopify_request_timeout_seconds,
+            settings.shopify_max_retries,
+            retention_dir=str(retention_dir),
+            retention_max_bytes=settings.shopify_retention_max_bytes,
+        ),
+        upstream_recorder,
     )
     # 取消 token：run 建立后立即登记，run 结束（成功/失败/取消/异常）后注销。
     cancel_token = _register_sync_cancel_token(run.run_id)
@@ -2039,14 +2085,14 @@ def _shopify_sync_run(request: Request, db: Session, resources: str):
             mark_resource_failed(db, run, resource, guardrail_error)
             record_resource_metadata(db, run, resource, {"pages_used": 0, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages, "retention": _shopify_retention_meta(transport, resource)})
             result["resources"][resource] = {"error_code": getattr(guardrail_error, "code", type(guardrail_error).__name__), "error": str(guardrail_error), "pages_used": 0}
-        finalize_resource_run(db, run, error=guardrail_error)
+        finalize_resource_run(db, run, error=guardrail_error, upstream_ids=upstream_recorder)
         # 护栏终止的 run 一律为 failed（即使部分资源此前已成功）。
         if run.status != "failed":
             run.status = "failed"
             db.commit()
             db.refresh(run)
     else:
-        finalize_resource_run(db, run)
+        finalize_resource_run(db, run, upstream_ids=upstream_recorder)
     result["status"] = run.status
     result["error_code"] = run.error_code
     return result
@@ -2218,7 +2264,7 @@ def _shopify_resume_run(request: Request, db: Session, principal, source, plan, 
     from app.platform_adapters.registry import get_adapter
     from app.platform_adapters.shopify import ShopifyLiveTransport, canonical_store_domain
     from app.external_orders import ensure_external_account, ingest_orders
-    from app.external_sync import begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, record_run_metadata, record_sync_cursor, ImportStats, ingest_inventory, CURSOR_ACTION_RESUME, CURSOR_ACTION_SKIP
+    from app.external_sync import RecordingTransport, UpstreamRequestIdRecorder, begin_sync_run, finalize_resource_run, initialize_resources, mark_resource_failed, mark_resource_running, mark_resource_succeeded, record_resource_metadata, record_run_metadata, record_sync_cursor, ImportStats, ingest_inventory, CURSOR_ACTION_RESUME, CURSOR_ACTION_SKIP
     # 新 run 自己的 wall-clock 预算（不继承源 run 的剩余量）。
     budget_seconds = int(settings.shopify_sync_budget_seconds)
     deadline = time.monotonic() + budget_seconds
@@ -2226,6 +2272,13 @@ def _shopify_resume_run(request: Request, db: Session, principal, source, plan, 
     # 店铺域名先校验：留存目录要用 run_id，transport 必须在 run 建立后构造，
     # 但域名非法仍须在建 run 之前报错，否则会留下一个永远 running 的孤儿 run。
     canonical_store_domain(settings.shopify_store_domain)
+    # P2-2 授权引用解析：指纹失配按既有 409 语义拒绝，且在建 run 之前拒绝。
+    credential_ref = _resolve_live_credential_ref(
+        db,
+        platform="shopify",
+        env_key="SHOPIFY_ACCESS_TOKEN",
+        secret=settings.shopify_access_token,
+    )
     run = begin_sync_run(
         db,
         workspace_id=principal.workspace_id,
@@ -2238,6 +2291,8 @@ def _shopify_resume_run(request: Request, db: Session, principal, source, plan, 
         # 链路语义：attempt 单调 +1，retry_of_run_id 指向**直接前驱**（链式续跑可追溯）。
         attempt=int(source.attempt or 1) + 1,
         retry_of_run_id=source.run_id,
+        # P2-2：本次运行的授权引用（不继承源 run 的引用，按当前凭据重新解析）。
+        credential_ref_id=credential_ref.id if credential_ref is not None else None,
     )
     # 槽位归属回填（仅用于 409 日志与排查）。
     _sync_gate_owner = run.run_id
@@ -2245,14 +2300,19 @@ def _shopify_resume_run(request: Request, db: Session, principal, source, plan, 
     _seed_resume_cursor(db, run, source, targets)
     # live 响应原样留存：按**新 run_id** 分目录落到 artifacts 下（不复用源目录）。
     retention_dir = settings.resolve_path(settings.artifacts_dir) / "shopify_sync" / run.run_id
-    transport = ShopifyLiveTransport(
-        settings.shopify_store_domain,
-        settings.shopify_access_token,
-        settings.shopify_api_version,
-        settings.shopify_request_timeout_seconds,
-        settings.shopify_max_retries,
-        retention_dir=str(retention_dir),
-        retention_max_bytes=settings.shopify_retention_max_bytes,
+    # P2-2：上游请求 id 收集器（适配器不可改动，用传输层代理拿 request_id）。
+    upstream_recorder = UpstreamRequestIdRecorder()
+    transport = RecordingTransport(
+        ShopifyLiveTransport(
+            settings.shopify_store_domain,
+            settings.shopify_access_token,
+            settings.shopify_api_version,
+            settings.shopify_request_timeout_seconds,
+            settings.shopify_max_retries,
+            retention_dir=str(retention_dir),
+            retention_max_bytes=settings.shopify_retention_max_bytes,
+        ),
+        upstream_recorder,
     )
     # 取消 token：run 建立后立即登记，run 结束后注销。
     cancel_token = _register_sync_cancel_token(run.run_id)
@@ -2375,14 +2435,14 @@ def _shopify_resume_run(request: Request, db: Session, principal, source, plan, 
             mark_resource_failed(db, run, resource, guardrail_error)
             record_resource_metadata(db, run, resource, {"pages_used": 0, "budget_seconds": budget_seconds, "max_pages": settings.shopify_max_pages, "retention": _shopify_retention_meta(transport, resource)})
             result["resources"][resource] = {"error_code": getattr(guardrail_error, "code", type(guardrail_error).__name__), "error": str(guardrail_error), "pages_used": 0}
-        finalize_resource_run(db, run, error=guardrail_error)
+        finalize_resource_run(db, run, error=guardrail_error, upstream_ids=upstream_recorder)
         # 护栏终止的 run 一律为 failed（即使部分资源此前已成功）。
         if run.status != "failed":
             run.status = "failed"
             db.commit()
             db.refresh(run)
     else:
-        finalize_resource_run(db, run)
+        finalize_resource_run(db, run, upstream_ids=upstream_recorder)
     result["status"] = run.status
     result["error_code"] = run.error_code
     return result
@@ -2910,7 +2970,7 @@ def get_external_sync_run(run_id: str, request: Request, db: Session = Depends(g
 
 
 def _external_sync_run_response(run):
-    from app.external_sync import resource_status, retryable_resources
+    from app.external_sync import resource_status, retryable_resources, upstream_request_count
     from datetime import datetime
     now = datetime.utcnow()
     heartbeat = run.heartbeat_at or run.started_at
@@ -2925,6 +2985,9 @@ def _external_sync_run_response(run):
         total=run.total, inserted=run.inserted, updated=getattr(run, "updated", 0), no_op=run.no_op, conflict=run.conflict, stale=getattr(run, "stale", 0),
         error_code=run.error_code, error_message=run.error_message,
         resource_status=resource_status(run), retryable_resources=retryable_resources(run),
+        # P2-2 归因可见（只增不改：既有键值逐字节不变）。
+        actor=getattr(run, "actor", None), request_id=getattr(run, "request_id", None),
+        upstream_request_count=upstream_request_count(run),
     )
 
 
