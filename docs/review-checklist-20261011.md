@@ -1417,3 +1417,42 @@ G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 
 `retry_class=manual`）与 2 条 live run 行——属**本地开发库**演练留痕，**不随代码入库**；
 如需清空用 `python -m app.cli dead-letter ignore d07231d2acb143acb923d2b333ac884f --reason "live 演练留痕归档"`。
 `external_credential_refs` 中的 `shopify-dev-store`（id=1）沿用 P2-2 登记，**不含任何凭据材料**。
+
+### 19.4 复核结论（复核方自跑，2026-10-29 19:1x，通过）
+
+**判定：通过，P2-4 收口 → P2 主体四切片全部收口。** 提交 `0d73418`（12 files, +2193/−4）
++ `3d3d857`（§19.3 live 台账），工作区干净，交付说明 + 5 份分块说明 + 21 份演练证据齐全。
+
+- **独立验证（复核方自跑）**：定向（P2-4 15 例 + P2-3 13 例 + alembic）→ **35 passed**；
+  **全量 435 passed / 0 failed（221.2s）** = 基线 420 + 新增 15（D-1..D-14 + D-7b），与交付一致。
+- **🚫 禁区亲验**：`git diff f60e127..HEAD -- app/sync_application.py` **空 diff** ——
+  未复用 fixture `/retry`；`_dead_letter_replay_core` 实际调用 **`_shopify_resume_run` +
+  `_resume_plan_or_raise`**（真实外网同步链路，零新传输/分页代码），禁区守住。
+- **四闸顺序逐行核对**：`check_replay_preconditions` = 状态（NOT_OPEN）→ exhausted →
+  分类（MANUAL_ONLY）→ 退避（BACKOFF_NOT_REACHED）；第四道并发闸在 `_dead_letter_replay_core`
+  （API 与 CLI **共用同一执行体**，`_sync_gate_lock` 非阻塞 + 抢不到 409 SHOPIFY_SYNC_IN_PROGRESS）。
+  **额外加分**：抢锁后按主键重读死信并重跑前三闸（TOCTOU，R4 同款）——超出任务书要求，认可。
+- **唯一约束**：migration 0022 与 model 双处 `UniqueConstraint(workspace_id, run_id)`；
+  `down_revision="0021_external_sync_quality"`，唯一 head。
+- **凭据红线**：`sanitize_error_message` 正则抹 token 形态 + 截断 500；死信表零凭据材料。
+- **六条偏差逐处判定（全部认可）**：D-1 登记条件放宽为 `failed or error is not None`——
+  理由实测成立（`finalize_resource_run` 内 `calculate_overall_status` 可能未反映护栏终止，
+  main.py 在 finalize **之后**才落 failed 语义；不放宽则"预算耗尽天然落入"落空），
+  且注释写明 partial 无 error 不登记；D-2 `_shopify_resume_run` 增可选关键字参数
+  （默认 None 向后兼容，复用执行体不复制逻辑）；D-3 幂等命中排在四闸之前——语义边界亲验：
+  仅按 `(workspace_id, retry_of_run_id, 幂等键)` **精确三元组**查，不放宽任何闸门，
+  是"同键二次返回同一 run"与状态闸的唯一可能解法；D-4 仅 finalize 单点登记；
+  D-5 exhausted 与上限同闸（读当前配置，配置调大即解锁）；D-6 CLI `--help` 与 quality 同款。
+- **live 证据链**：§19.3 十步齐全，四条件满足；A 负向（成功 run 死信 0 行）+
+  B 正向（budget=1 → failed → 死信 1 行、`retry_class=manual`、`next_replay_at=NULL`、
+  `replayable=false`、running 孤儿 0）；配额 **3 次 API / 0 轮中转**；`.env` sha256 一致、
+  基线 false 双证据；cookie 已删、进程已停。
+- **R-45 观察态未被破坏**（D-12 亲验）：quality failed 但 run succeeded 的 run 死信零行，
+  `--quality` 只读视图可见 —— 拦截语义仍留给未来，R-45 维持 P3。
+- **R-36 正式关闭**：僵尸判定用既有 900s 配置，只读展示 + 人工归档，不改 running 终态。
+- **台账**：R-48/49/50 连续登记（死信无跨进程调度 / 上限与退避为拍板值 / 僵尸只读不处置）。
+- **观察（不阻断）**：replay 走 resume 执行体，源 run 若在第一页前失败（`cursor_json="{}"`），
+  `resume_plan` 返回"未开始"→ 从头拉，语义正确（R6 已裁定 `{}` ≠ 409）。
+
+**→ P2 主体收官**：四切片（P2-1 Connector / P2-2 source batch / P2-3 quality / P2-4 补偿）
+全部收口；基线口径 **435 passed / 0 failed**。
