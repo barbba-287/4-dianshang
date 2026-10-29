@@ -1377,3 +1377,43 @@ R-38（授权引用未实体化）在本片关闭：`external_credential_refs` �
 
 - **R-45 不升级**：质量警告**不进死信表**；出口是既有 `CLI quality show` + `dead-letter list --quality <warn|failed>` 只读视图（join run 表，不落死信行、不可 replay）。
 - **R-36 不升级 → B3 关闭**：僵尸 run 只做只读判定与展示（R-50）。
+
+### 19.3 P2-4 live 演练台账（2026-10-29 已裁定并执行）
+
+任务文件 §5 规定：**1 正向 1 负向**两步 live 留证（负向=正常同步成功断言死信表无新行；
+正向=运行时 `SHOPIFY_SYNC_BUDGET_SECONDS=1` 构造预算耗尽失败断言死信自动登记），
+**不做真实重放**（重放链路由 D-7/D-7b/D-8/D-9 覆盖），配额上限 **4 次 API**。
+**用户事前裁定：已取得**（2026-10-29 对话留痕，批准"执行 §5 的 live 两步留证"）。
+证据目录：`.testtmp/drill-evidence-p2s4/`（不入库，路径留痕）；结论：同目录 `CONCLUSION.md`。
+
+| 步骤 | 时间 | 结果 | 证据文件 |
+|---|---|---|---|
+| 步骤 1 预检 | 10-29 18:45 | git 干净（HEAD `0d73418`）/ `.env` **指纹**留痕 `3b4f476d…`（R-23：只记指纹不复制凭据副本）/ 基线 `SHOPIFY_LIVE_ENABLED=false` 恰好 1 处、true 0 处 / 无并行 pytest·uvicorn（R-29 干净） | step1-precheck.txt |
+| Gate 0 探针 | 10-29 18:47 | `actualQueryCost=1`，余 **1999**/2000（耗 1 次，失败不自动重试）→ 阈值 ≥20 满足 | gate0-shopify-throttle.json |
+| 步骤 2 关闭态回归 | 10-29 18:47–18:48 | capabilities `live_enabled:false` ✓；sync **409 SHOPIFY_LIVE_NOT_CONFIGURED** ✓（前置门完好） | step2-closed-state.txt、step2a-login.txt |
+| 步骤 3 切 live（乙路线·双前缀） | 10-29 18:49 | capabilities `live_enabled:true` + `simulated:false` ✓（命令原文落盘，`.env` 零改动） | step3-start.txt、step3-capabilities-live.txt |
+| 步骤 4 热开关确认 | 10-29 18:49 | capabilities 已为 true → **跳过显式 POST**（少打一次接口） | step3-capabilities-live.txt |
+| 步骤 4-前置基线 | 10-29 18:50 | 死信表同步前 **0 行**；授权引用 `shopify-dev-store` id=1 / 指纹 `b912a5e4`（沿用 P2-2 登记） | step4-deadletter-baseline.txt |
+| **步骤 A（负向）** | 10-29 18:51 | live orders 同步 **succeeded**、total=3、**no_op=3（幂等零重复写）**、pages_used=1；run_id=`cbdd6ba9324c421aa12bba15d05df4ec` | step5A-sync-orders.json |
+| **步骤 A 断言** | 10-29 18:51 | **死信表 0 行**（CLI `count:0` + DB 直查 0）；run 行 `status=succeeded / error_code=None` → **成功不进死信，防"补偿机制误吞正常流量"** ✓ | step5A-deadletter-assert.txt |
+| **步骤 B（正向）** | 10-29 18:52–18:53 | 重启并压紧预算 `SHOPIFY_SYNC_BUDGET_SECONDS=1`；`orders` 成功、`inventory` 在页间预算检查点触发 → run **failed**、`error_code=SHOPIFY_SYNC_BUDGET_EXCEEDED`；run_id=`d07231d2acb143acb923d2b333ac884f` | step5B-start.txt、step5B-capabilities.txt、step5B-sync-budget-exceeded.json |
+| **步骤 B 断言** | 10-29 18:53 | **死信自动登记 1 行**：`error_code=SHOPIFY_SYNC_BUDGET_EXCEEDED`、**`retry_class=manual`**（裁定补丁 3）、`attempt=1`、**`next_replay_at=NULL`**（manual 类不参与退避）、`exhausted=0`、`status=open`、`quality_status=NULL`、`actor=demo-admin`、`request_id=req-c56e1ab7df71`、`workspace_id=2`；CLI 视图 `replayable=false` | step5B-deadletter-assert.txt |
+| **步骤 B 孤儿断言** | 10-29 18:53 | `status='running'` 的 run 行 **0 条**（无 running 孤儿）；失败 run `status=failed / error_code=SHOPIFY_SYNC_BUDGET_EXCEEDED / attempt=1 / finished_at` 非空；死信 `run_id` 与源 run 一致 | step5B-run-row.txt |
+| 真实重放 | — | **按配额纪律不做**（重放链路由 D-7/D-7b/D-8/D-9 覆盖；重放会再耗配额） | — |
+| 步骤 8 关闭态反向 | 10-29 18:54 | 无前缀重启 → capabilities `live_enabled:false` ✓、sync **立即 409** ✓ | step9-closed-reverse.txt |
+| 步骤 9 还原与清理 | 10-29 18:54 | `.env` sha256 与预检**完全一致**（基线未动）；基线 false 恰好 1 处 / true 0 处；**cookie jar 已删**；**uvicorn 进程已停**（3 个 PID 全部为本会话启动）；`git status` **干净** | step9-restore.txt、step9-cleanup.txt |
+
+**配额结算**：G0-1 中转轮次 **本轮 0 轮**（P2-4 全程离线 + 手工 curl，未调实施方 CLI 批量入口）；
+G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 + 步骤 B orders/inventory 2 页），
+**未超上限 4 次**；距上次实测余量约 **1996**（未再探针回读，避免多打一次）；未触及 55~60 轮止损线。
+
+**结论**：**P2-4 live 验证通过**——补偿机制在**真实上游**上完成双向实锤：
+负向（正常流量**不进死信表**）+ 正向（预算耗尽流量**自动落 manual 死信**、
+`next_replay_at=NULL`、`replayable=false`、**不留 running 孤儿**）。
+**只登记"具备放开条件"，live 放开仍由用户单独裁定**（runbook §5.1）；`.env` 基线保持 `false`，
+本轮结束已回 false 并留 capabilities + sync-409 双证据。
+
+残留（不阻断）：本地库 `data/dianshang.db` 留有 1 条死信行（`run_id=d07231d2…`、`status=open`、
+`retry_class=manual`）与 2 条 live run 行——属**本地开发库**演练留痕，**不随代码入库**；
+如需清空用 `python -m app.cli dead-letter ignore d07231d2acb143acb923d2b333ac884f --reason "live 演练留痕归档"`。
+`external_credential_refs` 中的 `shopify-dev-store`（id=1）沿用 P2-2 登记，**不含任何凭据材料**。
