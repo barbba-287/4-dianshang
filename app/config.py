@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     rag_min_score: float = 0.2
     external_snapshot_stale_after_seconds: int = 24 * 60 * 60
     external_sync_run_stale_after_seconds: int = 15 * 60
+    # P2-4 补偿机制：重放上限（attempt ≥ 上限 → 死信 exhausted，只能人工归档）与
+    # 退避基数（next_replay_at = failed_at + base × 2^(attempt−1) × (1 + jitter)）。
+    # 两个值都是拍板值不是 SLA（见 R-49）：调大即解锁，无需另设"强制"参数。
+    sync_compensation_max_attempts: int = 3
+    sync_compensation_backoff_base_seconds: int = 30
     taobao_adapter_enabled: bool = False
     taobao_api_base_url: str = ""
     taobao_app_key: str = ""

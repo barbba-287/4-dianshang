@@ -1333,3 +1333,47 @@ R-38（授权引用未实体化）在本片关闭：`external_credential_refs` �
   D-6 truncated/缺失分档口径与任务文件 T1 逐字一致。
 - **S-13/S-14 零改动**：P2-2 归因实现与测试断言未触碰（diff 面证实）。
 - **对 P2-4 的入口**：R-45 拦截语义评估是 P2-4 任务文件必答题（B3 同款条款）。
+
+---
+
+## 19. P2-4 补偿机制（死信隔离 + 人工重放）：R-48/49/50 登记（2026-10-29）
+
+| 编号 | 内容 | 定级 |
+|---|---|---|
+| R-48 | 死信无跨进程调度：`next_replay_at` 只是"放行门槛"，多 worker 下重放靠人工触发，无竞争防护（DB 唯一约束 `uq_external_sync_dead_letter_workspace_run` 与 `uq_external_sync_run_retry_idempotency` 保底不重复行，但**不保证**同一 run 只被人工重放一次） | P3 |
+| R-49 | 补偿上限 3（`sync_compensation_max_attempts`）与退避基数 30s（`sync_compensation_backoff_base_seconds`）是拍板值非 SLA，无压测依据；两者均可在配置里调大（上限调大即解锁 exhausted 死信，**不另设"强制重试"参数**） | P3 |
+| R-50 | 僵尸 run 只读不处置（不改 `running` 终态、不 kill、不生成新 run）：改终态涉及取消令牌 / 进程内态归属（R-27 / R-39），范围爆炸，留给未来切片；本片唯一的写出口是人工 `dead-letter ignore <run_id> --reason zombie-marked` 归档成一条 `ignored` 死信 | P3 |
+
+### 19.1 本片写死的口径（复核按此核）
+
+**四道闸门顺序（不得颠倒）**：
+
+| 闸 | 判据 | 拒绝码（HTTP 409） |
+|---|---|---|
+| ① 状态 | `status == "open"` 且 `attempt < sync_compensation_max_attempts` | `DEAD_LETTER_NOT_OPEN` / `DEAD_LETTER_EXHAUSTED` |
+| ② 分类 | `retry_class == "auto"` | `DEAD_LETTER_MANUAL_ONLY` |
+| ③ 退避 | `now() >= next_replay_at`（写入时一次算死，不随读取漂移） | `DEAD_LETTER_BACKOFF_NOT_REACHED` |
+| ④ 并发 | 非阻塞抢 `_sync_gate_lock`（与 `/sync`、`/resume` 同一把） | `SHOPIFY_SYNC_IN_PROGRESS` |
+
+**分类表（`RETRY_CLASS_BY_CODE`，恰好 3 个 auto 码）**：
+
+| retry_class | error_code |
+|---|---|
+| `auto` | `SHOPIFY_TIMEOUT` / `SHOPIFY_RATE_LIMITED` / `SHOPIFY_UPSTREAM_ERROR` |
+| `manual` | `SHOPIFY_SYNC_BUDGET_EXCEEDED` / `SHOPIFY_SYNC_CANCELLED` / **其余一切**（含未知码） |
+
+**死信表口径**：
+
+- 唯一约束 `(workspace_id, run_id)`：一个 run 至多一条死信（自动登记幂等 + 重试链不产生重复行）；
+- `next_replay_at = failed_at + base × 2^(attempt−1) × (1 + jitter)`，`jitter ∈ [0, 0.25]` 均匀随机；
+  attempt=1 → ≈30~37s、attempt=2 → ≈60~75s、attempt=3 → ≈120~150s；manual 类恒 NULL；
+- 三态：`open` →（replay 成功）`replayed`（终态，落 `replayed_run_id`） /（ignore）`ignored`（终态，`ignore_reason` 必填）；
+  终态再操作 → 409 `DEAD_LETTER_NOT_OPEN`；
+- `exhausted` 是 open 上的**标记位**（不是状态）：`attempt ≥ 上限` → True；出路只有人工 ignore，
+  或调大配置后人工重试（配置读在 replay 时）；
+- 凭据红线：死信表不落任何凭据材料（`error_message` 截断 500 且抹掉 token 形态字符串）。
+
+### 19.2 P2-4 的两条边界（承接 §0 裁定）
+
+- **R-45 不升级**：质量警告**不进死信表**；出口是既有 `CLI quality show` + `dead-letter list --quality <warn|failed>` 只读视图（join run 表，不落死信行、不可 replay）。
+- **R-36 不升级 → B3 关闭**：僵尸 run 只做只读判定与展示（R-50）。

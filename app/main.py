@@ -149,6 +149,10 @@ from app.schemas import (
     DashboardSummaryResponse,
     ExternalSyncRetryRequest,
     ExternalSyncRunResponse,
+    ExternalSyncDeadLetterResponse,
+    ExternalSyncDeadLetterListResponse,
+    ExternalSyncDeadLetterIgnoreRequest,
+    ExternalSyncDeadLetterReplayResponse,
     InventoryPolicyCreate,
     InventoryPolicyResponse,
     AdminUserCreate,
@@ -2250,11 +2254,14 @@ def _seed_resume_cursor(db: Session, run, source, targets: list[str]) -> None:
     db.refresh(run)
 
 
-def _shopify_resume_run(request: Request, db: Session, principal, source, plan, targets: list[str]):
+def _shopify_resume_run(request: Request, db: Session, principal, source, plan, targets: list[str], *, retry_idempotency_key: str | None = None):
     """Shopify live 同步**续跑**的实际执行体（调用方已持有单飞闸门）。
 
     与 `_shopify_sync_run` 的唯一结构性差异：每个资源按 plan.resources[resource].action
     分派（resume / restart / skip），其余（预算、取消、留存目录、护栏收尾）完全同构。
+
+    P2-4：死信重放复用本执行体（`retry_idempotency_key` 透传进新建 run，
+    复用既有唯一约束 uq_external_sync_run_retry_idempotency 做 run 行幂等）。
     """
     global _sync_gate_owner
     settings = get_settings()
@@ -2291,6 +2298,8 @@ def _shopify_resume_run(request: Request, db: Session, principal, source, plan, 
         # 链路语义：attempt 单调 +1，retry_of_run_id 指向**直接前驱**（链式续跑可追溯）。
         attempt=int(source.attempt or 1) + 1,
         retry_of_run_id=source.run_id,
+        # P2-4：死信重放的幂等键（同一键重放命中既有行，不建第二行）。
+        retry_idempotency_key=retry_idempotency_key,
         # P2-2：本次运行的授权引用（不继承源 run 的引用，按当前凭据重新解析）。
         credential_ref_id=credential_ref.id if credential_ref is not None else None,
     )
@@ -2518,6 +2527,284 @@ def resume_external_sync_run(
         token_run_id = getattr(_sync_token_local, "run_id", None)
         if token_run_id:
             _unregister_sync_cancel_token(token_run_id)
+
+
+# ---------------------------------------------------------------------------
+# P2-4 补偿机制：死信（人工重放 / 人工归档）
+#
+# 禁区提醒：本段的 replay **不复用** POST /api/external/sync/runs/{run_id}/retry
+# （那是 fixture 假数据重放语义，app/sync_application.py 零改动）；
+# 死信重放走的是真实外网同步链路（既有 /sync 与 R4 resume 的执行体）。
+# ---------------------------------------------------------------------------
+
+
+def _dead_letter_row_response(letter) -> ExternalSyncDeadLetterResponse:
+    """死信行 → 响应 schema。"""
+    return ExternalSyncDeadLetterResponse(
+        id=letter.id,
+        workspace_id=letter.workspace_id,
+        run_id=letter.run_id,
+        platform=letter.platform,
+        sync_type=letter.sync_type,
+        source_mode=letter.source_mode,
+        error_code=letter.error_code,
+        error_message=letter.error_message,
+        retry_class=letter.retry_class,
+        attempt=letter.attempt,
+        next_replay_at=letter.next_replay_at,
+        exhausted=bool(letter.exhausted),
+        quality_status=letter.quality_status,
+        status=letter.status,
+        replayed_run_id=letter.replayed_run_id,
+        actor=letter.actor,
+        request_id=letter.request_id,
+        ignore_reason=letter.ignore_reason,
+        created_at=letter.created_at,
+        updated_at=letter.updated_at,
+    )
+
+
+def _dead_letter_replay_targets(source) -> list[str]:
+    """重放目标资源：源 run 的 retryable_resources；为空时取源 run 已初始化的资源集。"""
+    from app.external_sync import retryable_resources
+    names = [name for name in retryable_resources(source) if name in _RESUME_ALLOWED_RESOURCES]
+    if names:
+        return names
+    return _resume_target_resources(source, None)
+
+
+def _dead_letter_replay_core(db: Session, principal, run_id: str, idempotency_key: str, *, request: Request | None = None):
+    """死信重放的**唯一执行体**（API 与 CLI 共用同一份逻辑）。
+
+    闸门顺序铁律：**状态 → 分类 → 退避 → 并发**，不得颠倒（任务书 §4 T4）。
+    并发闸与 /sync、/resume 共享同一把 `_sync_gate_lock`（非阻塞抢，抢不到 409）。
+
+    返回 (死信行, 新 run, 是否幂等命中)。
+    """
+    global _sync_gate_owner
+    from app.config import get_settings
+    from app.db import ExternalSyncRun
+    from app.dead_letters import (
+        DeadLetterRejected,
+        check_replay_preconditions,
+        find_replay_run,
+        get_dead_letter,
+        mark_replayed,
+        refresh_exhausted_flag,
+    )
+    from app.external_sync import current_attribution
+
+    settings = get_settings()
+    workspace_id = principal.workspace_id
+    letter = get_dead_letter(db, workspace_id=workspace_id, run_id=run_id)
+    if letter is None:
+        raise DomainError(code="DEAD_LETTER_NOT_FOUND", message="死信不存在", http_status=404)
+    # run 行幂等（T5-2）：同幂等键命中既有重放 → 直接返回那一行（HTTP 200），不建第二行。
+    # 这一步刻意排在四道闸之前：否则「同幂等键二次 → 200 返回同一新 run」与状态闸
+    # 「非 open 一律 409」互斥（第一次重放后死信已是 replayed 终态）。
+    existing = find_replay_run(
+        db,
+        workspace_id=workspace_id,
+        retry_of_run_id=letter.run_id,
+        idempotency_key=idempotency_key,
+    )
+    if existing is not None:
+        return letter, existing, True
+    try:
+        check_replay_preconditions(
+            letter,
+            now=datetime.utcnow(),
+            max_attempts=settings.sync_compensation_max_attempts,
+        )
+    except DeadLetterRejected as exc:
+        raise DomainError(code=exc.code, message=exc.message, http_status=409) from exc
+    # 第四道闸门（并发）：非阻塞抢单飞闸门——死信重放本质是"人工触发的同步请求"，
+    # 依然要打上游 API，必须受单飞约束（抢不到立刻 409，不排队、不阻塞）。
+    if not _sync_gate_lock.acquire(blocking=False):
+        logger.warning("死信重放并发请求被拒：已有 run 在执行（owner_run_id=%s）", _sync_gate_owner)
+        raise DomainError(
+            code="SHOPIFY_SYNC_IN_PROGRESS",
+            message="已有 live 同步正在运行，请等待其结束或先调用取消接口",
+            http_status=409,
+        )
+    try:
+        # TOCTOU 复核：持锁后按主键重读死信并重跑前三道闸（语义与 /resume 一致）。
+        letter = get_dead_letter(db, workspace_id=workspace_id, run_id=run_id)
+        if letter is None:
+            raise DomainError(code="DEAD_LETTER_NOT_FOUND", message="死信不存在", http_status=404)
+        try:
+            check_replay_preconditions(
+                letter,
+                now=datetime.utcnow(),
+                max_attempts=settings.sync_compensation_max_attempts,
+            )
+        except DeadLetterRejected as exc:
+            raise DomainError(code=exc.code, message=exc.message, http_status=409) from exc
+        # 配置读发生在 replay 时：配置调大即解锁（不另设"强制"参数）。
+        refresh_exhausted_flag(letter, max_attempts=settings.sync_compensation_max_attempts)
+        source = db.scalar(
+            select(ExternalSyncRun).where(
+                ExternalSyncRun.run_id == letter.run_id,
+                ExternalSyncRun.workspace_id == workspace_id,
+            )
+        )
+        if source is None:
+            raise DomainError(code="SYNC_RUN_NOT_FOUND", message="同步运行不存在", http_status=404)
+        targets = _dead_letter_replay_targets(source)
+        plan = _resume_plan_or_raise(source, targets)
+        # 同步本体走既有 R4 resume 执行体（不新写任何传输 / 分页代码）。
+        result = _shopify_resume_run(
+            request,
+            db,
+            principal,
+            source,
+            plan,
+            targets,
+            retry_idempotency_key=idempotency_key,
+        )
+        new_run = db.scalar(
+            select(ExternalSyncRun).where(
+                ExternalSyncRun.run_id == result["run_id"],
+                ExternalSyncRun.workspace_id == workspace_id,
+            )
+        )
+        attribution = current_attribution()
+        mark_replayed(
+            db,
+            letter,
+            replayed_run_id=result["run_id"],
+            actor=principal.subject,
+            request_id=attribution.get("request_id") or None,
+        )
+        return letter, new_run, False
+    finally:
+        # 释放顺序不可颠倒：先清归属，再放锁。
+        _sync_gate_owner = None
+        _sync_gate_lock.release()
+
+
+@app.get("/api/external/sync/dead-letters", response_model=ExternalSyncDeadLetterListResponse)
+def list_external_sync_dead_letters(
+    request: Request,
+    db: Session = Depends(get_db),
+    status: str | None = Query(default=None),
+    retry_class: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """死信列表（人工入口之一；只读）。
+
+    - 跨 workspace 访问 → 天然隔离（只返回本 workspace 的死信行）。
+    - 质量警告**不在此列表**（不进死信表），出口是 CLI `dead-letter list --quality`。
+    """
+    principal = require_principal(request, permission="inventory.read")
+    from app.dead_letters import list_dead_letters
+    letters = list_dead_letters(
+        db,
+        workspace_id=principal.workspace_id,
+        status=status,
+        retry_class=retry_class,
+        limit=limit,
+    )
+    return ExternalSyncDeadLetterListResponse(
+        count=len(letters),
+        items=[_dead_letter_row_response(item) for item in letters],
+    )
+
+
+@app.post("/api/external/sync/dead-letters/{run_id}/replay", response_model=ExternalSyncDeadLetterReplayResponse)
+def replay_external_sync_dead_letter(
+    run_id: str,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """死信重放（人工触发真实同步；四道闸门：状态 → 分类 → 退避 → 并发）。
+
+    - 死信不存在 / 不属于当前 workspace → 404 DEAD_LETTER_NOT_FOUND；
+    - 缺 Idempotency-Key → 422（超长同样 422，复用既有校验）；
+    - 非 open → 409 DEAD_LETTER_NOT_OPEN；已耗尽 → 409 DEAD_LETTER_EXHAUSTED；
+    - manual 类 → 409 DEAD_LETTER_MANUAL_ONLY；退避未到 → 409 DEAD_LETTER_BACKOFF_NOT_REACHED；
+    - 已有同步在跑 → 409 SHOPIFY_SYNC_IN_PROGRESS；
+    - 200 = 幂等命中既有重放（同幂等键），201 = 新重放。
+    """
+    principal = require_principal(request, permission="catalog.write")
+    key = request.headers.get("Idempotency-Key")
+    if not key:
+        raise DomainError(code="IDEMPOTENCY_KEY_REQUIRED", message="必须提供 Idempotency-Key", http_status=422)
+    if len(key) > 128:
+        raise DomainError(code="IDEMPOTENCY_KEY_TOO_LONG", message="Idempotency-Key 超过长度限制", http_status=422)
+    letter, run, idempotent = _dead_letter_replay_core(db, principal, run_id, key, request=request)
+    response.status_code = 200 if idempotent else 201
+    return ExternalSyncDeadLetterReplayResponse(
+        dead_letter=_dead_letter_row_response(letter),
+        run=_external_sync_run_response(run),
+    )
+
+
+@app.post("/api/external/sync/dead-letters/{run_id}/ignore", response_model=ExternalSyncDeadLetterResponse)
+def ignore_external_sync_dead_letter(
+    run_id: str,
+    payload: ExternalSyncDeadLetterIgnoreRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """死信归档（人工出险；终态 ignored，reason 必填）。
+
+    - 死信不存在 → 404 DEAD_LETTER_NOT_FOUND；非 open → 409 DEAD_LETTER_NOT_OPEN；
+    - 源 run 是僵尸（running + 心跳过期）且尚无死信行 → 归档成一条 ignored 死信
+      （只读判定之外唯一的写出口，不改 run 状态）。
+    """
+    principal = require_principal(request, permission="catalog.write")
+    from app.config import get_settings
+    from app.db import ExternalSyncRun
+    from app.dead_letters import (
+        DeadLetterRejected,
+        archive_zombie_run,
+        get_dead_letter,
+        mark_ignored,
+        zombie_runs,
+    )
+    settings = get_settings()
+    letter = get_dead_letter(db, workspace_id=principal.workspace_id, run_id=run_id)
+    if letter is None:
+        run = db.scalar(
+            select(ExternalSyncRun).where(
+                ExternalSyncRun.run_id == run_id,
+                ExternalSyncRun.workspace_id == principal.workspace_id,
+            )
+        )
+        if run is None:
+            raise DomainError(code="DEAD_LETTER_NOT_FOUND", message="死信不存在", http_status=404)
+        zombies = {
+            item.run_id: item
+            for item in zombie_runs(
+                db,
+                workspace_id=principal.workspace_id,
+                stale_after_seconds=settings.external_sync_run_stale_after_seconds,
+            )
+        }
+        if run.run_id not in zombies:
+            raise DomainError(code="DEAD_LETTER_NOT_FOUND", message="死信不存在", http_status=404)
+        letter = archive_zombie_run(
+            db,
+            run,
+            reason=payload.reason,
+            actor=principal.subject,
+            request_id=None,
+            max_attempts=settings.sync_compensation_max_attempts,
+        )
+        return _dead_letter_row_response(letter)
+    try:
+        mark_ignored(
+            db,
+            letter,
+            reason=payload.reason,
+            actor=principal.subject,
+            request_id=None,
+        )
+    except DeadLetterRejected as exc:
+        raise DomainError(code=exc.code, message=exc.message, http_status=409) from exc
+    return _dead_letter_row_response(letter)
 
 
 def external_orders_preview(payload: ExternalOrderPreviewRequest, request: Request):

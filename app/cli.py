@@ -34,6 +34,12 @@ python -m app.cli credential-ref remove --ref-name shopify-dev-store
 # 数据质量门禁（只读：show 读库内报告，replay 只读本地留存重算）
 python -m app.cli quality show <run-id>
 python -m app.cli quality replay <run-id>
+
+# 死信补偿（人工入口：list / show / replay / ignore；质量与僵尸只读视图）
+python -m app.cli dead-letter list [--status open] [--class auto] [--quality failed] [--zombie] [--limit 50]
+python -m app.cli dead-letter show <run-id>
+python -m app.cli dead-letter replay <run-id> --yes
+python -m app.cli dead-letter ignore <run-id> --reason "已人工排查"
 ```
 """
 
@@ -902,6 +908,345 @@ def cmd_quality(args: list[str]) -> int:
     return cmd_quality_replay(run_id)
 
 
+def cmd_dead_letter(args: list[str]) -> int:
+    """死信（补偿机制）的人工入口。
+
+    用法：
+      python -m app.cli dead-letter list [--status S] [--class C] [--quality Q] [--zombie] [--limit N]
+      python -m app.cli dead-letter show <run_id>
+      python -m app.cli dead-letter replay <run_id> --yes
+      python -m app.cli dead-letter ignore <run_id> --reason "..."
+
+    口径：
+    - `--quality` 是**只读视图**（join run 表展示质量结论，不落死信行、不可 replay）；
+    - `--zombie` 是僵尸 run 的只读视图（不改 run 状态）；
+    - replay 走真实外网同步链路（既有 /sync 与 R4 resume），**不复用 fixture 重放**。
+    """
+    if not args:
+        print(json.dumps({"ok": False, "error_code": "INVALID_DEAD_LETTER_INPUT", "error": "缺少子命令（list / show / replay / ignore）"}, ensure_ascii=False))
+        return 2
+    action = args[0]
+    if action not in {"list", "show", "replay", "ignore"}:
+        print(json.dumps({"ok": False, "error_code": "INVALID_DEAD_LETTER_INPUT", "error": "子命令只支持 list / show / replay / ignore"}, ensure_ascii=False))
+        return 2
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        if action == "list":
+            return _dead_letter_list(db, args)
+        if action == "show":
+            return _dead_letter_show(db, args)
+        if action == "replay":
+            return _dead_letter_replay(db, args)
+        return _dead_letter_ignore(db, args)
+    finally:
+        db.close()
+
+
+def _dead_letter_workspace(db, args: list[str]) -> int | None:
+    """读操作的工作空间解析：唯一活跃工作空间时按它过滤，否则返回 None（不猜）。"""
+    from sqlalchemy import select
+    from app.db import Workspace
+
+    if _option(args, "--workspace"):
+        try:
+            return _resolve_cli_workspace(db, args)
+        except (ValueError, OverflowError):
+            return None
+    active = db.scalars(select(Workspace).where(Workspace.status == "active").order_by(Workspace.id)).all()
+    if len(active) == 1:
+        return active[0].id
+    return None
+
+
+def _dead_letter_row(letter, *, now=None) -> dict:
+    """死信行 → CLI 展示结构（含"当前能否重放"的只读判定）。"""
+    from datetime import datetime
+
+    moment = now or datetime.utcnow()
+    next_replay_at = letter.next_replay_at
+    backoff_ok = next_replay_at is None or next_replay_at <= moment
+    replayable = (
+        letter.status == "open"
+        and letter.retry_class == "auto"
+        and not bool(letter.exhausted)
+        and backoff_ok
+    )
+    return {
+        "run_id": letter.run_id,
+        "workspace_id": letter.workspace_id,
+        "platform": letter.platform,
+        "sync_type": letter.sync_type,
+        "source_mode": letter.source_mode,
+        "error_code": letter.error_code,
+        "error_message": letter.error_message,
+        "retry_class": letter.retry_class,
+        "attempt": letter.attempt,
+        "next_replay_at": next_replay_at.isoformat() if next_replay_at else None,
+        "exhausted": bool(letter.exhausted),
+        "quality_status": letter.quality_status,
+        "status": letter.status,
+        "replayed_run_id": letter.replayed_run_id,
+        "actor": letter.actor,
+        "request_id": letter.request_id,
+        "ignore_reason": letter.ignore_reason,
+        "created_at": letter.created_at.isoformat() if letter.created_at else None,
+        "updated_at": letter.updated_at.isoformat() if letter.updated_at else None,
+        "replayable": replayable,
+    }
+
+
+def _dead_letter_list(db, args: list[str]) -> int:
+    """死信列表 / 质量只读视图 / 僵尸只读视图。"""
+    from app.config import get_settings
+    from app.dead_letters import list_dead_letters, quality_view, zombie_runs
+
+    settings = get_settings()
+    workspace_id = _dead_letter_workspace(db, args)
+    limit = int(_option(args, "--limit", "50") or 50)
+    quality = _option(args, "--quality")
+    if quality:
+        if quality not in {"ok", "warn", "failed", "unknown"}:
+            print(json.dumps({"ok": False, "error_code": "INVALID_DEAD_LETTER_INPUT", "error": "--quality 只支持 ok / warn / failed / unknown"}, ensure_ascii=False))
+            return 2
+        runs = quality_view(db, workspace_id=workspace_id, quality_status=quality, limit=limit)
+        print(json.dumps({
+            "ok": True,
+            "mode": "quality_view",
+            "quality_status": quality,
+            "note": "质量结论只读视图：不落死信行、不可 replay（R-45 观察态边界）",
+            "count": len(runs),
+            "items": [
+                {
+                    "run_id": run.run_id,
+                    "workspace_id": run.workspace_id,
+                    "status": run.status,
+                    "quality_status": run.quality_status,
+                    "total": run.total,
+                    "inserted": run.inserted,
+                    "no_op": run.no_op,
+                    "conflict": run.conflict,
+                    "error_code": run.error_code,
+                    "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                    "replayable": False,
+                }
+                for run in runs
+            ],
+        }, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if "--zombie" in args:
+        runs = zombie_runs(
+            db,
+            workspace_id=workspace_id,
+            stale_after_seconds=settings.external_sync_run_stale_after_seconds,
+            limit=limit,
+        )
+        from datetime import datetime
+
+        now = datetime.utcnow()
+        print(json.dumps({
+            "ok": True,
+            "mode": "zombie",
+            "note": "僵尸 run 只读视图：不改 run 状态、不 kill、不生成新 run（R-50）",
+            "stale_after_seconds": settings.external_sync_run_stale_after_seconds,
+            "count": len(runs),
+            "items": [
+                {
+                    "run_id": run.run_id,
+                    "workspace_id": run.workspace_id,
+                    "status": run.status,
+                    "platform": run.platform,
+                    "attempt": run.attempt,
+                    "heartbeat_at": run.heartbeat_at.isoformat() if run.heartbeat_at else None,
+                    "heartbeat_age_seconds": int((now - run.heartbeat_at).total_seconds()) if run.heartbeat_at else None,
+                    "error_code": run.error_code,
+                    "error_message": run.error_message,
+                    "ignore_hint": "人工可执行：python -m app.cli dead-letter ignore <run_id> --reason zombie-marked",
+                }
+                for run in runs
+            ],
+        }, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    letters = list_dead_letters(
+        db,
+        workspace_id=workspace_id,
+        status=_option(args, "--status"),
+        retry_class=_option(args, "--class"),
+        limit=limit,
+    )
+    print(json.dumps({
+        "ok": True,
+        "mode": "dead_letters",
+        "count": len(letters),
+        "items": [_dead_letter_row(letter) for letter in letters],
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _dead_letter_show(db, args: list[str]) -> int:
+    """单条死信详情（含源 run 的归因四件套 + 质量摘要）。"""
+    from sqlalchemy import select
+    from app.db import ExternalSyncRun
+    from app.dead_letters import get_dead_letter
+
+    run_id = args[1] if len(args) > 1 else None
+    if not run_id:
+        print(json.dumps({"ok": False, "error_code": "INVALID_DEAD_LETTER_INPUT", "error": "缺少 run_id"}, ensure_ascii=False))
+        return 2
+    workspace_id = _dead_letter_workspace(db, args)
+    letter = get_dead_letter(db, workspace_id=workspace_id, run_id=run_id)
+    if letter is None:
+        print(json.dumps({"ok": False, "run_id": run_id, "error_code": "DEAD_LETTER_NOT_FOUND", "error": "死信不存在"}, ensure_ascii=False))
+        return 2
+    source = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.run_id == letter.run_id))
+    payload = {"ok": True, "dead_letter": _dead_letter_row(letter)}
+    if source is not None:
+        payload["source_run"] = {
+            "run_id": source.run_id,
+            "status": source.status,
+            "platform": source.platform,
+            "sync_type": source.sync_type,
+            "source_mode": source.source_mode,
+            "attempt": source.attempt,
+            "retry_of_run_id": source.retry_of_run_id,
+            "error_code": source.error_code,
+            "error_message": source.error_message,
+            "started_at": source.started_at.isoformat() if source.started_at else None,
+            "finished_at": source.finished_at.isoformat() if source.finished_at else None,
+            # 归因四件套（actor / request_id / credential_ref_id / upstream ids）。
+            "actor": source.actor,
+            "request_id": source.request_id,
+            "credential_ref_id": source.credential_ref_id,
+            "upstream_request_ids": source.upstream_request_ids_json,
+            # 质量摘要（只透出结论，全量报告走 CLI quality show）。
+            "quality_status": source.quality_status,
+        }
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _dead_letter_replay(db, args: list[str]) -> int:
+    """死信重放：走真实外网同步链路（既有 /sync 与 R4 resume 执行体）。"""
+    from app.errors import DomainError
+    from app.identity import Principal
+    from app.main import _dead_letter_replay_core
+    from app.db import Workspace
+    from app.dead_letters import get_dead_letter
+
+    run_id = args[1] if len(args) > 1 else None
+    if not run_id:
+        print(json.dumps({"ok": False, "error_code": "INVALID_DEAD_LETTER_INPUT", "error": "缺少 run_id"}, ensure_ascii=False))
+        return 2
+    if "--yes" not in args:
+        print(json.dumps({"ok": False, "error_code": "REPLAY_CONFIRMATION_REQUIRED", "error": "重放会真实发起同步请求，确认请加 --yes"}, ensure_ascii=False))
+        return 2
+    try:
+        workspace_id = _resolve_cli_workspace(db, args)
+    except (ValueError, OverflowError) as exc:
+        print(json.dumps({"ok": False, "error_code": "WORKSPACE_RESOLUTION_FAILED", "error": str(exc)}, ensure_ascii=False))
+        return 2
+    letter = get_dead_letter(db, workspace_id=workspace_id, run_id=run_id)
+    if letter is None:
+        print(json.dumps({"ok": False, "run_id": run_id, "error_code": "DEAD_LETTER_NOT_FOUND", "error": "死信不存在"}, ensure_ascii=False))
+        return 2
+    # 幂等键自动生成（deterministic）：同参数重放天然命中既有约束。
+    idempotency_key = f"dl-{letter.run_id}-{letter.attempt}"
+    workspace = db.get(Workspace, workspace_id)
+    principal = Principal(
+        subject="cli",
+        tenant_id=getattr(workspace, "tenant_key", "") or "",
+        workspace_id=workspace_id,
+        roles=("admin",),
+        auth_type="session",
+    )
+    try:
+        letter, run, idempotent = _dead_letter_replay_core(
+            db, principal, run_id, idempotency_key, request=None
+        )
+    except DomainError as exc:
+        print(json.dumps({"ok": False, "run_id": run_id, "error_code": exc.code, "error": exc.message}, ensure_ascii=False))
+        return 2
+    print(json.dumps({
+        "ok": True,
+        "run_id": run_id,
+        "idempotency_key": idempotency_key,
+        "idempotent_hit": idempotent,
+        "dead_letter": _dead_letter_row(letter),
+        "replay_run": {
+            "run_id": run.run_id if run else None,
+            "status": run.status if run else None,
+            "attempt": run.attempt if run else None,
+            "retry_of_run_id": run.retry_of_run_id if run else None,
+            "total": run.total if run else None,
+            "inserted": run.inserted if run else None,
+            "no_op": run.no_op if run else None,
+            "conflict": run.conflict if run else None,
+            "error_code": run.error_code if run else None,
+        },
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _dead_letter_ignore(db, args: list[str]) -> int:
+    """死信归档（终态 ignored，reason 必填）。"""
+    from sqlalchemy import select
+    from app.config import get_settings
+    from app.db import ExternalSyncRun, Workspace
+    from app.dead_letters import DeadLetterRejected, archive_zombie_run, get_dead_letter, mark_ignored
+    from app.identity import Principal
+
+    run_id = args[1] if len(args) > 1 else None
+    if not run_id:
+        print(json.dumps({"ok": False, "error_code": "INVALID_DEAD_LETTER_INPUT", "error": "缺少 run_id"}, ensure_ascii=False))
+        return 2
+    try:
+        workspace_id = _resolve_cli_workspace(db, args)
+    except (ValueError, OverflowError) as exc:
+        print(json.dumps({"ok": False, "error_code": "WORKSPACE_RESOLUTION_FAILED", "error": str(exc)}, ensure_ascii=False))
+        return 2
+    reason = _option(args, "--reason")
+    settings = get_settings()
+    letter = get_dead_letter(db, workspace_id=workspace_id, run_id=run_id)
+    workspace = db.get(Workspace, workspace_id)
+    principal = Principal(
+        subject="cli",
+        tenant_id=getattr(workspace, "tenant_key", "") or "",
+        workspace_id=workspace_id,
+        roles=("admin",),
+        auth_type="session",
+    )
+    try:
+        if letter is None:
+            # 僵尸 run 的归档出口（只读判定的唯一写出口，不改 run 状态）。
+            run = db.scalar(select(ExternalSyncRun).where(ExternalSyncRun.run_id == run_id, ExternalSyncRun.workspace_id == workspace_id))
+            if run is None:
+                print(json.dumps({"ok": False, "run_id": run_id, "error_code": "DEAD_LETTER_NOT_FOUND", "error": "死信不存在"}, ensure_ascii=False))
+                return 2
+            letter = archive_zombie_run(
+                db,
+                run,
+                reason=reason or "zombie-marked",
+                actor=principal.subject,
+                request_id=None,
+                max_attempts=settings.sync_compensation_max_attempts,
+            )
+        else:
+            if not reason:
+                print(json.dumps({"ok": False, "error_code": "IGNORE_REASON_REQUIRED", "error": "归档必须给 --reason"}, ensure_ascii=False))
+                return 2
+            mark_ignored(db, letter, reason=reason, actor=principal.subject, request_id=None)
+    except DeadLetterRejected as exc:
+        print(json.dumps({"ok": False, "run_id": run_id, "error_code": exc.code, "error": exc.message}, ensure_ascii=False))
+        return 2
+    print(json.dumps({
+        "ok": True,
+        "run_id": run_id,
+        "dead_letter": _dead_letter_row(letter),
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_status(args: list[str]) -> int:
     """打印运行时配置与数据库 / 向量库规模。"""
     from sqlalchemy import func, inspect, select
@@ -953,6 +1298,7 @@ COMMANDS = {
     "credential-ref": cmd_credential_ref,
     "retention": cmd_retention,
     "quality": cmd_quality,
+    "dead-letter": cmd_dead_letter,
 }
 
 
@@ -972,6 +1318,7 @@ COMMAND_HELP = {
     "credential-ref": "管理授权引用（list / add / remove；只存 env 键名与 8 位指纹，不收明文）",
     "retention": "读取 Shopify live 响应留存（list --run-id / get --run-id --request-id，仅本地只读）",
     "quality": "数据质量门禁（show <run_id> 读库内报告 / replay <run_id> 只读留存重算）",
+    "dead-letter": "死信补偿（list / show / replay --yes / ignore --reason；质量与僵尸只读视图）",
 }
 
 

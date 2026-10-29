@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.connectors import CanonicalEvent, InventorySnapshotRecord
+from app.dead_letters import register_dead_letter
 from app.db import (
     ExternalEventInbox,
     ExternalInventorySnapshot,
@@ -593,6 +594,14 @@ def finalize_resource_run(
     db.refresh(run)
     # P2-3：run finalize 成功路径之后挂质量门禁（观察态；失败/取消路径不跑，两列保持 NULL）。
     apply_quality_gate(db, run)
+    # P2-4：run 落定为失败时自动登记死信（幂等；同 run 至多一行）。
+    # 登记条件 = `run.status == "failed"` 或本次带错误终止（error is not None）：
+    # 后者覆盖既有护栏路径的语义——main.py 在 finalize **之后**才把护栏终止的 run
+    # 强制为 failed（预算耗尽 / 取消），只按 finalize 内的 status 判定会漏登记，
+    # 与任务书「预算耗尽天然落入」相悖。status == "partial" 且无 error 的 run
+    # 按任务书字面口径**不登记**（见交付说明偏差声明）。
+    if run.status == "failed" or error is not None:
+        register_dead_letter(db, run)
     return run
 
 

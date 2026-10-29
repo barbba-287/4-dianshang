@@ -147,6 +147,58 @@ class ExternalSyncRetryResponse(ExternalSyncRunResponse):
     pass
 
 
+# ---------------------------------------------------------------------------
+# P2-4 补偿机制：死信（只增不改既有 schema）
+# ---------------------------------------------------------------------------
+
+
+class ExternalSyncDeadLetterResponse(BaseModel):
+    """死信行（run 级失败的隔离带）。"""
+
+    id: int
+    workspace_id: int | None = None
+    run_id: str | None = None
+    platform: str | None = None
+    sync_type: str | None = None
+    source_mode: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    # auto / manual（登记时算死）。
+    retry_class: str
+    attempt: int = 1
+    # 退避门槛（auto 类写死，manual 类恒 NULL）。
+    next_replay_at: datetime | None = None
+    exhausted: bool = False
+    quality_status: str | None = None
+    # open / replayed / ignored。
+    status: str
+    replayed_run_id: str | None = None
+    actor: str | None = None
+    request_id: str | None = None
+    ignore_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExternalSyncDeadLetterListResponse(BaseModel):
+    count: int
+    items: list[ExternalSyncDeadLetterResponse] = Field(default_factory=list)
+
+
+class ExternalSyncDeadLetterIgnoreRequest(BaseModel):
+    """归档请求体：reason 必填（缺省 422）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ExternalSyncDeadLetterReplayResponse(BaseModel):
+    """重放结果：死信终态 + 新建的 run。"""
+
+    dead_letter: ExternalSyncDeadLetterResponse
+    run: ExternalSyncRunResponse
+
+
 class InventoryPolicyCreate(BaseModel):
     warehouse_id: int = Field(gt=0)
     sku_id: int = Field(gt=0)

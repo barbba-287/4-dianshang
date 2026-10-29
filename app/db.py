@@ -442,6 +442,56 @@ class ExternalSyncRun(Base):
     quality_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ExternalSyncDeadLetter(Base):
+    """P2-4 死信表：run 级失败的隔离带（人工重放入口）。
+
+    唯一约束 **(workspace_id, run_id)**：一个 run 至多一条死信——自动登记幂等
+    （先查后插 + 唯一约束兜底），重试链也不会产生重复死信行。
+    `run_id` 只做软引用（run 行永不删除，故不设外键）。
+    """
+
+    __tablename__ = "external_sync_dead_letters"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "run_id", name="uq_external_sync_dead_letter_workspace_run"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 来源快照（登记时定死，不随源 run 变化）。
+    platform: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sync_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    source_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 错误信息已截断 500 且抹掉凭据形态字符串（登记前过 sanitize_error_message）。
+    error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 重试类别：auto / manual（登记时按分类表算死）。
+    retry_class: Mapped[str] = mapped_column(String(16), default="manual", server_default="manual", nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    # 退避门槛（auto 类写死，manual 类恒 NULL）。
+    next_replay_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # exhausted 是 open 上的标记位（不是状态）：attempt ≥ 上限时为 True。
+    exhausted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    # 登记时源 run 的质量结论快照（上下文，不参与判定）。
+    quality_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 三态：open / replayed / ignored。
+    status: Mapped[str] = mapped_column(String(16), default="open", server_default="open", nullable=False)
+    # 重放产生的新 run（终态 replayed 时落库）。
+    replayed_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 操作归因：谁 replay / ignore（登记时先快照源 run 的归因，重放/归档时覆盖为操作者）。
+    actor: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # ignore 必填（API 校验 422）。
+    ignore_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+        server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+
+
 class ExternalCredentialRef(Base):
     """授权引用实体（P2-2）：只记"哪把钥匙"，不记钥匙本身。
 

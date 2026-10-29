@@ -507,7 +507,10 @@ def test_q1_migration_0021_up_and_down_restores_0020_shape(tmp_path):
         )).one()
     assert tuple(row) == (None, None)
 
-    downgrade = _run_alembic(["downgrade", "-1"], database_url=db_url)
+    # P2-4 连带（连带许可：钉死版本号目标行，断言语义零变化）：
+    # 仓库 head 已推进到 0022（死信表），`downgrade -1` 只回退一步（0022 → 0021），
+    # 0021 的两列仍在——这里把目标**钉死**为 0020（回到 0020 形态），断言语义与 P2-3 一致。
+    downgrade = _run_alembic(["downgrade", "0020_external_sync_attribution"], database_url=db_url)
     assert downgrade.returncode == 0, downgrade.stdout + downgrade.stderr
 
     after_down = _table_snapshot(eng, "external_sync_runs")
