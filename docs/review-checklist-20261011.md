@@ -1303,3 +1303,33 @@ R-38（授权引用未实体化）在本片关闭：`external_credential_refs` �
   （failed / cancelled 的 run 两列都保持 NULL）。
 - `truncated` 与 `missing` **不得互相冒充**：前者是"校验过但证据有缺口"（`warn`），
   后者是"根本没得校验"（`unknown`）。
+
+### 18.2 复核结论（复核方自跑，2026-10-29 15:1x，通过）
+
+**判定：通过，P2-3 收口。** 提交 `567fef7`（11 files, +1919/−9），工作区干净，
+交付说明 + 5 份分块说明落盘齐全。逐项核验：
+
+- **独立验证（复核方自跑）**：定向（P2-3 13 例 + P2-2 14 例 + alembic）→ **34 passed**；
+  **全量 420 passed / 0 failed（197.4s）** = 基线 407 + 新增 13（Q-1..Q-12 + Q-9b），
+  与交付一致。
+- **用户点名的四项亲验**：① Q-9 观察态——`quality failed` 的 run 仍 `succeeded`、
+  `error_code=None`、脏行照常入库、质量结论照常落库（拦截未发生=被测行为）；
+  ② Q-10 打桩——`monkeypatch.setattr(httpx.Client, "send", ...)`（**非 socket**）+
+  静态断言 `source_quality.py` 不 import httpx/requests/socket/urllib + **CLI 子进程
+  同样零网络**（`subprocess` 起 `quality replay` 后断言 ok）；③ Q-1——up 加两列
+  （可空、末尾追加）+ down 逐列还原 0020 形态 + 既有行两列 NULL 断言；
+  ④ 零 live grep——`source_quality.py`/`test_p2s3_quality.py` 对
+  `myshopify.com`/`shopify.com/admin`/`import requests`/`urllib` **零命中**。
+- **migration 链**：0021 的 `down_revision="0020_external_sync_attribution"`，唯一 head
+  （`alembic heads` 输出与交付一致）；未用 SQLite batch。
+- **挂接点唯一**：`finalize_resource_run` → `apply_quality_gate`，全仓唯一；失败/取消
+  路径不跑（Q-12 锁死两列保持 NULL）。
+- **六条偏差逐处判定**：D-1（动 P2-2 测试）=**必要连带**——S-1 `upgrade head` 钉死
+  `0020_external_sync_attribution`（R6-4 同款，断言语义零变化）、S-10 键集补
+  `quality_status`（schemas 只增一键的必然结果，注释留痕）；D-2 head 断言跟随（同款）；
+  D-3 第四状态 `unknown`（有 `unknown_reason` 字段显式支撑）；D-4 编号顺延
+  R-45/46/47（撞号纪律处理正确，§18.1 逐条对应）；D-5 unknown 时六维不评估
+  （evaluate 开头短路返回，无"unknown 却 findings>0"的自相矛盾读数）；
+  D-6 truncated/缺失分档口径与任务文件 T1 逐字一致。
+- **S-13/S-14 零改动**：P2-2 归因实现与测试断言未触碰（diff 面证实）。
+- **对 P2-4 的入口**：R-45 拦截语义评估是 P2-4 任务文件必答题（B3 同款条款）。
