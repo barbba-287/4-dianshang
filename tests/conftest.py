@@ -92,10 +92,17 @@ def _isolate_env(tmp_path, monkeypatch):
 def _clear_settings_cache():
     """每次测试前清缓存，让 env 在下一次 get_settings() 调用时生效。"""
     from app.config import get_settings
+    # rag_runtime 等从不被测试 reload 的模块持有首循环的 get_settings 死绑定
+    # （from-import 快照），上面的 clear 够不到它：旧循环的 settings（含旧
+    # VECTOR_STORE_PATH）会存活并让后继循环的向量库实例 _load() 旧持久化文件，
+    # 造成跨测试向量泄漏（P3-S3 复核实测：K9 的已发布向量泄入 rag no_evidence）。
+    from app.rag_runtime import get_settings as rag_get_settings
 
     get_settings.cache_clear()
+    rag_get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+    rag_get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------

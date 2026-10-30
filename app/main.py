@@ -85,8 +85,14 @@ from app.schemas import (
     AssistantQueryResponse,
     CrawlJobDetailResponse,
     CrawlJobResponse,
+    DocumentDetailResponse,
+    DocumentListItem,
+    DocumentListResponse,
+    DocumentPublishResponse,
+    DocumentUnpublishResponse,
     DocumentUploadResponse,
     DocumentVersionResponse,
+    DocumentVersionSummary,
     PriceHistoryResponse,
     ProductPage,
     ProductResponse,
@@ -186,6 +192,16 @@ from app.schemas import (
 from app.storage import StorageError, enforce_size_limit, save_upload
 from app.versioning import content_sha256
 from app.upload_security import validate_content, safe_storage_path
+from app.knowledge_admin import (
+    document_detail,
+    get_document,
+    ingest_document,
+    ingest_version_into_document,
+    list_documents,
+    publish_version,
+    require_publish_rights,
+    unpublish_version,
+)
 from app.employee_auth import (
     ROLE_ADMIN,
     ROLE_CUSTOMER_SERVICE,
@@ -802,9 +818,13 @@ async def upload_document(
     db: Session = Depends(get_db)
 ) -> DocumentUploadResponse:
     principal = require_principal(request, permission="knowledge.write")
-    """上传 PDF / DOCX；按 sha256 自动复用 / 新建 document + version。
+    """上传 PDF / DOCX；按 D1 谱系规则复用 / 新建 document + version。
 
     立即返回任务 ID，实际解析在后台 executor 中执行。
+
+    谱系规则（D1）：sha 命中 → 复用该 document；否则 filename 命中 → 该 document
+    下开新版本；都不命中 → 新建 document。物理存盘仍是内容寻址
+    （`save_upload`），用户输入不进存储路径。
     """
     if file is None:
         raise DomainError(code="NO_FILE", message="未提供文件", http_status=400)
@@ -837,62 +857,14 @@ async def upload_document(
             http_status=status_code,
         ) from exc
 
-    sha = content_sha256(content)
-    ext = source_type
-
-    document, _doc_created = upsert_document(
+    document, version, job, _version_created = ingest_document(
         db,
-        workspace_id=principal.workspace_id,
+        principal=principal,
         source_type=source_type,
-        title=title or file.filename or sha,
-        filename=file.filename or sha,
-        sha256_hex=sha,
-    )
-    storage_uri = save_upload(
-        source_type=source_type,
-        sha256_hex=sha,
-        ext=ext,
+        title=title,
+        filename=file.filename,
         content=content,
     )
-    version, version_created = upsert_document_version(
-        db,
-        document=document,
-        sha256_hex=sha,
-        size_bytes=len(content),
-        storage_uri=storage_uri,
-        workspace_id=principal.workspace_id,
-    )
-    db.commit()
-
-    if version_created:
-        job = submit_document_import(
-            db,
-            document_id=document.id,
-            version_id=version.id,
-            storage_uri=storage_uri,
-            filename=document.filename,
-            source_type=source_type,
-            workspace_id=principal.workspace_id,
-        )
-    else:
-        # 重复上传相同内容：复用现有 version，不重复入队
-        from app.db import CrawlJob
-
-        job = CrawlJob(
-            workspace_id=principal.workspace_id,
-            source=source_type,
-            keyword=document.filename[:255],
-            type="document_import",
-            status="succeeded",
-            cursor=json.dumps(
-                {"document_id": document.id, "version_id": version.id, "storage_uri": storage_uri},
-                ensure_ascii=False,
-            ),
-            run_id=version.id,
-        )
-        db.add(job)
-        db.commit()
-        db.refresh(job)
 
     return DocumentUploadResponse(
         document_id=document.id,
@@ -900,6 +872,187 @@ async def upload_document(
         job_id=job.id,
         version_no=version.version_no,
         status=version.status,
+    )
+
+
+@app.get(
+    "/api/documents",
+    response_model=DocumentListResponse,
+)
+def list_documents_api(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    filename: str | None = Query(default=None, max_length=255),
+    status: str | None = Query(default=None, max_length=32),
+    published: bool | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> DocumentListResponse:
+    """知识文档分页列表（含发布位与 superseded 派生标记）。"""
+    principal = require_principal(request, permission="knowledge.read")
+    result = list_documents(
+        db,
+        workspace_id=principal.workspace_id,
+        filename=filename,
+        status=status,
+        published=published,
+        page=page,
+        page_size=page_size,
+    )
+    return DocumentListResponse(
+        items=[DocumentListItem(**row) for row in result["items"]],
+        total=result["total"],
+        page=result["page"],
+        page_size=result["page_size"],
+    )
+
+
+@app.get(
+    "/api/documents/{document_id}",
+    response_model=DocumentDetailResponse,
+)
+def get_document_api(
+    document_id: int, request: Request, db: Session = Depends(get_db)
+) -> DocumentDetailResponse:
+    """单个文档详情：谱系信息 + 版本链（superseded 为响应层派生标记）。"""
+    principal = require_principal(request, permission="knowledge.read")
+    detail = document_detail(db, document_id=document_id, workspace_id=principal.workspace_id)
+    return DocumentDetailResponse(
+        id=detail["id"],
+        filename=detail["filename"],
+        title=detail["title"],
+        source_type=detail["source_type"],
+        sha256=detail["sha256"],
+        version_count=detail["version_count"],
+        published_version_no=detail["published_version_no"],
+        published_version_id=detail["published_version_id"],
+        versions=[DocumentVersionSummary(**row) for row in detail["versions"]],
+        created_at=detail["created_at"],
+    )
+
+
+@app.post(
+    "/api/documents/{document_id}/versions",
+    response_model=DocumentUploadResponse,
+    status_code=202,
+)
+async def upload_document_version(
+    document_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    title: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+) -> DocumentUploadResponse:
+    """往指定谱系下加一个新版本（文件名必须与谱系一致，否则 409）。"""
+    principal = require_principal(request, permission="knowledge.write")
+    document = get_document(
+        db, document_id=document_id, workspace_id=principal.workspace_id
+    )
+    if file is None:
+        raise DomainError(code="NO_FILE", message="未提供文件", http_status=400)
+
+    try:
+        source_type = detect_source_type(file.filename, file.content_type)
+    except ParserError as exc:
+        raise DomainError(
+            code=exc.code,
+            message=exc.message,
+            http_status=415,
+        ) from exc
+
+    content = await file.read()
+    try:
+        enforce_size_limit(len(content))
+        source_type = validate_content(
+            content,
+            source_type=source_type,
+            filename=file.filename,
+            content_type=file.content_type,
+            max_zip_members=get_settings().upload_max_zip_members,
+            max_zip_uncompressed_bytes=get_settings().upload_max_zip_uncompressed_bytes,
+        )
+    except (StorageError, ParserError) as exc:
+        status_code = 413 if getattr(exc, "code", "") == "FILE_TOO_LARGE" else 415
+        raise DomainError(
+            code=exc.code,
+            message=exc.message,
+            http_status=status_code,
+        ) from exc
+
+    _document, version, job, _version_created = ingest_version_into_document(
+        db,
+        principal=principal,
+        document=document,
+        source_type=source_type,
+        title=title,
+        filename=file.filename,
+        content=content,
+    )
+    return DocumentUploadResponse(
+        document_id=document.id,
+        version_id=version.id,
+        job_id=job.id,
+        version_no=version.version_no,
+        status=version.status,
+    )
+
+
+@app.post(
+    "/api/documents/{document_id}/versions/{version_id}/publish",
+    response_model=DocumentPublishResponse,
+)
+def publish_document_version_api(
+    document_id: int,
+    version_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> DocumentPublishResponse:
+    """发布一个版本：换发布位 + 同步删旧向量 + 入队索引。"""
+    principal = require_principal(request, permission="knowledge.write")
+    require_publish_rights(principal)
+    result = publish_version(
+        db,
+        principal=principal,
+        document_id=document_id,
+        version_id=version_id,
+    )
+    version = result["version"]
+    return DocumentPublishResponse(
+        document_id=result["document"].id,
+        version_id=version.id,
+        version_no=version.version_no,
+        published_at=version.published_at,
+        indexing_queued=True,
+        superseded_version_ids=result["superseded_version_ids"],
+    )
+
+
+@app.post(
+    "/api/documents/{document_id}/versions/{version_id}/unpublish",
+    response_model=DocumentUnpublishResponse,
+)
+def unpublish_document_version_api(
+    document_id: int,
+    version_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> DocumentUnpublishResponse:
+    """撤回一个已发布版本：清发布位 + 同步删除向量。"""
+    principal = require_principal(request, permission="knowledge.write")
+    require_publish_rights(principal)
+    result = unpublish_version(
+        db,
+        principal=principal,
+        document_id=document_id,
+        version_id=version_id,
+    )
+    version = result["version"]
+    return DocumentUnpublishResponse(
+        document_id=result["document"].id,
+        version_id=version.id,
+        version_no=version.version_no,
+        published_at=version.published_at,
+        removed_vectors=result["removed_vectors"],
     )
 
 

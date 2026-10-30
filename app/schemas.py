@@ -367,6 +367,78 @@ class DocumentVersionResponse(BaseModel):
     chunk_count: int | None = None
 
 
+class DocumentVersionSummary(BaseModel):
+    """版本摘要（含 D2 派生的 `superseded` 标记，不落库）。"""
+
+    id: int
+    document_id: int
+    version_no: int
+    sha256: str
+    size_bytes: int
+    status: str
+    created_at: datetime
+    published_at: datetime | None
+    superseded: bool
+    chunk_count: int = 0
+
+
+class DocumentListItem(BaseModel):
+    """文档列表行：谱系摘要 + 最新版本状态 + 发布位。"""
+
+    id: int
+    filename: str
+    title: str
+    source_type: str
+    sha256: str
+    version_count: int
+    latest_version_no: int | None = None
+    latest_version_id: int | None = None
+    latest_status: str | None = None
+    published_version_no: int | None = None
+    published_version_id: int | None = None
+    superseded_version_nos: list[int] = Field(default_factory=list)
+    created_at: datetime
+
+
+class DocumentListResponse(BaseModel):
+    items: list[DocumentListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class DocumentDetailResponse(BaseModel):
+    """文档详情：谱系信息 + 版本链（含 superseded 派生标记）。"""
+
+    id: int
+    filename: str
+    title: str
+    source_type: str
+    sha256: str
+    version_count: int
+    published_version_no: int | None = None
+    published_version_id: int | None = None
+    versions: list[DocumentVersionSummary]
+    created_at: datetime
+
+
+class DocumentPublishResponse(BaseModel):
+    document_id: int
+    version_id: int
+    version_no: int
+    published_at: datetime
+    indexing_queued: bool
+    superseded_version_ids: list[int] = Field(default_factory=list)
+
+
+class DocumentUnpublishResponse(BaseModel):
+    document_id: int
+    version_id: int
+    version_no: int
+    published_at: datetime | None = None
+    removed_vectors: int
+
+
 class RagCitation(BaseModel):
     chunk_id: int
     document_id: int

@@ -1577,3 +1577,52 @@ G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 
   PR 查不到时 no 落 None 的 fail-soft——写入闸门仍 fail-closed）均不构成偏离。
 - **基线新口径：全量 463 passed / 0 failed（P3-S2 后）**。
 - **对 S3 的入口**：零新表 + 7 API 待建（P3 计划 §S3）；本地待推 9 笔（P3-S1 5 笔 + S2 草案/定稿/实施/复核 4 笔），按阶段策略 **P3 三片全清后一起推**。
+
+## 22. P3-S3 知识文档入库（任务文件 v1.1 `dev_task.p3s3-knowledge-doc.md`）— **台账占位，待复核**
+
+> 状态：**实施完成，验收未完成**。实施会话的 Bash 权限层禁止执行 `python`（pytest 一律
+> "This command requires approval"），**未取得原始测试输出** → 按交接契约 §4.3 **H1 未通过**，
+> 本片**不得标记"已完成"**，只能标记"待验收"。复核方须自行跑定向 + 全量并回填本节结论。
+>
+> **提交状态：未提交。** 同一权限层连 `git add` / `git commit` 也一律
+> "This command requires approval"（`git status` / `git diff` / `git log` 只读可用）。
+> 因此本片改动**留在工作区未提交**，提交号待补；交付说明已写 `.testtmp/delivery.p3s3.md`
+>（含提交号占位、偏差清单、`storage.py` 路径构造原文、`customer_service.html` 改动片段、
+> 手工冒烟路径）。
+
+### 22.1 台账（实施方自报，未经复核方独立复现）
+
+- **改动文件**（8 个）：`app/knowledge_admin.py`（新建，service 层）、`app/main.py`（5 新端点 +
+  上传端点改调 service）、`app/background.py`（D4 闸 + `document_unindex` + actor 归因）、
+  `app/rag/vector_store.py`（D5 模块级锁）、`app/schemas.py`（5 个新响应模型）、
+  `app/templates/customer_service.html`（D8 知识管理区块）、`tests/test_p3s3_knowledge_admin.py`
+  （新建，K-1..K-12）、`docs/review-checklist-20261011.md`（本节）。
+- **清单外改动 1 个（需复核方裁定）**：`tests/test_api_rag.py` 的 **2 条用例**（`test_rag_query_returns_answer_and_citations`、
+  `test_rag_query_docx_pipeline`）各插入一段"publish → wait"再检索。原因：D4 闸把"未发布不可检索"
+  变成不变量，与这两条用例断言的旧语义（上传即可检索）**直接冲突**，任务文件 §1.4 已登记该冲突
+  （"K-7 场景现状必然失败，由 D3/D4 修复"）。两条用例**未删除、未改名、未减断言**，只补了发布步。
+- **零新表 / 零 migration / `app/db.py` 零改动**；`rag/retriever.py`、`rag/answerer.py`、
+  `rag/embedder.py`、`rag/__init__.py`、`rag_runtime.py`、`POST /api/rag/query` 端点、
+  `app/importers/`、`app/upload_security.py`、`tests/test_api_documents.py`（7 条）**零改动**。
+- **待复核方核验的三个判断**：
+  1. **发布角色闸落点**：`require_principal(roles=...)` 对 demo/api_key 主体一律 403，
+     故角色闸写在 `knowledge_admin.require_publish_rights`（任务文件 Q-S3-2"写死进 service 权限参数"）；
+     员工会话严格执行 `(ADMIN, OPERATIONS)`，demo/api_key 作为服务通道放行——**这是实施方的判断，
+     需复核方确认是否接受**。
+  2. **`test_api_rag.py` 2 条用例改动**是否可接受（H4 口径）。
+  3. **D4 闸的写后复核**：`_execute_document_index` 在 `store.add` 之后再次重查 `published_at`，
+     若期间被撤下/降级则立刻回删向量——比任务文件要求多一道（收紧，非放宽），需确认不越权。
+
+### 22.2 复核方待办
+
+- [ ] 定向：`env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 /d/python/python/python.exe -m pytest -q -p no:cacheprovider tests/test_p3s3_knowledge_admin.py`（预期 12 passed）
+- [ ] 全量：同命令去掉路径（预期 **475 passed / 0 failed** = 463 基线 + 12；注意 463 基线里
+      `tests/test_api_rag.py` 2 条已被本片改写，见 22.1）
+- [ ] `alembic heads` 实跑 → 唯一 head，**零新 migration**
+- [ ] `git diff --stat` 核范围；禁区四文件零 diff
+- [ ] 手工冒烟：登录 → 客服页"知识管理"区块 → 上传/列表/发布/撤回四操作
+- [ ] 代为提交（前缀 `p3s3:`，**不 push**）：`git add app/knowledge_admin.py app/main.py
+      app/background.py app/rag/vector_store.py app/schemas.py
+      app/templates/customer_service.html tests/test_p3s3_knowledge_admin.py
+      tests/test_api_rag.py docs/review-checklist-20261011.md` + `git commit -m "p3s3: …"`
+      → 回填提交号到本节与 `.testtmp/delivery.p3s3.md` §1

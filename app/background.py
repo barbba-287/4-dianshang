@@ -243,18 +243,26 @@ def submit_document_import(
     source_type: str,
     max_retries: int | None = None,
     workspace_id: int | None = None,
+    actor: str | None = None,
 ) -> CrawlJob:
-    """把文档导入任务入队。"""
+    """把文档导入任务入队。
+
+    `actor` 是操作者主体（任务文件 D6）：写入 `CrawlJob.payload_json["actor"]`，
+    供审计归因用；既有列，不新增字段。
+    """
+    payload = {
+        "document_id": document_id,
+        "version_id": version_id,
+        "storage_uri": storage_uri,
+    }
+    if actor:
+        payload["actor"] = actor
     job = enqueue_job(
         db,
         type_="document_import",
         source=source_type,
         keyword=filename[:255],
-        payload={
-            "document_id": document_id,
-            "version_id": version_id,
-            "storage_uri": storage_uri,
-        },
+        payload=payload,
         max_retries=max_retries,
         workspace_id=workspace_id,
     )
@@ -318,6 +326,8 @@ def _run_one_job(job_id: int, worker_id: str) -> None:
                 _execute_document_import(db, job)
             elif type_ == "document_index":
                 _execute_document_index(db, job)
+            elif type_ == "document_unindex":
+                _execute_document_unindex(db, job)
             elif type_ == "content_generate":
                 _execute_content_generation(db, job)
             elif type_ == "content_export":
@@ -534,11 +544,13 @@ def _execute_document_import(db: Session, job: CrawlJob) -> None:
     job.cursor = str(len(chunks))
 
     # 入队 S3 索引任务
+    # 归因透传：上传操作者沿解析链传到索引任务（D6）。
     submit_chunk_index(
         db,
         document_id=document_id,
         version_id=version_id,
         workspace_id=job.workspace_id,
+        actor=payload.get("actor"),
     )
 
 
@@ -549,23 +561,95 @@ def submit_chunk_index(
     version_id: int,
     max_retries: int | None = None,
     workspace_id: int | None = None,
+    actor: str | None = None,
 ) -> CrawlJob:
-    """S3 索引任务入队：把 version 下所有 chunks embed 到向量库。"""
+    """S3 索引任务入队：把 version 下所有 chunks embed 到向量库。
+
+    `actor` 写入 `CrawlJob.payload_json["actor"]`（D6 归因）。
+    """
+    payload = {"document_id": document_id, "version_id": version_id}
+    if actor:
+        payload["actor"] = actor
     job = enqueue_job(
         db,
         type_="document_index",
         source="index",
         keyword=f"v{version_id}",
         workspace_id=workspace_id,
-        payload={"document_id": document_id, "version_id": version_id},
+        payload=payload,
         max_retries=max_retries,
     )
     _submit_future(job.id)
     return job
 
 
+def submit_document_unindex(
+    db: Session,
+    *,
+    document_id: int,
+    version_id: int,
+    max_retries: int | None = None,
+    workspace_id: int | None = None,
+    actor: str | None = None,
+) -> CrawlJob:
+    """向量补偿通道：删除某个 version 已写入向量库的向量记录。
+
+    主路径是**同步**删除（发布换版 / 撤回），本任务类型只在同步删除失败时
+    作为补偿入队（任务文件 D3）。
+    """
+    payload = {"document_id": document_id, "version_id": version_id}
+    if actor:
+        payload["actor"] = actor
+    job = enqueue_job(
+        db,
+        type_="document_unindex",
+        source="index",
+        keyword=f"v{version_id}",
+        workspace_id=workspace_id,
+        payload=payload,
+        max_retries=max_retries,
+    )
+    _submit_future(job.id)
+    return job
+
+
+def _execute_document_unindex(db: Session, job: CrawlJob) -> None:
+    """向量补偿任务：按 version_id 删除向量记录，并把删除条数写进 cursor 留痕。"""
+    from app.rag_runtime import get_vector_store
+
+    payload = _decode_job_payload(job)
+    version_id = int(payload["version_id"])
+    removed = get_vector_store().delete_by_version(version_id)
+    job.cursor = str(removed)
+
+
+def _published_at_now(db: Session, *, version_id: int, workspace_id: int | None):
+    """**执行时**重查 DB 的 `published_at`（D4 闸的真值来源）。
+
+    只取列值（不取实体），避免 identity map 返回陈旧属性。
+    `claim_job` 已提交抢占事务，本查询开的是新事务/新快照，
+    因此读到的是"执行时刻"的已提交状态（SQLite legacy 模式 SELECT 逐条自读；
+    MySQL REPEATABLE READ 下新事务取新快照）。
+    """
+    from app.db import DocumentVersion
+
+    return db.scalar(
+        select(DocumentVersion.published_at).where(
+            DocumentVersion.id == version_id,
+            DocumentVersion.workspace_id == workspace_id,
+        )
+    )
+
+
 def _execute_document_index(db: Session, job: CrawlJob) -> None:
-    """S3 索引任务：embed chunks 并追加到向量库。"""
+    """S3 索引任务：embed chunks 并追加到向量库。
+
+    **D4 发布闸**：向量库中只允许存在"已发布"版本的 chunk。闸在**执行时**
+    重查 DB 的 `published_at`（不是入队时快照），因此：
+    - 未发布版本 → 跳过索引（cursor="0"），不污染检索池；
+    - 入队后才发布 → 闸通过，正常索引；
+    - 入队后被撤下/降级 → 闸拦截，跳过索引。
+    """
     from app.db import DocumentChunk, DocumentVersion, Product
     from app.rag_runtime import get_embedder, get_vector_store
     from app.rag import VectorRecord
@@ -582,6 +666,11 @@ def _execute_document_index(db: Session, job: CrawlJob) -> None:
     )
     if version is None:
         raise FileNotFoundError(f"document_version {version_id} 不存在")
+
+    # D4 闸（执行时重查 DB）：未发布 → 不写向量。
+    if _published_at_now(db, version_id=version_id, workspace_id=job.workspace_id) is None:
+        job.cursor = "0"
+        return
 
     chunks = db.scalars(
         select(DocumentChunk)
@@ -600,6 +689,11 @@ def _execute_document_index(db: Session, job: CrawlJob) -> None:
 
     # 删除旧索引（重新索引）
     store.delete_by_version(version_id)
+
+    # 写入前复核：取 chunk/embedding 期间可能发生撤下或换版降级。
+    if _published_at_now(db, version_id=version_id, workspace_id=job.workspace_id) is None:
+        job.cursor = "0"
+        return
 
     records = []
     for chunk in chunks:
@@ -625,6 +719,13 @@ def _execute_document_index(db: Session, job: CrawlJob) -> None:
             )
         )
     store.add(records)
+
+    # 写后复核：写入期间若被撤下/降级，立即清掉刚写入的向量，
+    # 杜绝"旧知识仍在检索池"的知识污染窗口。
+    if _published_at_now(db, version_id=version_id, workspace_id=job.workspace_id) is None:
+        store.delete_by_version(version_id)
+        job.cursor = "0"
+        return
     job.cursor = str(len(records))
 
 

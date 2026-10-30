@@ -85,6 +85,14 @@ def test_rag_query_returns_answer_and_citations(client):
     ).json()
     wait_for_jobs(timeout=10)
 
+    # P3-S3（D4 发布闸）：只有"已发布"版本才进向量库，未发布不参与检索。
+    # 因此检索链路必须先 publish，再等索引 job 落库。
+    publish = client.post(
+        f"/api/documents/{upload['document_id']}/versions/{upload['version_id']}/publish"
+    )
+    assert publish.status_code == 200, publish.text
+    wait_for_jobs(timeout=10)
+
     response = client.post(
         "/api/rag/query",
         json={"query": "green tea"},
@@ -99,6 +107,12 @@ def test_rag_query_returns_answer_and_citations(client):
 
 
 def test_rag_query_no_evidence_returns_no_answer(client):
+    # 隔离加固：本用例断言"空池无命中"，对任何前序测试文件的向量残留敏感。
+    # 先 drain 遗留后台 job（防跨测试边界的 worker 线程写入），再清单例确保池空。
+    from app.background import reset_executor as _re
+    from app.rag_runtime import reset_instances as _ri
+    _re()
+    _ri()
     response = client.post(
         "/api/rag/query",
         json={"query": "completely unrelated outer space coffee"},
@@ -123,6 +137,13 @@ def test_rag_query_docx_pipeline(client):
         },
         data={"title": "After-sales"},
     ).json()
+    wait_for_jobs(timeout=10)
+
+    # P3-S3（D4 发布闸）：先 publish 再等索引 job 落库，未发布版本不参与检索。
+    publish = client.post(
+        f"/api/documents/{upload['document_id']}/versions/{upload['version_id']}/publish"
+    )
+    assert publish.status_code == 200, publish.text
     wait_for_jobs(timeout=10)
 
     response = client.post(
