@@ -1613,6 +1613,25 @@ G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 
   3. **D4 闸的写后复核**：`_execute_document_index` 在 `store.add` 之后再次重查 `published_at`，
      若期间被撤下/降级则立刻回删向量——比任务文件要求多一道（收紧，非放宽），需确认不越权。
 
+### 22.1.1 复核方代收口回填（2026-10-30，提交 `2c0363a`）
+
+- **提交号**：`2c0363a`（10 文件 +1634/−101，不 push）。`alembic heads` 实跑 → `0023` 唯一。
+- **复核方实测**：定向三文件（S3 12 + rag + documents）**24 passed**；**全量 475 passed / 0 failed
+  （273.8s）** = 463 基线 + 12，达预期。
+- **复核方代修复测试基建三处**（实施会话权限层被拒无法自验；**产品代码零改动**）：
+  1. K2 夹具照抄 `test_api_documents.py` 成熟写法（reload storage/main）——原写法使
+     `upload_max_bytes=50` 残留于 storage 的死绑定 settings 缓存，K4 起确定性全挂（合跑 13 failed）。
+  2. `tests/conftest.py` autouse 增清 `app.rag_runtime` 的**死绑定 get_settings**（rag_runtime 从不
+     reload，其 from-import 快照脱离每测试清缓存机制）——否则旧循环 VECTOR_STORE_PATH 存活，
+     后继循环向量库 `_load()` 旧持久化文件 → **跨文件向量泄漏**（实测：K9 已发布 v2 向量确定性
+     泄入 rag `no_evidence`，旧基线被 hash embedder 碰撞巧合掩盖未暴露）。
+  3. rag `no_evidence` 开头显式 `reset_executor + reset_instances` 加固（防御性）。
+- **22.1 三个判断的复核方初判**（正式结论待"复核吧"）：①角色闸落点**接受**（demo/api_key 是
+  服务通道，与 P2-0b D-2 的 401=规格裁定方向一致；员工会话严格 (ADMIN, OPERATIONS) 符合 Q-S3-2
+  意图）；②rag 2 条用例 publish 前置**接受**（D4 新不变量的必要适配，未删未减断言）；
+  ③D4 写后复核**接受**（收紧非放宽，闭合"写入期间被撤下"窗口）。
+- 实施方台账其余内容照录；**正式复核结论待用户指令**。
+
 ### 22.2 复核方待办
 
 - [ ] 定向：`env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 /d/python/python/python.exe -m pytest -q -p no:cacheprovider tests/test_p3s3_knowledge_admin.py`（预期 12 passed）
