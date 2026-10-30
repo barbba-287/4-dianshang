@@ -9,7 +9,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, create_engine, inspect, text
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.config import get_settings
@@ -320,6 +320,8 @@ class InboundOrder(Base):
     __tablename__ = "inbound_orders"
     __table_args__ = (
         UniqueConstraint("workspace_id", "reference_no", name="uq_inbound_workspace_reference_no"),
+        # P3-S1：来源采购单唯一（用唯一索引而非约束，SQLite 可干净 DROP INDEX 回退）。
+        Index("uq_inbound_order_purchase_request", "workspace_id", "purchase_request_id", unique=True),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -341,6 +343,9 @@ class InboundOrder(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+    # P3-S1：来源采购单（软引用，不设外键），一采购单至多一张入库单。
+    # 追加在末尾以与 migration 0023 的物理列顺序一致。
+    purchase_request_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class InboundLine(Base):
@@ -923,6 +928,16 @@ class PurchaseRequest(Base):
     payload_hash: Mapped[str] = mapped_column(String(72))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # P3-S1 审批字段（6 审批列 + 1 血缘列），全部可空、无 server_default、无回填。
+    # 追加在末尾以与 migration 0023 的物理列顺序一致（迁移同样按此顺序 add_column）。
+    approver_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approver_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancelled_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Q2 血缘列：软引用不 FK，不参与状态机/幂等/级联。
+    supersedes_request_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class PurchaseRequestAction(Base):

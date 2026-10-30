@@ -105,8 +105,9 @@ def test_alembic_current_shows_head(tmp_path):
     # 该断言必须跟随仓库当前的唯一 head（R6 新增 0019_external_sync_run_cursor 后更新；
     # P2-2 新增 0020_external_sync_attribution 后再次更新；
     # P2-3 新增 0021_external_sync_quality 后再次更新；
-    # P2-4 新增 0022_external_sync_dead_letters 后再次更新）。
-    assert "0022_external_sync_dead_letters" in current.stdout
+    # P2-4 新增 0022_external_sync_dead_letters 后再次更新；
+    # P3-S1 新增 0023_purchase_approval 后再次更新）。
+    assert "0023_purchase_approval" in current.stdout
     assert "head" in current.stdout
 
 

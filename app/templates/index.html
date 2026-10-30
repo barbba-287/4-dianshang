@@ -310,6 +310,41 @@
       message.textContent = `共 ${data.total} 件商品`;
     }
 
+    // P3-S1：采购单状态标签（仅本区块使用，不改共享 statusLabel）。
+    function purchaseStatusLabel(value) {
+      const labels = {
+        draft: '草稿，待提交审批',
+        submitted: '已提交，待审批',
+        approved: '审批通过',
+        rejected: '已驳回',
+        cancelled: '已撤回'
+      };
+      return labels[value] || statusLabel(value);
+    }
+
+    // P3-S1：按采购单状态渲染决策按钮（不做前端权限预判，403 由 API 兜底）。
+    function purchaseRequestActions(request) {
+      if (!request) return '';
+      const id = escapeHtml(request.id);
+      const version = escapeHtml(request.version);
+      if (request.status === 'draft') {
+        return `<button data-purchase-action="submit" data-id="${id}" data-version="${version}">提交人工处理</button> <button data-purchase-action="cancel" data-id="${id}" data-version="${version}">撤回</button>`;
+      }
+      if (request.status === 'submitted') {
+        return `<button data-purchase-action="approve" data-id="${id}" data-version="${version}">通过</button> <button data-purchase-action="reject" data-id="${id}" data-version="${version}">驳回</button> <button data-purchase-action="cancel" data-id="${id}" data-version="${version}">撤回</button>`;
+      }
+      if (request.status === 'approved') {
+        return `<button data-purchase-action="create-inbound" data-id="${id}">生成入库单</button> <button data-purchase-action="cancel" data-id="${id}" data-version="${version}">撤回</button>`;
+      }
+      if (request.status === 'rejected') {
+        return `<span class="muted">已驳回${request.reject_reason ? `：${escapeHtml(request.reject_reason)}` : ''}；重办请走新建申请（既有入口）</span>`;
+      }
+      if (request.status === 'cancelled') {
+        return '<span class="muted">已撤回</span>';
+      }
+      return `<span class="muted">已提交，待人工处理</span>`;
+    }
+
     async function loadPurchaseWorkflow() {
       setBusy(refreshPurchasesButton, true);
       setMessage(purchaseMessage, '正在刷新补货建议与采购申请…');
@@ -326,14 +361,14 @@
         const rows = [];
         suggestionById.forEach(item => {
           const request = requestBySuggestion.get(item.id);
-          const state = request ? statusLabel(request.status) : '未创建草稿';
-          const action = request ? (request.status === 'draft' ? `<button data-purchase-action="submit" data-id="${request.id}" data-version="${request.version}">提交人工处理</button>` : '已提交，待人工处理') : `<button data-purchase-action="draft" data-id="${item.id}">生成草稿</button>`;
+          const state = request ? purchaseStatusLabel(request.status) : '未创建草稿';
+          const action = request ? purchaseRequestActions(request) : `<button data-purchase-action="draft" data-id="${item.id}">生成草稿</button>`;
           rows.push(`<tr><td>#${escapeHtml(item.id)}<br><span class="muted">${escapeHtml(dianshangLabel(item.data_completeness, DianShangLabels.completeness, '未知完整度'))} / ${escapeHtml(dianshangLabel(item.reason, DianShangLabels.reason, '未知原因'))}</span></td><td>仓库 #${escapeHtml(item.warehouse_id)} / SKU #${escapeHtml(item.sku_id)}</td><td>${escapeHtml(item.decision_qty ?? item.suggested_qty ?? '数据不足')}</td><td>${escapeHtml(state)}</td><td>${action}</td></tr>`);
         });
         (requests.items || []).filter(request => !(request.lines || []).some(line => suggestionById.has(line.suggestion_id))).forEach(request => {
           const line = request.lines?.[0] || {};
-          const state = statusLabel(request.status);
-          rows.push(`<tr><td><strong>${escapeHtml(request.request_no || `采购申请 #${request.id}`)}</strong><br><span class="muted">采购申请</span></td><td>仓库 #${escapeHtml(request.warehouse_id)} / SKU #${escapeHtml(line.sku_id || '数据不足')}</td><td>${escapeHtml(line.requested_qty ?? '数据不足')}</td><td>${escapeHtml(state)}</td><td>${request.status === 'draft' ? `<button data-purchase-action="submit" data-id="${request.id}" data-version="${request.version}">提交人工处理</button>` : '已提交，待人工处理'}</td></tr>`);
+          const state = purchaseStatusLabel(request.status);
+          rows.push(`<tr><td><strong>${escapeHtml(request.request_no || `采购申请 #${request.id}`)}</strong><br><span class="muted">采购申请</span></td><td>仓库 #${escapeHtml(request.warehouse_id)} / SKU #${escapeHtml(line.sku_id || '数据不足')}</td><td>${escapeHtml(line.requested_qty ?? '数据不足')}</td><td>${escapeHtml(state)}</td><td>${purchaseRequestActions(request)}</td></tr>`);
         });
         purchaseItems.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="5" class="muted">暂无可处理的补货建议或采购申请</td></tr>';
         setMessage(purchaseMessage, `已刷新 ${rows.length} 条补货/采购记录`, 'success');
@@ -353,6 +388,26 @@
         } else if (action === 'submit') {
           await api(`/api/purchase-requests/${button.dataset.id}/submit`, {method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey('submit')}, body: JSON.stringify({expected_version: Number(button.dataset.version)})});
           setMessage(purchaseMessage, '已人工提交审批；不代表已采购或已入库。', 'success');
+        } else if (action === 'approve') {
+          await api(`/api/purchase-requests/${button.dataset.id}/approve`, {method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey('approve')}, body: JSON.stringify({expected_version: Number(button.dataset.version)})});
+          setMessage(purchaseMessage, '采购申请已审批通过；仍未入库，需另行生成入库单。', 'success');
+        } else if (action === 'reject') {
+          const reason = window.prompt('请输入驳回理由（必填）');
+          if (reason === null) { await loadPurchaseWorkflow(); return; }
+          if (!reason.trim()) { setMessage(purchaseMessage, '驳回理由不能为空。', 'error'); return; }
+          await api(`/api/purchase-requests/${button.dataset.id}/reject`, {method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey('reject')}, body: JSON.stringify({expected_version: Number(button.dataset.version), reason})});
+          setMessage(purchaseMessage, '采购申请已驳回；如需重办请新建申请。', 'success');
+        } else if (action === 'cancel') {
+          if (!window.confirm('确认撤回该采购申请？撤回后建议将回到可再次申请的状态。')) { await loadPurchaseWorkflow(); return; }
+          await api(`/api/purchase-requests/${button.dataset.id}/cancel`, {method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey('cancel')}, body: JSON.stringify({expected_version: Number(button.dataset.version)})});
+          setMessage(purchaseMessage, '采购申请已撤回。', 'success');
+        } else if (action === 'create-inbound') {
+          const created = await api(`/api/purchase-requests/${button.dataset.id}/inbound-orders`, jsonOptions({}));
+          setMessage(purchaseMessage, `已生成入库单 ${created.reference_no}（状态 ${created.status}）；库存数量需在仓库收货页确认后才变动。`, 'success');
+          const linked = await api(`/api/purchase-requests/${button.dataset.id}/inbound-order`);
+          if (linked && linked.inbound_order) {
+            setMessage(purchaseMessage, `已生成入库单 ${linked.inbound_order.reference_no}（状态 ${linked.inbound_order.status}）；库存数量需在仓库收货页确认后才变动。`, 'success');
+          }
         }
         await loadPurchaseWorkflow();
       } catch (error) { setMessage(purchaseMessage, `采购操作失败：${error.message || '网络错误'}`, 'error'); }

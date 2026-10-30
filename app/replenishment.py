@@ -434,6 +434,7 @@ def create_purchase_request_draft(
     note: str | None = None,
     supplier_ref: str | None = None,
     expected_arrival_date: date | None = None,
+    supersedes_request_id: int | None = None,
 ) -> PurchaseRequest:
     """Create an editable purchase draft without submitting or changing stock."""
     if not idempotency_key or len(idempotency_key) > 128:
@@ -479,6 +480,7 @@ def create_purchase_request_draft(
         request_no=f"PR-{uuid4().hex[:12].upper()}", status="draft", note=note,
         created_by=actor, idempotency_key=idempotency_key, payload_hash=payload_hash,
         supplier_ref=supplier_ref, expected_arrival_date=expected_arrival_date, version=1,
+        supersedes_request_id=supersedes_request_id,
     )
     db.add(request)
     db.flush()

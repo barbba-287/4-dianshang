@@ -132,6 +132,11 @@ from app.schemas import (
     PurchaseRequestDraftCreate,
     PurchaseRequestDraftUpdate,
     PurchaseRequestDraftSubmit,
+    PurchaseRequestApprove,
+    PurchaseRequestReject,
+    PurchaseRequestCancel,
+    PurchaseRequestInboundCreate,
+    PurchaseRequestInboundOrderResponse,
     PurchaseRequestResponse,
     PurchaseRequestLineResponse,
     PurchaseRequestPage,
@@ -2909,9 +2914,13 @@ def _replenishment_error(exc: ValueError) -> DomainError:
     code = str(exc)
     if str(exc) == "IDEMPOTENCY_KEY_REQUIRED":
         return DomainError(code=str(exc), message="必须提供 Idempotency-Key", http_status=422)
-    special = {"OPEN_SUGGESTION_EXISTS", "IDEMPOTENCY_KEY_REUSE", "SUGGESTION_VERSION_CONFLICT", "INVALID_SUGGESTION_STATE", "SUGGESTION_NOT_READY", "MIXED_WAREHOUSE", "SUGGESTION_ALREADY_SUBMITTED", "SUGGESTION_ALREADY_IN_PURCHASE_REQUEST", "INVALID_PURCHASE_REQUEST_STATE", "PURCHASE_REQUEST_VERSION_CONFLICT", "SUGGESTION_STALE"}
+    special = {"OPEN_SUGGESTION_EXISTS", "IDEMPOTENCY_KEY_REUSE", "SUGGESTION_VERSION_CONFLICT", "INVALID_SUGGESTION_STATE", "SUGGESTION_NOT_READY", "MIXED_WAREHOUSE", "SUGGESTION_ALREADY_SUBMITTED", "SUGGESTION_ALREADY_IN_PURCHASE_REQUEST", "INVALID_PURCHASE_REQUEST_STATE", "PURCHASE_REQUEST_VERSION_CONFLICT", "SUGGESTION_STALE", "SELF_APPROVAL_FORBIDDEN", "PURCHASE_REQUEST_ALREADY_INBOUND"}
     status = 404 if code.endswith("NOT_FOUND") else 409 if code in special else 422
     if code in {"INVALID_EVALUATION_WINDOW", "EVALUATION_WINDOW_BEFORE_SUGGESTION", "SUGGESTION_DATA_INCOMPLETE"}:
+        status = 422
+    if code == "PURCHASE_REQUEST_NOT_OWNER":
+        status = 403
+    if code == "REJECT_REASON_REQUIRED":
         status = 422
     return DomainError(code=code, message="补货决策操作失败", http_status=status)
 
@@ -2932,6 +2941,14 @@ def _purchase_request_response(db: Session, request_record):
         "idempotency_key": request_record.idempotency_key,
         "created_at": request_record.created_at, "updated_at": request_record.updated_at,
         "lines": [PurchaseRequestLineResponse.model_validate(line) for line in lines],
+        # P3-S1：追加 7 键（既有 16 键逐字节不变）。
+        "approver_id": request_record.approver_id,
+        "approver_user_id": request_record.approver_user_id,
+        "decided_at": request_record.decided_at,
+        "reject_reason": request_record.reject_reason,
+        "cancelled_by": request_record.cancelled_by,
+        "cancelled_at": request_record.cancelled_at,
+        "supersedes_request_id": request_record.supersedes_request_id,
     })
 
 
@@ -3125,9 +3142,19 @@ def create_purchase_request_draft_api(payload: PurchaseRequestDraftCreate, reque
         if suggestion is None:
             raise _replenishment_error(ValueError("SUGGESTION_NOT_FOUND"))
         require_warehouse_access(principal, suggestion.warehouse_id, db=db)
+    # P3-S1 Q2 血缘列：若传入则校验同 workspace 存在（不存在/跨租户 → 404），校验不通过不写库。
+    # 该字段**不进入 payload_hash**（F11 红线：改造前创建的 draft 同键重放仍须 200）。
+    if payload.supersedes_request_id is not None:
+        from app.db import PurchaseRequest
+        superseded = db.scalar(select(PurchaseRequest).where(
+            PurchaseRequest.id == payload.supersedes_request_id,
+            PurchaseRequest.workspace_id == principal.workspace_id,
+        ))
+        if superseded is None:
+            raise _replenishment_error(ValueError("PURCHASE_REQUEST_NOT_FOUND"))
     from app.replenishment import create_purchase_request_draft
     try:
-        result = create_purchase_request_draft(db, workspace_id=principal.workspace_id, suggestion_ids=payload.suggestion_ids, actor=principal.subject, idempotency_key=request.headers.get("Idempotency-Key") or "", note=payload.note, supplier_ref=payload.supplier_ref, expected_arrival_date=payload.expected_arrival_date)
+        result = create_purchase_request_draft(db, workspace_id=principal.workspace_id, suggestion_ids=payload.suggestion_ids, actor=principal.subject, idempotency_key=request.headers.get("Idempotency-Key") or "", note=payload.note, supplier_ref=payload.supplier_ref, expected_arrival_date=payload.expected_arrival_date, supersedes_request_id=payload.supersedes_request_id)
         return _purchase_request_response(db, result)
     except ValueError as exc:
         raise _replenishment_error(exc) from exc
@@ -3215,6 +3242,132 @@ def list_purchase_requests(request: Request, page: int = Query(default=1, ge=1),
     total = db.scalar(select(func.count(PurchaseRequest.id)).where(*filters)) or 0
     rows = db.scalars(select(PurchaseRequest).where(*filters).order_by(PurchaseRequest.id.desc()).offset((page-1)*page_size).limit(page_size)).all()
     return PurchaseRequestPage(items=[_purchase_request_response(db, row) for row in rows], page=page, page_size=page_size, total=int(total))
+
+
+# ---------------------------------------------------------------------------
+# P3-S1：采购单审批（approve / reject / cancel）与生成入库单。
+# 权限点：approve/reject = purchasing.approve（与 purchasing.submit 相互独立）；
+#          cancel = purchasing.submit + 归属校验；inbound-orders = inbound.create；
+#          inbound-order（只读）= purchase.read。
+# ---------------------------------------------------------------------------
+def _load_purchase_request_for_action(db: Session, principal, request_id: int):
+    """按 (workspace_id, id) 定位采购单并校验仓库范围（任何写库前完成）。"""
+    from app.db import PurchaseRequest
+
+    record = db.scalar(select(PurchaseRequest).where(
+        PurchaseRequest.id == request_id,
+        PurchaseRequest.workspace_id == principal.workspace_id,
+    ))
+    if record is None:
+        raise _replenishment_error(ValueError("PURCHASE_REQUEST_NOT_FOUND"))
+    require_warehouse_access(principal, record.warehouse_id, db=db)
+    return record
+
+
+@app.post("/api/purchase-requests/{request_id}/approve", response_model=PurchaseRequestResponse)
+def approve_purchase_request_api(request_id: int, payload: PurchaseRequestApprove, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="purchasing.approve")
+    _load_purchase_request_for_action(db, principal, request_id)
+    from app.purchase_approval import approve_purchase_request
+
+    try:
+        result = approve_purchase_request(
+            db, workspace_id=principal.workspace_id, request_id=request_id,
+            actor=principal.subject, user_id=principal.user_id,
+            idempotency_key=request.headers.get("Idempotency-Key") or "",
+            expected_version=payload.expected_version, note=payload.note,
+            request_ref=getattr(request.state, "request_id", None),
+        )
+        return _purchase_request_response(db, result)
+    except ValueError as exc:
+        raise _replenishment_error(exc) from exc
+
+
+@app.post("/api/purchase-requests/{request_id}/reject", response_model=PurchaseRequestResponse)
+def reject_purchase_request_api(request_id: int, payload: PurchaseRequestReject, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="purchasing.approve")
+    _load_purchase_request_for_action(db, principal, request_id)
+    # 驳回理由必填：缺失 / 空串 / 全空格一律 422 REJECT_REASON_REQUIRED，零写入。
+    if not payload.reason or not payload.reason.strip():
+        raise _replenishment_error(ValueError("REJECT_REASON_REQUIRED"))
+    from app.purchase_approval import reject_purchase_request
+
+    try:
+        result = reject_purchase_request(
+            db, workspace_id=principal.workspace_id, request_id=request_id,
+            actor=principal.subject, user_id=principal.user_id,
+            idempotency_key=request.headers.get("Idempotency-Key") or "",
+            expected_version=payload.expected_version, reason=payload.reason,
+            request_ref=getattr(request.state, "request_id", None),
+        )
+        return _purchase_request_response(db, result)
+    except ValueError as exc:
+        raise _replenishment_error(exc) from exc
+
+
+@app.post("/api/purchase-requests/{request_id}/cancel", response_model=PurchaseRequestResponse)
+def cancel_purchase_request_api(request_id: int, payload: PurchaseRequestCancel, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="purchasing.submit")
+    _load_purchase_request_for_action(db, principal, request_id)
+    from app.purchase_approval import cancel_purchase_request
+
+    try:
+        result = cancel_purchase_request(
+            db, workspace_id=principal.workspace_id, request_id=request_id,
+            actor=principal.subject, user_id=principal.user_id,
+            idempotency_key=request.headers.get("Idempotency-Key") or "",
+            expected_version=payload.expected_version, reason=payload.reason,
+            request_ref=getattr(request.state, "request_id", None),
+            is_admin=principal.has_role(ROLE_ADMIN),
+        )
+        return _purchase_request_response(db, result)
+    except ValueError as exc:
+        raise _replenishment_error(exc) from exc
+
+
+@app.post("/api/purchase-requests/{request_id}/inbound-orders", response_model=InboundResponse)
+def create_purchase_request_inbound_order_api(request_id: int, payload: PurchaseRequestInboundCreate, request: Request, response: Response, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="inbound.create")
+    _load_purchase_request_for_action(db, principal, request_id)
+    from app.purchase_approval import generate_inbound_order_for_request
+    from app.repository import _inbound_response_data
+
+    try:
+        order, created = generate_inbound_order_for_request(
+            db, workspace_id=principal.workspace_id, request_id=request_id,
+            actor=principal.subject, note=payload.note,
+        )
+    except ValueError as exc:
+        raise _replenishment_error(exc) from exc
+    # 自然键幂等：首次创建 201，命中幂等返回 200 + 既有单。
+    response.status_code = 201 if created else 200
+    from app.db import InboundLine
+
+    lines = db.scalars(select(InboundLine).where(
+        InboundLine.inbound_order_id == order.id,
+    ).order_by(InboundLine.id)).all()
+    return _inbound_response_data(order, lines)
+
+
+@app.get("/api/purchase-requests/{request_id}/inbound-order", response_model=PurchaseRequestInboundOrderResponse)
+def get_purchase_request_inbound_order_api(request_id: int, request: Request, db: Session = Depends(get_db)):
+    principal = require_principal(request, permission="purchase.read")
+    _load_purchase_request_for_action(db, principal, request_id)
+    from app.purchase_approval import get_inbound_order_for_request
+    from app.repository import _inbound_response_data
+    from app.db import InboundLine
+
+    order = get_inbound_order_for_request(
+        db, workspace_id=principal.workspace_id, request_id=request_id,
+    )
+    if order is None:
+        return PurchaseRequestInboundOrderResponse(inbound_order=None)
+    lines = db.scalars(select(InboundLine).where(
+        InboundLine.inbound_order_id == order.id,
+    ).order_by(InboundLine.id)).all()
+    return PurchaseRequestInboundOrderResponse(
+        inbound_order=InboundResponse.model_validate(_inbound_response_data(order, lines))
+    )
 
 
 @app.post("/api/external/sync/fixture", response_model=FixtureSyncResponse)

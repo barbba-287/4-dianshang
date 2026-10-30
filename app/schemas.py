@@ -1020,6 +1020,29 @@ class PurchaseRequestDraftCreate(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
     supplier_ref: str | None = Field(default=None, max_length=128)
     expected_arrival_date: date | None = None
+    # P3-S1 Q2 血缘列：指向被驳回后重办的旧单（软引用，不 FK）。
+    supersedes_request_id: int | None = Field(default=None, ge=1)
+
+
+class PurchaseRequestApprove(BaseModel):
+    expected_version: int = Field(ge=1)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class PurchaseRequestReject(BaseModel):
+    expected_version: int = Field(ge=1)
+    # 理由必填由端点层显式校验（缺失/空串/全空格统一返回 REJECT_REASON_REQUIRED），
+    # 故这里不设 min_length，避免被 FastAPI 的通用 422 抢先短路。
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class PurchaseRequestCancel(BaseModel):
+    expected_version: int = Field(ge=1)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class PurchaseRequestInboundCreate(BaseModel):
+    note: str | None = Field(default=None, max_length=1000)
 
 
 class PurchaseRequestDraftUpdate(BaseModel):
@@ -1063,6 +1086,18 @@ class PurchaseRequestResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     lines: list[PurchaseRequestLineResponse] = Field(default_factory=list)
+    # P3-S1：新增 7 键（既有 16 键逐字节不变，只追加）。
+    approver_id: str | None = None
+    approver_user_id: int | None = None
+    decided_at: datetime | None = None
+    reject_reason: str | None = None
+    cancelled_by: str | None = None
+    cancelled_at: datetime | None = None
+    supersedes_request_id: int | None = None
+
+
+class PurchaseRequestInboundOrderResponse(BaseModel):
+    inbound_order: InboundResponse | None = None
 
 
 class PurchaseRequestPage(BaseModel):

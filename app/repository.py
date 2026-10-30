@@ -554,6 +554,7 @@ def create_inbound(
     note: str | None = None,
     created_by: str | None = None,
     workspace_id: int | None = None,
+    purchase_request_id: int | None = None,
 ) -> InboundOrder:
     warehouse_query = select(Warehouse).where(Warehouse.id == warehouse_id)
     if workspace_id is not None:
@@ -587,6 +588,7 @@ def create_inbound(
         reference_no=reference_no,
         note=note,
         created_by=created_by,
+        purchase_request_id=purchase_request_id,
     )
     db.add(order)
     db.flush()

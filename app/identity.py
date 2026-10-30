@@ -27,7 +27,7 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
         "catalog.read", "catalog.write", "inbound.create", "inbound.read", "inbound.confirm",
         "inventory.read", "knowledge.read", "knowledge.write", "inventory.write",
         "replenishment.read", "replenishment.write", "replenishment.confirm",
-        "replenishment.ignore", "purchasing.submit", "purchase.read", "analytics.read",
+        "replenishment.ignore", "purchasing.submit", "purchasing.approve", "purchase.read", "analytics.read",
         "content.read", "content.write", "content.review", "content.export",
     }),
     ROLE_WAREHOUSE: frozenset({"inbound.read", "inbound.receive", "inventory.read"}),
