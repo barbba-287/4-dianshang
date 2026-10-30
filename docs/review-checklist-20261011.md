@@ -1456,3 +1456,74 @@ G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 
 
 **→ P2 主体收官**：四切片（P2-1 Connector / P2-2 source batch / P2-3 quality / P2-4 补偿）
 全部收口；基线口径 **435 passed / 0 failed**。
+
+## 20. P3-S1 采购单审批（人工审批 + 入库单生成）：R-51/52/53/54 登记（2026-10-30）
+
+| 编号 | 内容 | 定级 |
+|---|---|---|
+| R-51 | cancel 后建议状态统一回退为 `modified`，`confirmed`/`modified` 区分丢失（决策量仍保留 `decision_qty`） | P3 |
+| R-52 | 采购单无金额/单价/供应商报价字段，审批无法体现"批多少钱"（U1 同实体的直接后果） | P3 |
+| R-53 | 自审红线的身份基准是 `subject`（= login）字符串，`approver_user_id` 仅审计用；api_key/demo 路径 `user_id` 为 NULL，无法做 id 级强校验 | P3 |
+| R-54 | `supersedes_request_id` 是弱血缘：不 FK、不唯一（同一旧单可被多次重办）、不做级联；重办单与旧单之间没有强一致性保证（旧单被误改也不阻断新单） | P3 |
+
+### 20.1 本片写死的口径（复核按此核）
+
+**决策三端点同构**：approve / reject / cancel 一律要求 `Idempotency-Key` header（缺失或超长 → 422 `IDEMPOTENCY_KEY_REQUIRED`），
+载荷哈希同口径为 `sha256` 规范化 5 键（action / request_id / expected_version / reason / note）。
+同键同载荷 → 幂等重放（200，版本不再增，审计行不重复）；同键不同载荷 → 409 `IDEMPOTENCY_KEY_REUSE`。
+
+**CAS 单条 UPDATE + rowcount 顺序判定**（禁止"先 SELECT 再赋值再 commit"）：条件为
+`(id, workspace_id, version, status ∈ from_status)`；`rowcount != 1` 时按 **404 → 状态 → 版本** 顺序分流：
+`PURCHASE_REQUEST_NOT_FOUND` → `INVALID_PURCHASE_REQUEST_STATE` → `PURCHASE_REQUEST_VERSION_CONFLICT`。
+**状态先于版本**是刻意裁定：并发决策方看到的是"状态已变"，而非版本号差异。
+
+**U3 自审红线无豁免**：`created_by` 与 `submitted_by` **任一**等于决策人 subject 即 409 `SELF_APPROVAL_FORBIDDEN`；
+**没有** settings / 环境变量开关，**没有**任何角色的豁免分支，`ROLE_PERMISSIONS[ROLE_ADMIN]` 仍为 `frozenset()`，
+`ROLE_WAREHOUSE` 不含 `purchasing.approve`。
+
+**零删除 / 零库存副作用**：审批全链路**零 DELETE**；生成入库单**只调既有 `create_inbound`**，
+`InventoryBalance.on_hand_qty` 与 `InventoryTransaction` 行数前后相同（U4 超收校验留 S2）。
+
+**重办血缘（F11）**：`supersedes_request_id` **不进** `create_purchase_request_draft` 的 `payload_hash`
+（该哈希维持既有 4 键：suggestion_ids / note / supplier_ref / expected_arrival_date），
+因此改造前的同键历史行仍可同键重放成功（200/201，非 409）。
+
+**migration 0023**：`purchase_requests` 追加 7 列 + `inbound_orders` 追加 1 列（全可空、无默认值、无回填），
+唯一 **索引** `uq_inbound_order_purchase_request(workspace_id, purchase_request_id)`；
+**禁用 `batch_alter_table`**（R-33 先例），down 为 `DROP INDEX` + 逆序 `DROP COLUMN`，降回后两表快照与 0022 形态整体相等。
+
+### 20.2 复核结论（复核方自跑，2026-10-30 08:2x，通过）
+
+**判定：通过，P3-S1 收口。** 实施方按 R-34 约定停在"未提交"状态，收口提交由复核方代笔
+（代码一笔 + 文档一笔）。逐项核验：
+
+- **独立验证（复核方自跑）**：定向（本片 20 例 + alembic）→ **27 passed**；
+  **全量 455 passed / 0 failed（247.6s）** = 基线 435 + 新增 20（A-1..A-20），与交付一致；
+  `alembic heads` 实跑 → `0023_purchase_approval`（head）唯一。
+- **范围**：工作区 12 文件全部落在 §3 允许清单；**禁区四文件零触碰**
+  （`sync_application.py`/`external_sync.py`/`source_quality.py`/`dead_letters.py` 不在 status 中）；
+  `app/replenishment.py` **恰 2 行**（签名 + 透传，增 2 删 0），`payload_hash` 计算零变化——
+  与偏差声明 ⑦ 的 diff 原文一致。
+- **CAS 与执行顺序（逐行亲读 `purchase_approval.py`）**：幂等键校验 → 幂等命中（先于状态闸）
+  → 自审/归属 → **单条 core `update()`**（条件 = id+workspace+version+status∈from）→
+  `rowcount != 1` 先 `rollback` 再按 **404 → 状态 → 版本** 固定顺序判定 → 审计行与建议回退同一事务提交。
+  与任务书 §4/T3 逐条对上；`_resolve_cas_failure` 的兜底抛错写明理由。
+- **红线四条亲跑**：① 零 `DELETE`/`.delete(`（grep exit=1）；② `SELF_APPROVAL_FORBIDDEN` 恰 2 处；
+  ③ 无 `settings`/`environ`/`getenv`；④ A-18 用 **AST** 判定不 import fastapi——**规避了模块
+  docstring 含"fastapi"字样的裸 grep 误伤**（超出任务书要求，加分）。
+- **U3 实链路**：A-7/A-20 用真实 maker 账号自审被拒且库零变化；monkeypatch 仅 A-8 出现且方向为
+  **收窄**（先例 `test_p2s1_connector.py:187`）；`ROLE_ADMIN == frozenset()` 断言在位、
+  `tests/test_identity.py` 未改。
+- **F11 红线**：A-19⑤ 手工种子"4 键 hash"历史行 + 同键重放 → 200/201 非 409，实锤
+  `supersedes_request_id` 未进 hash。
+- **migration 0023**：up/down 均带 `inspect` 存在性守卫（列/索引已存在则跳过）——**超出任务书**，
+  认可（对重放迁移与离线模式都安全）；down = `DROP INDEX` → 逆序 `DROP COLUMN`；
+  A-1 快照断言含**列顺序**（batch 重建表必然导致快照不等，等效防 batch）。
+- **清单外错误码 1 个**：`PURCHASE_REQUEST_HAS_NO_LINES`（approved 单无明细的防御分支，
+  经 `_replenishment_error` 默认 422）——任务书未列，判定为**合理防御**并在此登记；
+  另 `_replenishment_error` 对 `REJECT_REASON_REQUIRED` 的显式 422 分支与默认值重复（无害冗余）。
+- **A-6 为顺序模拟并发**（非线程）：两次真实 HTTP 调用、第二个必然 CAS 失败——任务书字面
+  即是"两个不同 user 各调一次"，且 SQLite 单写锁下线程并发不可靠；CAS 机制被真实 exercised，认可。
+- **基线新口径：全量 455 passed / 0 failed（P3-S1 后）**。R-51/52/53/54 编号连续（接 R-50）。
+- **对 S2 的入口**：U4 超收校验（`received + damaged > requested → 409`）落 S2；
+  本片 `expected_qty == requested_qty` 精确相等已由 A-14 锁死。
