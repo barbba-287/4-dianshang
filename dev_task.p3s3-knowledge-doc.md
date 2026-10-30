@@ -1,6 +1,6 @@
 # P3-S3 任务文件：知识文档入库（API 方向盘 + 前端管理页）
 
-- **版本**：v1.0 草案（2026-10-30，待用户评审，评审通过前严禁开跑）
+- **版本**：v1.1 定稿（2026-10-30，Q-S3-1/2/3 已由用户拍板，本文件为实施唯一依据）
 - **前置**：P3-S2 已收口（复核结论 §21，`3b9f9f2`），基线 **463 passed / 0 failed**。
 - **切片判断**：模型（Document/DocumentVersion/DocumentChunk）、解析（importers pdf/docx）、
   切片（chunks 落库）、索引（vector_store + 后台 job）、检索（RagRetriever/answerer）**全已存在**。
@@ -130,7 +130,7 @@ docx（zip 结构校验，含成员数/解压总大小/路径穿越/加密成员
 
 - **零新权限点**：读 = `knowledge.read`；写/发布/撤回 = `knowledge.write`（与上传同点）。
 - publish/unpublish 额外限角色（maker-checker 精神：客服可传，发布权收紧）——**默认
-  `(ROLE_ADMIN, ROLE_OPERATIONS)`**，见待裁定 Q-S3-2。
+  `(ROLE_ADMIN, ROLE_OPERATIONS)`**（Q-S3-2 已裁定，见 §3）。
 - **actor 归因**：上传/发布/撤回的 service 入队时把 `principal.subject` 写入
   `CrawlJob.payload_json["actor"]`（零 migration 唯一通道）；Document/DocumentVersion 无
   created_by 列属既有事实，本片不解锁、不伪造。
@@ -160,26 +160,24 @@ docx（zip 结构校验，含成员数/解压总大小/路径穿越/加密成员
 
 ---
 
-## 3. 待裁定（评审时拍板，当前按推荐默认写死）
+## 3. 裁定记录（2026-10-30 用户拍板，全部按推荐执行，不得再改）
 
-### Q-S3-1 类型白名单：维持 `{pdf, docx}`，本片不扩 txt/md（推荐）
+### Q-S3-1 类型白名单：**已裁定维持 `{pdf, docx}`，本片不扩 txt/md**
 
-您提的是"仅允许 pdf/txt/md 等"。现状白名单是**内容签名级**的 `{pdf, docx}`
-（魔数/zip 结构校验，比扩展名白名单更严，.exe 改名 .pdf 会被 `SIGNATURE_MISMATCH` 拦）。
-**扩 txt/md 需要新解析器 + 分片策略**（txt 无页/段结构），属独立工作量，建议另立切片。
-本片按 `{pdf, docx}` 写死；若您裁"必须含 txt/md"，则追加 `TextParser`（utf-8 解码 + 按段落分片 +
-`DOCUMENT_SOURCE_TYPES` 扩元组），其余设计不变。
+用户原话：内容签名级校验比扩展名强得多，强行加 txt/md 需要写新的切分策略，本片不干，
+**另立切片**。本片按 `{pdf, docx}` 写死；**不追加** TextParser、不动
+`DOCUMENT_SOURCE_TYPES`。
 
-### Q-S3-2 发布/撤回角色：推荐收紧为 `(ADMIN, OPERATIONS)`
+### Q-S3-2 发布/撤回角色：**已裁定收紧为 `(ADMIN, OPERATIONS)`**
 
-上传保持 `knowledge.write` 现状（客服可传）；发布/撤回限运营/管理员（maker-checker 精神，
-与 S1 审批独立同源）。若您裁"客服也可发布"，去掉角色参数即可。
+用户裁定：知识库的发布直接决定 AI 的输出，客服岗可以有上传权（提供子弹），但**不能有发布权**
+（开保险栓）。上传保持 `knowledge.write` 现状（客服可传）；发布/撤回限
+`(ADMIN, OPERATIONS)`，写死进 §4 的 knowledge_admin service 权限参数。
 
-### Q-S3-3 大小上限：维持既有 20MB（推荐）
+### Q-S3-3 大小上限：**已裁定维持既有 20MB**
 
-您提"如 10MB"。现状 `upload_max_bytes=20MB`（`config.py:28`）+ 413 用例已在基线内；
-改 10MB 只动一行配置但会触碰既有 413 测试的语义（该用例用 env 覆盖，实测不受影响）。
-本片按 20MB 写死、不改配置。
+用户裁定：有内容寻址和魔数校验在，这个限制足够安全。本片按 20MB 写死、
+**不改** `config.py:28` 的 `upload_max_bytes`，413 语义与既有用例保持原样。
 
 ---
 
@@ -259,7 +257,7 @@ reportlab / python-docx 现造。检索断言走真实 `POST /api/rag/query`（k
 6. **覆盖式版本链**（新版本顶掉旧行）——用户裁定保留旧版本；单发布位 + 自动降级已满足"检索只见新版"。
 7. **status 改名 processing/ready/failed**——用户建议的 processing 与既有 parsing 语义相同，
    改名要动词典+全链路+既有测试，纯改名零收益；前端显示层映射"解析中"即可。
-8. **TXT/MD 解析器**——待裁定 Q-S3-1，默认不做（需新分片策略，独立切片）。
+8. **TXT/MD 解析器**——Q-S3-1 已裁定不做（需新分片策略，另立切片）。
 
 ---
 
