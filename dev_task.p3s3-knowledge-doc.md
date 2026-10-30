@@ -99,18 +99,25 @@ docx（zip 结构校验，含成员数/解压总大小/路径穿越/加密成员
   撤回 = 置回 NULL（status 仍是 ready，不回退）。前端把 parsing 显示为"解析中"。
 - 发布前置：`status == "ready"`（对齐 `publish_version` 既有校验；parsing/failed → 409）。
 - **同 document 至多一个已发布版本**：新发布在同一事务里清除兄弟版本的 published_at（自动降级）。
+- **【用户红线 2026-10-30 15:37】superseded 标记（派生，零 migration）**：被降级版本
+  （`published_at IS NULL` 且同 document 存在 `published_at` 非空的兄弟版本）在**响应层**
+  标记 `superseded: true`（列表/详情/publish 响应统一由 service 层计算）；status 词典不动、
+  不落库。未发布且无兄弟发布 → `superseded: false`。
 
 ### D3. 发布/撤回流程（索引生命周期 = 门控机制）
 
 - **publish**（service 层单事务）：ready 前置 → 清同 document 所有兄弟版本 published_at →
-  置本版本 published_at → commit → 入队 `document_index`（既有 job 类型）索引新版；若本次发布
-  **顶替**了旧已发布版本，同时为每个被降级版本入队 `document_unindex`（新 job 类型，见下）。
+  置本版本 published_at → commit → 入队 `document_index`（既有 job 类型）索引新版。
+- **【用户红线 2026-10-30 15:37】换版发布必须同步删除旧向量**：若本次发布**顶替**了旧已发布版本，
+  在 publish service 内**同步**调用 `get_vector_store().delete_by_version(旧version_id)`
+  （与 unpublish 同通道，**严禁只入队异步 job 了事**——异步窗口期间旧知识仍在检索池 = 知识污染）。
+  `document_unindex` job 降级为**补偿通道**：仅当同步删除抛异常时入队重试，不作为主路径。
 - **unpublish**：前置 published_at 非空（否则 409）→ 同事务置 NULL → **同步**调用
   `get_vector_store().delete_by_version(version_id)`（快操作；撤回必须立即生效，安全方向宁可同步）。
 - **`document_unindex` job**：`background.py` 新增类型，执行体即 `store.delete_by_version` +
-  `job.cursor` 留痕；dispatch 加一个 elif 分支。
+  `job.cursor` 留痕；dispatch 加一个 elif 分支（只作补偿用）。
 - 发布→检索生效为**最终一致**（异步索引，通常秒级）；publish 响应返回 `indexing_queued=true`，
-  前端提示"检索生效中"。撤回是同步的，无窗口。
+  前端提示"检索生效中"。撤回与换版旧向量删除都是同步的，无污染窗口。
 
 ### D4. 索引门控（保证"只有发布过的版本才进 RAG 检索"）
 
@@ -119,6 +126,13 @@ docx（zip 结构校验，含成员数/解压总大小/路径穿越/加密成员
 `rag_query` / retriever / answerer / embedder **一行不改**（D3+D4 双端保证 K-7）。
 注意：现状 `_execute_document_import` 尾部的 `submit_chunk_index` **保留**（ready 后入队，
 由闸门决定是否实际索引）——这样发布时只需再入队一次即可补索引，解析流程零改动。
+
+- **【用户红线 2026-10-30 15:37】解析→索引竞态必须在执行时重查 DB**：发布闸读取的是
+  **执行时刻**的 `version.published_at`（重查 DB，不是入队时刻的快照）——
+  索引 job 排队期间用户 publish 了 → 重查命中 → **直接入库**；仍未发布 → **绝不入库**。
+  publish 的 ready 前置使"解析进行中点击 publish"不可达；ready 与索引执行之间的竞态窗口
+  由本闸覆盖。同一版本被两条路径入队索引（原解析链 + publish 链）时，靠 chunk id 确定性
+  upsert 幂等吸收，不得双写。
 
 ### D5. 向量库线程安全修复（基础设施，非 RAG 语义变更）
 
