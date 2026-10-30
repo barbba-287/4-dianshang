@@ -1527,3 +1527,53 @@ G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 
 - **基线新口径：全量 455 passed / 0 failed（P3-S1 后）**。R-51/52/53/54 编号连续（接 R-50）。
 - **对 S2 的入口**：U4 超收校验（`received + damaged > requested → 409`）落 S2；
   本片 `expected_qty == requested_qty` 精确相等已由 A-14 锁死。
+
+## 21. P3-S2 入库单关联采购单（实施 `25898b6` + 任务文件 v1.1 `8486766`）
+
+### 21.1 台账
+
+- **R-55（实施过程异常，不阻断交付）**：`claude -p` **挂死新形态**——代码约 20 分钟写完
+  （最后文件写入 10:20），随后进程存活但**静默停滞 79 分钟**（零文件活动、无 python 子进程、
+  内存停涨、无 stdout/stderr；与 R-17 的"无声消失"不同，疑似中转站 API 请求挂起）。
+  复核方 11:39 `taskkill /F`（PID 270912），收口三步（实测 / commit / 交付说明）由复核方代完成，
+  **代码本体全部来自实施方落盘产物，复核方未写实现代码**。被杀时 CLI 无最终输出。
+  处置依据：R-17/R-22 既定协议（P2-R2 有先例）。
+- 交付说明：`.testtmp/delivery.p3s2.md`（在盘）。
+
+### 21.2 复核结论（复核方自跑，2026-10-30 14:3x，通过）
+
+**判定：通过，P3-S2 收口。** 任务文件 v1.0 草案（`390bc6c`）→ 用户裁定 Q-S2-1 采纳**口径 A**
+（`received_qty ≤ requested_qty`；damaged ⊆ received 的推导获用户确认，旧公式"received + damaged"
+会双计破损）→ v1.1 定稿（`8486766`）→ 实施方执行 → 挂死代收口（`25898b6`）。逐项核验：
+
+- **独立验证（复核方自跑，提交态）**：定向（S2 8 例 + S1 20 例）→ **28 passed**（36.3s）；
+  **全量 463 passed / 0 failed（267.1s）** = 基线 455 + 新增 8（R-1..R-8），与交付一致；
+  `alembic heads` 实跑 → `0023_purchase_approval`（head）唯一，**零新 migration**。
+- **范围**：`git diff 533f3d1..25898b6 --stat` 实跑——app 侧恰 4 文件
+  （main.py +33 / repository.py +146 / schemas.py +30 / warehouse.html ±4）+ 任务文件 + 测试文件；
+  **禁区四文件零触碰**（`db.py` / `purchase_approval.py` / `identity.py` / `replenishment.py` 不在 diff 中）；
+  `confirm_inbound` 入账核心逐字节未动（新增的 `get_receipt_progress_for_request` 是其后的独立函数）。
+- **U4 闸（逐行亲读 `repository.py` receive_inbound）**：位置 = `DAMAGED_QTY_INVALID` 之后、
+  try 之前 → 幂等重放闸（647-650 段）在前、抛错零写入（mutation 全在 try 内）；仅
+  `purchase_request_id` 非空生效；`{sku_id: requested_qty}` 映射（uq_purchase_request_line_sku
+  保证不撞键）；**缺行 .get(sku, 0) fail-closed**；口径 A 只比 `received_qty`；错误码
+  `OVER_RECEIVING_FORBIDDEN` → `_warehouse_error` **显式 409 分支**（默认 endswith 判定会落 422，已补）。
+- **进度派生（亲读）**：`get_receipt_progress_for_request` 纯只读（不 commit、不写表）；
+  只聚合 status ∈ {received, confirmed} 的关联单明细；accepted = received − damaged；
+  remaining 下限 0；progress_status = pending（无明细或实收 0）/ partial / completed；
+  端点 `GET /api/purchase-requests/{id}/receipt-progress` 权限 `purchase.read`（与 S1 只读端点同源）、
+  复用 `_load_purchase_request_for_action`（404 + 跨租户 404 语义一致）。
+- **响应契约**：`InboundResponse` 末尾追加 2 可选键，**既有 9 键零重排零改名**（diff 逐行核对）；
+  6 个 `_inbound_response_data` 调用点全部补 `db=db`（实测 1235/1248/1316/1337/3351/3371）；
+  `InboundListItem` 与列表接口未动（R-7 用集合相等断言列表仍 7 键）。
+- **测试夹具红线**：双真实账号（checker=operations 审批/生成，wh=warehouse 实收）两独立 client；
+  **无任何 monkeypatch 自审/绕过开关**；`_create_submitted` 用不存在的 `system:` login 做
+  submitted_by 属 S1 同款历史数据构造（非绕过）。R-6 用「同 key 换超收载荷 → 409
+  INBOUND_ALREADY_RECEIVED 而非 OVER_RECEIVING」**实锤闸序**（幂等闸先于 U4 闸）；
+  R-2 含零写入断言（status/行字段/库存两表计数/balance 量）+ **闸不锁死单据**（拒后合法实收 200）；
+  R-7 既有键值逐项回库比对。
+- **红线 grep**：diff 中无 `DELETE`/`drop_`/`settings.`/`environ`/`getenv`/开关（exit=1）。
+- **清单外偏差：0**。两条实现细节（前端 `PR-` 前缀幂等处理；`_inbound_response_data` 读取路径
+  PR 查不到时 no 落 None 的 fail-soft——写入闸门仍 fail-closed）均不构成偏离。
+- **基线新口径：全量 463 passed / 0 failed（P3-S2 后）**。
+- **对 S3 的入口**：零新表 + 7 API 待建（P3 计划 §S3）；本地待推 9 笔（P3-S1 5 笔 + S2 草案/定稿/实施/复核 4 笔），按阶段策略 **P3 三片全清后一起推**。
