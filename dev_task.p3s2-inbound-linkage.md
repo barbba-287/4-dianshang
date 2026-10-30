@@ -1,6 +1,6 @@
 # P3-S2 任务文件：入库单关联采购单 + U4 超收闸 + 收货进度派生 + 实收页显示来源
 
-- **版本**：v1.0 草案（2026-10-30，待用户评审，评审通过前严禁开跑）
+- **版本**：v1.1 定稿（2026-10-30 评审通过，Q-S2-1 已裁定，可开跑）
 - **前置**：P3-S1 已收口（`e4e728f` 实施 + `533f3d1` 复核结论），基线 **455 passed / 0 failed**。
 - **切片目标**：把 S1 建好的「采购单 → 入库单」血缘接通语义：实收环节按采购单明细拦超收（U4），
   提供只读的收货进度派生端点（严禁反写），实收页显示来源采购单。
@@ -141,20 +141,15 @@ status = 404 if code.endswith("NOT_FOUND") else 409 if code.endswith(("EXISTS", 
 
 ---
 
-## 3. 待裁定（评审时拍板，当前按推荐默认写死）
+## 3. 待裁定（已全部裁定，2026-10-30）
 
-### Q-S2-1【必须裁定】超收判定口径：damaged 是否重复计入
+### Q-S2-1【已裁定】超收判定口径：采纳口径 A（received ≤ requested_qty）
 
-您的要求原文是「received + damaged 必须 <= requested_qty」。但本仓库语义是
-**damaged ⊆ received**（`damaged ≤ received` 由 `DAMAGED_QTY_INVALID` 强制，合格量 = received − damaged，
-见 §1.1）——字面公式会把破损算两遍。例如 requested=100、received=100、damaged=30：
-- 口径 A（**推荐**）：`received_qty ≤ requested_qty`。破损已含于实收总数，上例通过；
-  "实收+破损超过采购量"的业务意图（不许多收货）同样被满足。
-- 口径 B（字面）：`received_qty + damaged_qty ≤ requested_qty`。上例 130 > 100 被拦；
-  等价于要求合格量 + 2×破损 ≤ 采购量，与「破损是实收的一部分」的现状语义冲突，
-  且与 S1 生成的 `expected_qty = requested_qty` 在收货页展示的基准不一致。
+用户裁定原文："你对 damaged 子集语义的推导完全正确，原公式有误，任务文件无需修改不等式，
+直接按你写的口径 A 执行，R-5 用例预期保持不变。"
 
-**本文件按口径 A 写死（D1 第 3 步只比对 received_qty）。若您裁口径 B，仅改 D1 第 3 步不等式与 R-2 用例预期，其余不动。**
+本仓库语义是**damaged ⊆ received**（`damaged ≤ received` 由 `DAMAGED_QTY_INVALID` 强制，合格量 = received − damaged，
+见 §1.1）——字面公式"received + damaged"会把破损算两遍。D1 第 3 步只比对 `received_qty`。
 
 另确认两点（已按无异议写死）：① 无容差配置项（您已裁定"若无则严格等于"，不做 settings 开关）；
 ② 只拦超收，**短收不拦**（短收是正常业务态，由进度端点呈现 partial）。
@@ -231,7 +226,7 @@ status = 404 if code.endswith("NOT_FOUND") else 409 if code.endswith(("EXISTS", 
 
 ## 8. 交付要求
 
-1. 完成即把交付说明写到 **`.testtmp/delivery.md`**（落盘，防进程失联；含提交号、全量结果、
+1. 完成即把交付说明写到 **`.testtmp/delivery.p3s2.md`**（落盘，防进程失联；含提交号、全量结果、
    偏差清单、warehouse.html 改动片段与冒烟说明）。
 2. 全量回归命令（**必须剥离会话注入垫片**，R-15）：
    ```
