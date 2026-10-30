@@ -1645,3 +1645,52 @@ G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 
       app/templates/customer_service.html tests/test_p3s3_knowledge_admin.py
       tests/test_api_rag.py docs/review-checklist-20261011.md` + `git commit -m "p3s3: …"`
       → 回填提交号到本节与 `.testtmp/delivery.p3s3.md` §1
+
+### 22.3 正式复核结论（复核方独立亲验，2026-10-30 18:2x，通过）
+
+**判定：通过，P3-S3 收口。** 全部核验为复核方独立执行（非沿用代收口时的结论）：
+
+- **独立实测（提交态 `2c0363a`，工作区干净）**：**全量 475 passed / 0 failed（277.65s）**
+  = 463 基线 + 12（K-1..K-12）；`alembic heads` → `0023` 唯一（代收口时实跑），
+  **零 migration、零新表**，与守卫一致。
+- **范围**：`git diff eb9544b..2c0363a --stat` 实跑——恰 10 文件
+  （app 侧 6：background.py +119 / knowledge_admin.py +615 / main.py +247 / vector_store.py ±106 /
+  schemas.py +72 / customer_service.html ±22；tests 侧 4）；**禁区七文件零触碰**实测
+  （db.py / retriever / answerer / embedder / rag_runtime / config.py / upload_security.py +
+  test_api_documents.py + migrations/ 均不在 diff 中）。
+- **红线 grep（app diff）**：无 `settings.` / `environ` / `getenv` / `DELETE FROM` / `drop_` /
+  `monkeypatch`（干净）；无任何环境开关。
+- **D3 同步删旧向量（逐行亲读 knowledge_admin.py）**：publish（:408-418）与 unpublish（:472-478）
+  均**先 db.commit 再同步 `delete_by_version`**；同步删除抛异常时才降级入队 `document_unindex`
+  补偿通道。语义正确：撤回/换版的知识污染窗口只剩"进程在 commit 与 delete 之间崩溃"这一
+  极端残留（与 R-36 同类的观察项，不阻断，登记为 S3 残留 1）。
+- **D4 三道闸（逐行亲读 background.py）**：① claim 后顶部闸（:665-668，`_published_at_now`
+  **执行时重查 DB**，取列值避开 identity map 陈旧属性，注释写明事务/快照依据）；
+  ② 写前复核（:690 附近，覆盖取 chunk/embedding 期间的撤下/降级）；
+  ③ **写后复核**（:719 附近，写入期间被撤下 → 立即 `delete_by_version` 清刚写向量）——
+  实施方自加的第三道闸为**收紧**，正式认可。
+- **D2 superseded（:171-178）**：纯响应层派生（published_at IS NULL + 存在已发布兄弟），
+  零落库零 migration，符合设计。
+- **权限闸（:41-64）**：`require_publish_rights`——员工会话严格 (ADMIN, OPERATIONS)（Q-S3-2），
+  客服 403 中文消息；demo/api_key 服务通道按通道语义放行（理由：`require_principal(roles=...)`
+  会把演示环境打死）。**正式确认初判：接受**。
+- **D5 vector_store 锁**：模块级 `threading.RLock()`——**可重入锁选型正确**（`add`/
+  `delete_by_version` 持锁期间调 `_flush`，普通 Lock 同线程二加锁即死锁），6 处写路径全覆盖。
+- **前端**：知识管理区块（上传/列表/发布/撤回/上传新版本 + 2s 轮询解析状态），
+  全部插值过 `escapeHtml`，`accept=".pdf,.docx"` 与白名单一致，文案明示"未发布不会被 AI 引用"。
+- **用例覆盖**：用户要求的 6 场景全部命中——K1 正常上传 / K2 超限 413 / K3 假后缀+假签名 /
+  K4 同名新内容版本演进 / K5 发布后检索生效 / K6 下线后不参与检索；另 K7 未发布不可检索、
+  K8 未 ready 发布被拒、K9 换版 superseded+旧向量同步删、K10 未发布撤回 409、
+  K11 角色权限矩阵、K12 显式版本端点。
+- **测试基建三处代修复（复核方，产品代码零改动）正式确认**：① K2 reload storage/main
+  （修 upload_max_bytes 死绑定泄漏）；② conftest autouse 增清 `rag_runtime` 死绑定
+  get_settings（修**跨文件向量泄漏**——本轮最有价值发现，潜在影响所有从不 reload 的
+  settings 依赖模块，对将来所有切片消除）；③ no_evidence 显式隔离加固（防御性）。
+  `test_api_rag.py` 2 处 publish 前置 = D4 新不变量的必要适配，**断言只增未减**，正式认可。
+- **rag_query / retriever / answerer / embedder 查询核心链路零改动**（禁区实测），门控全部
+  做在索引生命周期侧，与任务文件"门控不做在查询端"的设计一致。
+- **残留登记（不阻断）**：S3 残留 1 = commit 与同步删向量之间的崩溃窗口（极端场景，
+  补偿通道兜底；观测项）；S3 残留 2 = TXT/MD 白名单扩展（用户已裁定另立切片）。
+- **基线新口径：全量 475 passed / 0 failed（P3-S3 后）**。
+- **P3 三切片全部收口**：本地待推 **15 笔**（P3-S1 5 + S2 4 + S3 6：草案/定稿/红线修订/实施/回填/本结论），
+  按阶段策略 **P3 全清即推**——现三片已全清，**待用户裁定推送**。
