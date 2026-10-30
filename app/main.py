@@ -101,6 +101,7 @@ from app.schemas import (
     InboundCreate,
     InboundReceive,
     InboundResponse,
+    ReceiptProgressResponse,
     InventoryPage,
     InboundListPage,
     InboundListItem,
@@ -1161,6 +1162,9 @@ def operator_assistant(payload: AgentAssistantRequest, request: Request) -> Agen
 def _warehouse_error(exc: ValueError) -> DomainError:
     code = str(exc)
     status = 404 if code.endswith("NOT_FOUND") else 409 if code.endswith(("EXISTS", "RECEIVED", "STATE")) else 422
+    # P3-S2 U4 超收闸：状态冲突类拒绝，显式映射 409（默认分支会落到 422）。
+    if code == "OVER_RECEIVING_FORBIDDEN":
+        status = 409
     messages = {
         "PRODUCT_NOT_FOUND": "商品不存在",
         "SKU_NOT_FOUND": "SKU 不存在或已停用",
@@ -1175,6 +1179,7 @@ def _warehouse_error(exc: ValueError) -> DomainError:
         "INBOUND_ALREADY_RECEIVED": "入库单已提交收货",
         "IDEMPOTENCY_KEY_REQUIRED": "必须提供 Idempotency-Key",
         "INVALID_INBOUND_STATE": "当前入库单状态不允许此操作",
+        "OVER_RECEIVING_FORBIDDEN": "超收被拒绝：实收数量不得超过采购申请数量",
     }
     return DomainError(code=code, message=messages.get(code, "仓储操作失败"), http_status=status)
 
@@ -1230,7 +1235,7 @@ def create_inbound(payload: InboundCreate, request: Request, db: Session = Depen
         order = create_inbound_record(db, warehouse_id=payload.warehouse_id, reference_no=payload.reference_no, lines=[item.model_dump() for item in payload.lines], note=payload.note, created_by=principal.subject, workspace_id=principal.workspace_id)
         result = get_inbound(db, inbound_id=order.id, workspace_id=principal.workspace_id)
         assert result is not None
-        return _inbound_response_data(*result)
+        return _inbound_response_data(*result, db=db)
     except ValueError as exc:
         raise _warehouse_error(exc) from exc
 
@@ -1243,7 +1248,7 @@ def get_inbound_detail(inbound_id: int, request: Request, db: Session = Depends(
     if result is None:
         raise _warehouse_error(ValueError("INBOUND_NOT_FOUND"))
     require_warehouse_access(principal, result[0].warehouse_id, db=db)
-    return _inbound_response_data(*result)
+    return _inbound_response_data(*result, db=db)
 
 
 @app.get("/api/inbounds", response_model=InboundListPage)
@@ -1311,7 +1316,7 @@ def receive_inbound(inbound_id: int, payload: InboundReceive, request: Request, 
             payload_hash=sha256(payload.model_dump_json().encode()).hexdigest(),
             workspace_id=principal.workspace_id,
         )
-        return _inbound_response_data(*result)
+        return _inbound_response_data(*result, db=db)
     except ValueError as exc:
         raise _warehouse_error(exc) from exc
 
@@ -1332,7 +1337,7 @@ def confirm_inbound(inbound_id: int, request: Request, db: Session = Depends(get
             idempotency_key=request.headers.get("Idempotency-Key"),
             workspace_id=principal.workspace_id,
         )
-        return _inbound_response_data(*result)
+        return _inbound_response_data(*result, db=db)
     except ValueError as exc:
         raise _warehouse_error(exc) from exc
 
@@ -3346,7 +3351,7 @@ def create_purchase_request_inbound_order_api(request_id: int, payload: Purchase
     lines = db.scalars(select(InboundLine).where(
         InboundLine.inbound_order_id == order.id,
     ).order_by(InboundLine.id)).all()
-    return _inbound_response_data(order, lines)
+    return _inbound_response_data(order, lines, db=db)
 
 
 @app.get("/api/purchase-requests/{request_id}/inbound-order", response_model=PurchaseRequestInboundOrderResponse)
@@ -3366,7 +3371,23 @@ def get_purchase_request_inbound_order_api(request_id: int, request: Request, db
         InboundLine.inbound_order_id == order.id,
     ).order_by(InboundLine.id)).all()
     return PurchaseRequestInboundOrderResponse(
-        inbound_order=InboundResponse.model_validate(_inbound_response_data(order, lines))
+        inbound_order=InboundResponse.model_validate(_inbound_response_data(order, lines, db=db))
+    )
+
+
+@app.get("/api/purchase-requests/{request_id}/receipt-progress", response_model=ReceiptProgressResponse)
+def get_purchase_request_receipt_progress_api(request_id: int, request: Request, db: Session = Depends(get_db)):
+    """P3-S2：收货进度派生端点（**只读**，严禁反写）。
+
+    权限点 `purchase.read`（与 S1 的 inbound-order 只读端点同源）；
+    定位与仓库范围校验复用 `_load_purchase_request_for_action`（404 语义与 S1 一致）。
+    """
+    principal = require_principal(request, permission="purchase.read")
+    _load_purchase_request_for_action(db, principal, request_id)
+    from app.repository import get_receipt_progress_for_request
+
+    return get_receipt_progress_for_request(
+        db, workspace_id=principal.workspace_id, request_id=request_id,
     )
 
 

@@ -558,6 +558,36 @@ class InboundResponse(BaseModel):
     created_at: datetime
     received_at: datetime | None
     confirmed_at: datetime | None
+    # P3-S2：追加两个可选键（既有 9 键逐字节不变，只在末尾追加）。
+    purchase_request_id: int | None = None
+    purchase_request_no: str | None = None
+
+
+class ReceiptProgressLine(BaseModel):
+    sku_id: int
+    requested_qty: int
+    received_qty: int | None
+    damaged_qty: int | None
+    accepted_qty: int | None
+    remaining_qty: int
+
+
+class ReceiptProgressTotals(BaseModel):
+    requested_qty: int
+    received_qty: int
+    damaged_qty: int
+    accepted_qty: int
+    remaining_qty: int
+
+
+class ReceiptProgressResponse(BaseModel):
+    purchase_request_id: int
+    progress_status: str
+    inbound_order_id: int | None
+    inbound_reference_no: str | None
+    inbound_status: str | None
+    lines: list[ReceiptProgressLine]
+    totals: ReceiptProgressTotals
 
 
 class InventoryItemResponse(BaseModel):

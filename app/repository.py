@@ -29,6 +29,8 @@ from app.db import (
     InboundLine,
     InventoryTransaction,
     InventoryBalance,
+    PurchaseRequest,
+    PurchaseRequestLine,
 )
 from app.jobs import JobClaimLost, JobStatus
 from app.schemas import ProductRecord
@@ -520,7 +522,28 @@ def create_warehouse(db: Session, *, code: str, name: str, warehouse_type: str, 
     return warehouse
 
 
-def _inbound_response_data(order: InboundOrder, lines: list[InboundLine]) -> dict:
+def _inbound_response_data(
+    order: InboundOrder,
+    lines: list[InboundLine],
+    *,
+    db: Session | None = None,
+) -> dict:
+    """组装入库单响应。
+
+    P3-S2：在既有 9 键之后**追加**两个可选键（既有键逐字节不变）：
+    `purchase_request_id` / `purchase_request_no`。`purchase_request_no` 需要查一次
+    `PurchaseRequest.request_no`，因此要求传入 `db`；未传 `db` 时两键分别为
+    `order.purchase_request_id` 与 `None`。
+    """
+    purchase_request_id = order.purchase_request_id
+    purchase_request_no: str | None = None
+    if purchase_request_id is not None and db is not None:
+        request_filters = [PurchaseRequest.id == purchase_request_id]
+        if order.workspace_id is not None:
+            request_filters.append(PurchaseRequest.workspace_id == order.workspace_id)
+        request = db.scalar(select(PurchaseRequest).where(*request_filters))
+        if request is not None:
+            purchase_request_no = request.request_no
     return {
         "id": order.id,
         "warehouse_id": order.warehouse_id,
@@ -542,6 +565,8 @@ def _inbound_response_data(order: InboundOrder, lines: list[InboundLine]) -> dic
         "created_at": order.created_at,
         "received_at": order.received_at,
         "confirmed_at": order.confirmed_at,
+        "purchase_request_id": purchase_request_id,
+        "purchase_request_no": purchase_request_no,
     }
 
 
@@ -659,6 +684,27 @@ def receive_inbound(
         if item["damaged_qty"] > item["received_qty"]:
             raise ValueError("DAMAGED_QTY_INVALID")
 
+    # P3-S2 U4 超收闸：仅对**有来源采购单**的入库单生效（无边单保持既有语义不变）。
+    # 位置在幂等重放闸之后、try 之前 → 重放不重复校验；抛错时零写入（mutation 全在 try 内）。
+    # 口径 A（已裁定）：只比对 received_qty（破损是 received 的子集，不是加数）。
+    if order.purchase_request_id is not None:
+        request_line_filters = [
+            PurchaseRequestLine.purchase_request_id == order.purchase_request_id,
+        ]
+        if order.workspace_id is not None:
+            request_line_filters.append(
+                PurchaseRequestLine.workspace_id == order.workspace_id
+            )
+        request_lines = db.scalars(
+            select(PurchaseRequestLine).where(*request_line_filters)
+        ).all()
+        requested_by_sku = {line.sku_id: line.requested_qty for line in request_lines}
+        for item in lines:
+            # 缺行按 0 处理（fail-closed）：宁可误拦不可漏放。
+            requested = requested_by_sku.get(int(item["sku_id"]), 0)
+            if item["received_qty"] > requested:
+                raise ValueError("OVER_RECEIVING_FORBIDDEN")
+
     try:
         for item in lines:
             line = by_sku[int(item["sku_id"])]
@@ -722,6 +768,104 @@ def confirm_inbound(
         db.rollback()
         raise
     return get_inbound(db, inbound_id=inbound_id, workspace_id=workspace_id)  # type: ignore[return-value]
+
+
+def get_receipt_progress_for_request(
+    db: Session,
+    *,
+    workspace_id: int | None,
+    request_id: int,
+) -> dict:
+    """只读派生：某采购单的收货进度（严禁反写——本函数不 commit、不写任何表）。
+
+    聚合规则：
+    - 明细基准来自 `PurchaseRequestLine.requested_qty`（采购事实层）；
+    - 入库单按唯一索引取该 PR 关联单（至多一张），**只聚合 status ∈ {received, confirmed}
+      的明细**（expected 单尚未报实收，不计入）；
+    - `accepted_qty = received_qty − damaged_qty`（破损是 received 的子集）；
+      `remaining_qty = max(requested_qty − received_qty, 0)`；
+    - `progress_status`：`pending`（PR 无明细或实收总量为 0）/ `partial`（0 < 实收 < 申请）/
+      `completed`（实收总量 ≥ 申请总量）。
+    """
+    request_line_filters = [PurchaseRequestLine.purchase_request_id == request_id]
+    if workspace_id is not None:
+        request_line_filters.append(PurchaseRequestLine.workspace_id == workspace_id)
+    request_lines = db.scalars(
+        select(PurchaseRequestLine)
+        .where(*request_line_filters)
+        .order_by(PurchaseRequestLine.id)
+    ).all()
+
+    order_filters = [InboundOrder.purchase_request_id == request_id]
+    if workspace_id is not None:
+        order_filters.append(InboundOrder.workspace_id == workspace_id)
+    order = db.scalar(select(InboundOrder).where(*order_filters))
+
+    received_by_sku: dict[int, tuple[int, int]] = {}
+    if order is not None and order.status in {"received", "confirmed"}:
+        inbound_lines = db.scalars(
+            select(InboundLine)
+            .where(InboundLine.inbound_order_id == order.id)
+            .order_by(InboundLine.id)
+        ).all()
+        for line in inbound_lines:
+            received_by_sku[line.sku_id] = (line.received_qty, line.damaged_qty)
+
+    lines: list[dict] = []
+    total_requested = 0
+    total_received = 0
+    total_damaged = 0
+    total_accepted = 0
+    total_remaining = 0
+    for request_line in request_lines:
+        requested = request_line.requested_qty
+        reported = received_by_sku.get(request_line.sku_id)
+        if reported is None:
+            received_qty = None
+            damaged_qty = None
+            accepted_qty = None
+            effective_received = 0
+        else:
+            received_qty, damaged_qty = reported
+            accepted_qty = received_qty - damaged_qty
+            effective_received = received_qty
+        remaining_qty = max(requested - effective_received, 0)
+        lines.append({
+            "sku_id": request_line.sku_id,
+            "requested_qty": requested,
+            "received_qty": received_qty,
+            "damaged_qty": damaged_qty,
+            "accepted_qty": accepted_qty,
+            "remaining_qty": remaining_qty,
+        })
+        total_requested += requested
+        total_received += effective_received
+        total_damaged += damaged_qty or 0
+        total_accepted += accepted_qty or 0
+        total_remaining += remaining_qty
+
+    if not lines or total_received == 0:
+        progress_status = "pending"
+    elif total_received < total_requested:
+        progress_status = "partial"
+    else:
+        progress_status = "completed"
+
+    return {
+        "purchase_request_id": request_id,
+        "progress_status": progress_status,
+        "inbound_order_id": order.id if order is not None else None,
+        "inbound_reference_no": order.reference_no if order is not None else None,
+        "inbound_status": order.status if order is not None else None,
+        "lines": lines,
+        "totals": {
+            "requested_qty": total_requested,
+            "received_qty": total_received,
+            "damaged_qty": total_damaged,
+            "accepted_qty": total_accepted,
+            "remaining_qty": total_remaining,
+        },
+    }
 
 
 def list_inventory(
