@@ -1739,3 +1739,88 @@ G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 
   ⑥库存筛选同时作用于积压表（消除死选项）；⑦`datetime.utcnow()` 沿用仓库既有写法（无 warnings=error）。
 - **基线新口径：全量 486 passed / 0 failed（P4 后）**。
 - **正式复核结论待用户指令**。
+
+---
+
+## §24 P4 正式复核结论（2026-11-01，复核方独立亲验）
+
+**复核对象**：`94ae9f2`（实施 5 文件 +1719/−1）+ `9ce13ac`（台账 §23）。
+**复核方式**：契约 §5——**提交态独立自跑**（不复用实施方与代收口数字），源码逐行亲验，
+禁区/守卫/裁定三项以正则实测而非采信交付说明。**结论：通过收口。**
+
+### 24.1 全量回归（我自跑，非引用）
+
+```
+486 passed, 11362 warnings in 277.73s
+（命令：env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1
+  /d/python/python/python.exe -m pytest -q -p no:cacheprovider）
+```
+
+- = 475 基线（`fa99bb2`）+ 11（P4）。**与代收口的 486/0 独立一致**，无 flaky 触发。
+- 工作区 `git status --porcelain` 为空，测的是提交态，不是工作副本。
+
+### 24.2 逐项核验（亲验，非采信）
+
+| 项 | 方法 | 结果 |
+|---|---|---|
+| 禁区零触碰 | `git diff --name-only fa99bb2..94ae9f2` 正则（dashboard.html／demo_seed／rag_query／retriever／answerer／db.py／migrations／config.py／conftest） | **零命中**；改动集恰 5 文件（`cockpit.py`/`main.py`/`schemas.py`/`cockpit.html`/`test_p4_cockpit.py`） |
+| 零新表零 migration | `alembic heads` + migrations 目录 diff 计数 | `0023_purchase_approval (head)` **唯一**，新增 0 个 |
+| main.py 纯追加 | 逐 hunk 读 diff | 仅：import 追加 1 行、导航元组插入 `/cockpit`、`_PAGE_ANCHORS` 新增 7 锚点、`运营分析` 组路径元组前插 `/cockpit`、新增 2 个路由函数；**既有路由函数体零改动** |
+| 性能红线（守卫 16） | `grep -n "db.execute"` + 循环位置比对 | **恰 6 条**（148/229/245/264/279/298），全在循环之前；`for` 循环（167/372/391/460/477/499/510）**全部只遍历已取回的行**，循环体内零查询 → **无 N+1** |
+| 趋势一次出全窗口 | 读 148-160 行 | 单条 `GROUP BY date(), currency` 覆盖 `[prev_start, window_end]`，内存按日切分（偏差 4） |
+| 知识库 9 标量子查询 | 读 298 行语句 | 9 个 `scalar_subquery` 同一条 SELECT，**一次往返** |
+| D8 空态顺序 | 源码位置断言 + 我人工复核顺序 | 两图均 `if(!hasData){chartEmpty(...);…return;}` → 之后才 `echarts.init`；`renderSalesTrend`/`renderInventoryPie` 各 1 处 init、各 1 处 chartEmpty 在前；`.chart-empty` 虚线占位；容器 id 常驻各 1 次 |
+| 口径 A 实现 | 读 515-580 行 | `NO_SALES`（`item is None` 或 `net_total == 0`，且 `total_on_hand > 0`）**优先且单值输出**；`SLOW_MOVING` 需 `complete_days > 0` 且 `days_of_inventory ≥ 90`；缺货命中即 `continue`，**积压不再重复计入**（饼图四类互斥） |
+| F-P4-1 订单数陷阱 | 读 146-160 行 + 675 行注记 | 订单数取 `count(distinct ExternalOrder.id)`，**未使用** `daily_sku_sales.order_count` 求和；`exchange_rate` 折算法无实现 |
+| Q-P4-3 多币种 | 读 415-455 行 | `by_currency` 按币种分组；主 `gmv` 序列仅单币种时非空，多币种整体留 null；**全仓无任何折算/相加代码** |
+| fx_todo 逐字 | 符号表 + 运行时断言 | `FX_TODO = "汇率折算依赖财务模块后续提供"`，顶层返回；P-10 与 P-4 两处用例断言逐字相等 |
+| 积压文案逐字 | `cockpit.html:14` | `overstockTexts={NO_SALES:'因近30天无销量滞销',SLOW_MOVING:'预计可售超90天'}` 与钦定原文一致；`statusBadge` 同文案兜底 |
+| 响应契约对齐 | `build_cockpit` 返回键 vs `CockpitResponse` 字段 | 顶层 14 键全对齐（`from_` 走 `alias="from"` + `populate_by_name`），`kpis` 6 卡字段与 `CockpitKpi` 全对齐 |
+| 用例质量 | 读 P-3/P-4/P-10/P-11 | 均**真造数据**后断言语义（稀疏日 null 而非 0、多币种不混加、空工作区 6 卡 quality=insufficient、P-11 按函数体切片做位置断言）——非形状快照断言 |
+| 调试残留 | 正则 TODO/FIXME/XXX/console.log/breakpoint | 仅 `FX_TODO`（裁定要求）与 `TODO_DETAIL_LIMIT`（常量名） |
+
+### 24.3 七条偏差正式判定
+
+| # | 偏差 | 判定 | 理由 |
+|---|---|---|---|
+| 1 | 测试未执行 | **闭环，不计入实施偏差** | 权限层所致（R-56），已由复核方代跑，全量 486/0 亲验 |
+| 2 | 未提交 | **闭环** | 已代提交 `94ae9f2`，工作区干净 |
+| 3 | 待办明细 UNION → 2 条普通 SELECT | **接受** | 查询数仍 6（≤8），`union_all(...).subquery()` 列映射风险在 SQLite 上确属未验证面；改普通 SELECT 是**降风险**方向，符合守卫 16 |
+| 4 | 环比与当期合并为 1 条 GROUP BY | **接受，且优于原方案** | 两窗口首尾相接，一次往返同时满足「趋势一次出全窗口」与环比；查询 7→6 |
+| 5 | 缺货/积压明细加 50 条上限 | **接受** | 卡片计数仍为全量，截断口径已写进 `LIMITATIONS`（第 7 条）并由 `renderLimitations` 展示 |
+| 6 | 库存状态筛选同时作用于积压表 | **接受** | 消除 `overstock` 在缺货表的死选项；不触碰任何断言 |
+| 7 | `datetime.utcnow()` | **接受** | 与仓库既有写法一致，仓库无 `filterwarnings=error`；已随全仓技术债一并登记 |
+
+### 24.4 复核方改动产品代码的正式认定
+
+`app/cockpit.py:655` `gvm_value` → `gmv_value`（**代修 1 行**，`94ae9f2` 内含）。
+- **可追溯性说明**：`app/cockpit.py` 在该提交中为**新建文件**（父提交 `d548746` 无此文件），
+  故 `git show 94ae9f2` 的 diff 全是 `+` 行，看不到「改前→改后」痕迹——这是正常的，不是缺证。
+  独立核实方式：`grep -n "gmv_value" app/cockpit.py` 现为 445（定义）/448（赋值）/655（使用）三处；
+  typo 在**使用处 655**（`"value": gvm_value`），445/448 原本拼写正确 → 与「NameError 抛在第 655 行」
+  完全自洽，也解释了为何只需改 1 行。
+- 性质：`NameError` 级 typo，致 11 例中 9 例 500；**零语义变化**（同一变量重命名修正）。
+- 判定：**合规**。依据 H1 硬闸门——实施方 0 自跑即交付，缺陷本应在 H1 被拦下；
+  复核方代跑时定位并修复，符合 R-57 处置协议（根因登记：**不自跑的交付 = 把 H1 成本转嫁给复核方**）。
+
+### 24.5 新增观察项（不阻断，登记备查）
+
+- **O-P4-1（权限语义不一致，非本片引入）**：`analytics.read` 在 `identity.py:34-35` 授予
+  `CUSTOMER_SERVICE` / `READONLY`，但 `/cockpit` 页面与 `/api/dashboard/cockpit` 用
+  `roles=(ADMIN, OPERATIONS)` 收窄，`require_principal` 的 `permission` 与 `roles` 是 **AND** 关系
+  → 客服/只读实为 403。与 `/dashboard` **同模式**，属既有设计；若未来要开放「只读看板」，
+  需连同 dashboard 一并调整。
+- **O-P4-2（契约类型偏宽）**：`CockpitResponse.window` / `knowledge` / `CockpitTodo.*` 为
+  `dict` / `list[dict]`，OpenAPI 对四张待办表的字段无约束。功能无风险，仅契约强度弱于
+  `CockpitKpi` 与 `CockpitSalesTrend`。
+- **O-P4-3（全窗口零销量时的诚实性）**：窗口内**完全无** `daily_sku_sales` 事实时，
+  有库存的 SKU 因 `reason is None` 归入 `healthy`（代码注释已明示「不能断言无销量」），
+  同时 `window.data_completeness` 会带 `NO_SALES_FACTS` 并由前端 limitations 展示。
+  即「结论保守 + 明示数据缺失」。**判定可接受**；若日后做成对外报表，建议 healthy 改中性态。
+- **O-P4-4**：`app/cockpit.py` 781 行单文件，未拆 service 层。与 P1-1（main.py 拆分）同属
+  冻结项范畴，**不排期**。
+
+### 24.6 残留
+
+无阻断项。P4 收口后本地 ahead 6（P4 草案/定稿/性能红线/实施/台账/本结论），
+按阶段策略待用户推送裁定。P1-1（main.py 拆分）继续冻结。
