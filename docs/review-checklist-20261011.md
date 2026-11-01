@@ -1838,3 +1838,72 @@ G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 
 > 模板无法使用继承，任何「统一注入」需求只能走每模板 `<link>` 或改渲染函数；
 > ② 变量体系分两套（`--shell-*` 8 个在全局 CSS，`--page/--brand/…` 11 个仅在 3 个模板局部定义），
 > 其余 7 个模板的 `var(--…)` 引用长期悬空、声明被浏览器静默丢弃 —— 由 P5-S1 收敛修复。
+
+---
+
+## §26 P5-S1 正式复核结论（2026-11-01，复核方独立亲验）
+
+**结论：通过收口。** 实施提交 `0df5dc9`，任务文件 v1.0 `917b7c5`。
+基线 **494 passed / 0 failed / 291.47s**（复核方在提交态自跑，工作区干净，非引用交付说明）。
+
+### 26.1 G1–G14 逐项实测
+
+| 守卫 | 要求 | 实测 | 判定 |
+|---|---|---|---|
+| **G1** | 零后端改动 | 改动集 13 文件 = 1 新建 CSS + 1 改 CSS + 10 模板 + 1 测试；`app/*.py` / `migrations/` / `db.py` **零命中** | ✅ |
+| **G2** | 五个无空格字面串 | `position:fixed` / `height:100vh` / `overflow-y:auto` / `margin-left:232px` / `margin-left:76px` **各 1 次** | ✅ |
+| **G3** | `<script>` 零改动 | 两套口径对拍父/子：`#[0-9a-fA-F]{3,8}\b\|rgba?\(` **24→24**；小写口径 `#[0-9a-f]{3,8}\|rgb\(` **21→21** | ✅ |
+| **G4** | 无外部框架/字体 | `tailwind` / `bootstrap` / `cdn.` / `unpkg` / `jsdelivr` / `@font-face` / `googleapis` / `fonts.` 全仓**零命中** | ✅ |
+| **G5** | 选择器超集 | `workspace-shell.css` **66 → 66**，零删除零新增 | ✅ |
+| **G6** | DOM 超集 | 10 页 `id` 集合与 `class` 单名集合**逐页完全相等**（无丢失）；`<aside class="sidebar">` 每页唯一 | ✅ |
+| **G7** | P4 D8 仍绿 | `test_p4_cockpit.py` + `test_api_dashboard.py` + `test_p5s1_tokens.py` 定向 **23 passed** | ✅ |
+| **G8** | 模板无 `:root` | 10 页 `grep -c ":root"` **全为 0** | ✅ |
+| **G9** | 路由数不变 | `grep -c '@app\.' main.py` 父子相同 | ✅ |
+| **G10** | 无构建步骤 | 无 `package.json` / `*.scss` / `postcss.config` | ✅ |
+| **G11** | 色值取自现状 | 49 个去重 hex 中 **48 个命中**父提交仓库，唯一未命中 `#1f63b5`（`--color-primary-hover`，任务书明示豁免的推导值）；两个 `rgba()` 中一个位于注释、一个是 D6 原文字面值（alpha 豁免） | ✅ |
+| **G12** | 硬编码归零 | 10 页 `<style>` 内 hex **180 → 0**、`rgba(` **0**；全仓 `rgba(` 仅 `tokens.css`（1 处实值 + 1 处注释） | ✅ |
+| **G13** | 表格可读性零改动 | 规则级对比：shell **仅 `:root` 一条变化，其余 65 条逐字节相同**（`table` 规则 SAME）；模板侧 `th,td` 仅 `#e4eaf2`→`var(--color-border)`，`padding`/`text-align`/`font-size`/`vertical-align` 逐字未动；`customer_service` 的 4 条 `.cs-table*` 归一化后全部 SAME | ✅ |
+| **G14** | 空态仍可用 | `.empty` 定义在 shell 保留；`.chart-empty` **仍在 `cockpit.html`** 且已 token 化 | ✅ |
+
+### 26.2 附加亲验（守卫之外）
+
+- **link 注入顺序 10/10 正确**：每页 `tokens.css` 偏移均早于 `workspace-shell.css`（如 `admin_users` 183 < 237、`orders` 178 < 232）。
+- **零悬空引用**：模板 `<style>` 内 `var(--…)` 实测 **234 处**（cockpit 63 / dashboard 47 / customer_service 40 …），全部有定义。
+- **删除的 14 项重复规则，逐项在 L2 有等值基准**：`.tag{display:inline-flex;…}`、`.status.error,.error{color:#a72727}`、`.panel-head{…}`、`.page-heading h1{margin:0;font-size:1.55rem}` 均存在于 shell（初审时因组合选择器与重复键误判为缺失，已用 `grep -o` 逐个证伪）。
+- **`/login` 无悬空风险**：`main.py` 内联 HTML **零 `var(--)` 引用**，仅 2 个硬编码色值（`#2563eb` = R-59、`#cbd5e1`），故未注入 `tokens.css` 不产生副作用。
+- **CSS 语法完整性**：`tokens.css` `{`/`}` = 2/2、`workspace-shell.css` = 82/82，均平衡；无空 `var()`。
+- **`warehouse.html` 编码非回归**：父提交与当前均为合法 UTF-8（title「仓库收货」），`git diff` 中的乱码是终端管道显示问题，**非文件损坏**。
+
+### 26.3 交付说明的 1 处文档笔误（不影响代码）
+
+`§3.2` 标题写「**9 个**此前没有 `body` 规则的模板」，与同节表格自相矛盾。实测：父提交**有** `body` 规则的是 `cockpit` / `dashboard` / `warehouse` / `admin_users` **4 个**，**无**的是 `index` / `content` / `orders` / `shopify` / `assistant` / `customer_service` **6 个**。
+
+表格内容本身正确（6 个「没有」+ 4 个「有」），仅小标题数字应为 **6**。同节注文「这 6 页」亦与实测一致。判定为**笔误，非事实错误**，不影响任何代码与视觉结论。
+
+### 26.4 九条偏差：全部接受
+
+其中 3 条判定为**优于原方案**：
+
+- **偏差 1**（`--shadow-card` 用 `#1e3a5f0d` 而非 D6 字面的 `rgba(30,58,95,.05)`）：D6 字面写法在改动前仓库 `grep` 不到 → 会自触 G11；hex 8 位形式既是**仓库原值字节**又同时满足 G11 与 G12。α 差 13/255 vs 12.75/255，视觉不可辨。**处理正确。**
+- **偏差 8**（`tabular-nums` 挂 `body` 而非 `th,td`）：绕开 G13 对 `th,td` 的 `font-*` 禁令，靠继承生效，实现 D6「金额等宽」而不触碰任何被禁声明。**边界把握准确。**
+- **偏差 3**（诚实标注 `--neutral-700` 在仓库仅以 8 位带 alpha 前缀存在）：主动披露而非掩盖，可追溯。
+
+其余 6 条（`--shadow-overlay` alpha、字体栈扩展、`color-scheme` 作用域扩大、9 页 `body` 首次获背景/字色、`customer_service` 两处阴影几何变化、未改 `tests/`）均为任务书强制项或红线约束的**必然结果**，已逐条列出行为。
+
+### 26.5 新增观察（不阻断，登记备查）
+
+| 编号 | 观察 | 说明 |
+|---|---|---|
+| **O-P5S1-1** | `workspace-shell.css` 内仍有 **29 处硬编码色值** | G2 禁改所致（改 shell 会破坏 5 个字面串断言）。其中 `#c53b45`、`#9aa9bb` **未纳入 `tokens.css`**（tokens 里无对应语义位），后续切片处理 |
+| **O-P5S1-2** | `--color-primary-hover` 定义但**零引用** | 未做项 2 已声明：全仓唯一主色 hover 走 `filter:brightness(.96)`，接入需改 shell → 触 G2 |
+| **O-P5S1-3** | `body{font-variant-numeric:tabular-nums}` **全局生效** | 不只影响表格，也影响卡片数值、正文数字。属 D6 设计意图（P4 的 `.card-value` 早已自带该属性），非意外外溢；偏差 8 已声明 |
+| **O-P5S1-4** | `color-scheme:light` 作用域由 2 页扩至全站 | 随 `:root` 收敛进 L1 的必然结果；系统深色模式下 8 页此前可能被浏览器反色，现固定浅色，属修复 |
+| **O-P5S1-5** | 交付说明 `§3.2` 标题数字 9→6 | 见 26.3，文档层笔误 |
+| **O-P5S1-6** | `--font-mono` / `--color-info` / 多数 `--neutral-*` 暂无引用点 | T-1 只校验存在性；token 集合完备供后续切片按需接入，符合 D5/D6 |
+
+### 26.6 残留
+
+**无阻断项。** 基线由 486 → **494**（+8：`tests/test_p5s1_tokens.py` T-1..T-8），符合 Q-P5S1-1 裁定「既有 486 全绿 + 新增 8 条全绿」。
+
+P5-S1 收口后本地 ahead 2（`0df5dc9` 实施 + 本结论），连同 P4 遗留待推项按阶段策略等用户推送裁定。
+P1-1（`main.py` 拆分）继续冻结。R-59 待立项。
