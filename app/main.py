@@ -159,6 +159,7 @@ from app.schemas import (
     ExternalInventoryPreviewRequest,
     ExternalInventoryPreviewResponse,
     DashboardSummaryResponse,
+    CockpitResponse,
     ExternalSyncRetryRequest,
     ExternalSyncRunResponse,
     ExternalSyncDeadLetterResponse,
@@ -243,6 +244,7 @@ app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), na
 
 
 _WORKSPACE_NAV_ITEMS = (
+    ("/cockpit", "经营驾驶舱", "◎", (ROLE_ADMIN, ROLE_OPERATIONS), "analytics.read"),
     ("/dashboard", "运营驾驶舱", "▦", (ROLE_ADMIN, ROLE_OPERATIONS), "inventory.read"),
     ("/orders", "订单事实", "▣", (ROLE_ADMIN, ROLE_OPERATIONS), "inventory.read"),
     ("/ops", "运营工作台", "◫", (ROLE_ADMIN, ROLE_OPERATIONS), None),
@@ -256,6 +258,15 @@ _SYSTEM_NAV_ITEMS = (
     ("/customer-service", "客服知识", "?", (ROLE_ADMIN, ROLE_OPERATIONS, ROLE_CUSTOMER_SERVICE, ROLE_READONLY), "knowledge.read"),
 )
 _PAGE_ANCHORS = {
+    "/cockpit": (
+        ("cockpit-sales-panel", "销售趋势"),
+        ("cockpit-inventory-panel", "库存分布"),
+        ("cockpit-shortage-panel", "缺货与补货待办"),
+        ("cockpit-overstock-panel", "积压与滞销待办"),
+        ("cockpit-purchase-panel", "采购待审批"),
+        ("cockpit-inbound-panel", "未完成入库"),
+        ("cockpit-metric-panel", "指标口径与已知限制"),
+    ),
     "/dashboard": (
         ("sales-trend-panel", "销量趋势"),
         ("inventory-risk-panel", "库存风险"),
@@ -294,7 +305,7 @@ def _visible_navigation(principal, active_path: str) -> str:
 
     nav_by_path = {item[0]: item for item in _WORKSPACE_NAV_ITEMS}
     groups = (
-        ("运营分析", "Workspace", tuple(nav_by_path[path] for path in ("/dashboard", "/orders", "/ops", "/assistant", "/content", "/shopify") if path in nav_by_path)),
+        ("运营分析", "Workspace", tuple(nav_by_path[path] for path in ("/cockpit", "/dashboard", "/orders", "/ops", "/assistant", "/content", "/shopify") if path in nav_by_path)),
         ("仓储履约", "Warehouse", tuple(nav_by_path[path] for path in ("/warehouse",) if path in nav_by_path)),
         ("系统管理", "System", tuple(nav_by_path[path] for path in ("/admin/users",) if path in nav_by_path)),
         ("客服知识", "Knowledge", _SYSTEM_NAV_ITEMS),
@@ -1926,6 +1937,29 @@ def dashboard_summary(
 def dashboard_page(request: Request) -> HTMLResponse:
     principal = require_principal(request, roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     return _render_workspace_page("dashboard.html", principal, "/dashboard")
+
+
+@app.get("/cockpit", response_class=HTMLResponse)
+def cockpit_page(request: Request) -> HTMLResponse:
+    principal = require_principal(request, permission="analytics.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    return _render_workspace_page("cockpit.html", principal, "/cockpit")
+
+
+@app.get("/api/dashboard/cockpit", response_model=CockpitResponse)
+def cockpit_summary(
+    request: Request,
+    days: int = Query(default=7, ge=1, le=90),
+    as_of: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    principal = require_principal(request, permission="analytics.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    from app.cockpit import build_cockpit
+    return build_cockpit(
+        db,
+        workspace_id=principal.workspace_id,
+        days=days,
+        as_of=as_of,
+    )
 
 
 

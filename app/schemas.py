@@ -59,6 +59,103 @@ class DashboardSummaryResponse(BaseModel):
     external_facts: dict = Field(default_factory=dict)
 
 
+class CockpitMeta(BaseModel):
+    """经营驾驶舱的时间基准与口径说明。"""
+
+    workspace_id: int
+    as_of: str
+    timezone: str = "UTC"
+    generated_at: str | None = None
+    days: int
+    from_: str = Field(default="", alias="from")
+    to: str
+    prev_from: str
+    prev_to: str
+    data_completeness: Literal["complete", "partial", "insufficient", "unknown"] = "unknown"
+    limitations: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CockpitKpi(BaseModel):
+    """单张指标卡：主值、标签、变化值、辅助信息与口径来源。"""
+
+    key: str
+    label: str
+    value: int | float | str | None = None
+    unit: str | None = None
+    change_ratio: float | None = None
+    change_basis: str | None = None
+    quality: Literal["complete", "partial", "insufficient", "unknown"] = "unknown"
+    reason: str | None = None
+    source: str | None = None
+    note: str | None = None
+    multi_currency: bool = False
+
+
+class CockpitCurrencyAmount(BaseModel):
+    """按币种分组的金额与订单数；分组返回，绝不折算。"""
+
+    currency: str
+    gmv: str
+    order_count: int
+
+
+class CockpitSalesTrend(BaseModel):
+    """销售趋势：缺失日留 null 断开，不补 0。"""
+
+    dates: list[str]
+    gmv: list[str | None] = Field(default_factory=list)
+    order_counts: list[int] = Field(default_factory=list)
+    gmv_by_currency: dict[str, list[str | None]] = Field(default_factory=dict)
+    days_with_data: list[bool] = Field(default_factory=list)
+    missing_days: int = 0
+    currencies: list[str] = Field(default_factory=list)
+
+
+class CockpitInventoryDistribution(BaseModel):
+    """库存分布四类计数；unknown_policy 单列不占饼。"""
+
+    out_of_stock: int = 0
+    below_reorder: int = 0
+    healthy: int = 0
+    overstock: int = 0
+    unknown_policy: int = 0
+
+
+class CockpitTodo(BaseModel):
+    """底部四个待办列表。"""
+
+    shortage: list[dict] = Field(default_factory=list)
+    overstock: list[dict] = Field(default_factory=list)
+    purchase_approvals: list[dict] = Field(default_factory=list)
+    pending_inbounds: list[dict] = Field(default_factory=list)
+    pending_purchase_count: int = 0
+    pending_inbound_count: int = 0
+
+
+class CockpitResponse(BaseModel):
+    """GET /api/dashboard/cockpit 响应（只读聚合）。"""
+
+    meta: CockpitMeta
+    days: int
+    from_: str = Field(default="", alias="from")
+    to: str
+    prev_from: str
+    prev_to: str
+    window: dict = Field(default_factory=dict)
+    kpis: dict[str, CockpitKpi] = Field(default_factory=dict)
+    by_currency: list[CockpitCurrencyAmount] = Field(default_factory=list)
+    fx_todo: str
+    sales_trend: CockpitSalesTrend
+    inventory_distribution: CockpitInventoryDistribution
+    knowledge: dict = Field(default_factory=dict)
+    todo: CockpitTodo
+    limitations: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class OperationsTodoItem(BaseModel):
     todo_id: str
     type: str
