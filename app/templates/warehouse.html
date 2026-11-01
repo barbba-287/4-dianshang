@@ -1,10 +1,11 @@
 <!doctype html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>仓库收货</title>
+<link rel="stylesheet" href="/static/css/tokens.css">
 <link rel="stylesheet" href="/static/workspace-shell.css">
 <script src="/static/labels.js?v=20260915-2"></script>
 <style>
-body{background:var(--shell-page);color:var(--shell-ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif}.sidebar{min-height:100vh}.content{max-width:1120px}.panel{margin-top:1rem}
+body{background:var(--shell-page);color:var(--shell-ink);font-family:var(--font-sans)}.sidebar{min-height:100vh}.content{max-width:1120px}
 </style></head>
 <body><div class="shell"><aside class="sidebar"></aside><main class="main"><header class="topbar"><div class="muted">Workspace / <strong>仓库收货</strong></div><div><button id="logout" type="button">退出登录</button></div></header><div class="content"><div class="page-heading"><div><h1>仓库收货</h1><p class="muted">提交授权仓库的实收反馈；运营确认前不会改变内部库存。</p></div></div><section class="panel"><div class="panel-head"><h2>选择授权仓库</h2><span class="muted">仅显示当前账户可访问范围</span></div><p id="message" class="status">正在加载授权仓库…</p><div class="row"><div class="field"><label for="warehouse">授权仓库</label><select id="warehouse"></select></div><button id="refresh" type="button">刷新待收货单</button></div></section><section class="panel"><div class="panel-head"><h2>待收货入库单</h2><span class="muted">选择单据后核对预计数量</span></div><div class="row"><div class="field"><label for="inbound">入库单</label><select id="inbound"></select></div><button id="load-inbound" type="button" disabled>加载明细</button></div><div id="details" class="table-wrap"></div></section><section class="panel"><div class="panel-head"><h2>仓库实收反馈</h2><span class="muted">含实收总数与破损数量</span></div><p id="state" class="muted">请选择入库单。</p><p id="source" class="muted"></p><div id="receive-lines"></div><div class="row"><button id="receive" type="button" disabled>提交实收</button></div></section></div></main></div><script>
 const $=selector=>document.querySelector(selector); const message=$('#message'); const warehouse=$('#warehouse'); const inbound=$('#inbound'); const loadInbound=$('#load-inbound'); const receive=$('#receive'); let current=null; let receiveKey=null;

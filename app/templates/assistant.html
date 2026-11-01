@@ -4,17 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI 运营助手</title>
-  <link rel="stylesheet" href="/static/workspace-shell.css">
+  <link rel="stylesheet" href="/static/css/tokens.css">
+<link rel="stylesheet" href="/static/workspace-shell.css">
   <script src="/static/labels.js?v=20260915-2"></script>
   <style>
-    .assistant-result { padding: 1rem; background: #fbfcfe; border: 1px solid var(--shell-line); border-radius: .5rem; }
+    .assistant-result { padding: 1rem; background: var(--color-surface-subtle); border: 1px solid var(--shell-line); border-radius: .5rem; }
     .assistant-result table { min-width: 760px; }
-    .assistant-empty { padding: 1rem; color: var(--shell-muted); background: #fbfcfe; border: 1px dashed #cad6e5; border-radius: .5rem; }
+    .assistant-empty { padding: 1rem; color: var(--shell-muted); background: var(--color-surface-subtle); border: 1px dashed var(--color-border-dashed); border-radius: .5rem; }
     .assistant-summary { display: flex; flex-wrap: wrap; gap: .6rem; margin: .7rem 0; }
     .assistant-summary .card { min-width: 130px; }
     .assistant-shortcuts { display: flex; flex-wrap: wrap; gap: .5rem; margin: .75rem 0; }
     .assistant-shortcuts button { font-size: .82rem; }
-    .readonly-badge { display: inline-flex; padding: .25rem .55rem; border-radius: 999px; background: #eaf5ee; color: #2f6b4f; font-size: .75rem; }
+    .readonly-badge { display: inline-flex; padding: .25rem .55rem; border-radius: 999px; background: var(--color-success-muted); color: var(--color-success-ink); font-size: .75rem; }
     .assistant-note { margin: .7rem 0; color: var(--shell-muted); font-size: .82rem; }
     .assistant-table-wrap { overflow-x: auto; margin-top: .75rem; }
   </style>
@@ -46,7 +47,7 @@
             <button type="button" data-question="查看商品和 SKU 信息">商品与 SKU</button>
           </div>
           <label class="field" for="assistant-message">问题</label>
-          <textarea id="assistant-message" maxlength="2000" rows="3" style="width:100%;padding:.7rem;border:1px solid #cbd7e5;border-radius:.45rem;font:inherit" placeholder="例如：哪些 SKU 的库存健康需要关注？"></textarea>
+          <textarea id="assistant-message" maxlength="2000" rows="3" style="width:100%;padding:.7rem;border:1px solid var(--color-border-input-strong);border-radius:.45rem;font:inherit" placeholder="例如：哪些 SKU 的库存健康需要关注？"></textarea>
           <div class="actions" style="margin-top:.7rem">
             <button id="assistant-submit" type="button">查询</button>
             <span id="assistant-status" class="status" role="status"></span>

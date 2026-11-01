@@ -4,24 +4,25 @@
   <meta charset="utf-8">
   <title>运营工作台</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/css/tokens.css">
 <link rel="stylesheet" href="/static/workspace-shell.css">
 <script src="/static/labels.js?v=20260915-2"></script>
   <style>
-    #operations-today-panel { margin: 1rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: #fffdf5; }
+    #operations-today-panel { margin: 1rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: var(--color-bg-warm); }
     #operations-today-panel .todo-header { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.7rem; align-items:flex-start; }
     #operations-today-panel .todo-summary { display:flex; flex-wrap:wrap; gap:.45rem; margin:.75rem 0; }
     #operations-today-panel .todo-list { display:grid; gap:.5rem; }
     #operations-today-panel .todo-toolbar { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; margin:.7rem 0; }
     #operations-today-panel .todo-toolbar button { min-height:2rem; padding:.4rem .6rem; }
     #operations-today-panel .todo-select { flex:0 0 auto; margin-right:.45rem; }
-    #operations-today-panel .todo-item { display:flex; justify-content:space-between; gap:1rem; padding:.7rem; border:1px solid var(--line); border-radius:.45rem; background:#fff; }
+    #operations-today-panel .todo-item { display:flex; justify-content:space-between; gap:1rem; padding:.7rem; border:1px solid var(--line); border-radius:.45rem; background:var(--color-surface); }
     #operations-today-panel .todo-item-main { min-width:0; }
     #operations-today-panel .todo-item-title { font-weight:650; }
     #operations-today-panel .todo-item-meta { margin-top:.25rem; font-size:.78rem; color:var(--muted); overflow-wrap:anywhere; }
     #operations-today-panel .todo-item a { flex:0 0 auto; align-self:center; }
     @media(max-width:600px){#operations-today-panel .todo-item{display:block}#operations-today-panel .todo-item a{display:inline-block;margin-top:.5rem}}
     #products { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .85rem; margin-top: 1rem; }
-    .price { color: var(--danger); font-size: 1.2rem; font-weight: 700; } .step { margin-top: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: #fbfcfe; } .step h3 { margin-bottom: .55rem; font-size: .95rem; }
+    .price { color: var(--danger); font-size: 1.2rem; font-weight: 700; } .step { margin-top: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: var(--color-surface-subtle); } .step h3 { margin-bottom: .55rem; font-size: .95rem; }
   </style>
 </head>
 <body>

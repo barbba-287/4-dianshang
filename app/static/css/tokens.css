@@ -1,0 +1,161 @@
+/* ==========================================================================
+   P5-S1 设计 Token 层（L1：唯一真源）
+   --------------------------------------------------------------------------
+   职责边界（D3）：
+     L1 本文件   = :root 变量定义 + 极少量全局重置（html/body 字体与背景）
+     L2 workspace-shell.css = 全站组件类（.panel/.card/.tag/table/button 等）
+     L3 各模板 <style>     = 仅该页独有的布局微调，不得再出现色值字面量与 :root
+
+   色值来源（G11）：除 --color-primary-hover（推导值）与 --shadow-overlay 的 alpha
+   （推导值）外，每个色值均可在改动前的仓库 app/ 下 grep 到。
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* ---------- 语义色（13 个，D5） ---------- */
+  --color-primary: #2a78d6;          /* 现状 --brand / --shell-brand */
+  --color-primary-hover: #1f63b5;    /* 推导值：主色明度下调，仅用于 :hover */
+  --color-primary-soft: #eaf2fc;     /* 现状 --brand-soft */
+  --color-success: #0ca30c;          /* 现状 --good */
+  --color-warning: #d58b00;          /* 现状 --warning */
+  --color-danger: #d03b3b;           /* 现状 --critical，同时补齐悬空的 --danger */
+  --color-info: #2a78d6;             /* 复用主色，不新造色相 */
+  --color-bg: #f4f7fb;               /* 现状 --page / --shell-page */
+  --color-surface: #ffffff;          /* 现状 --panel / --shell-panel */
+  --color-border: #e4eaf2;           /* 现状 --line / --shell-line */
+  --color-text: #142033;             /* 现状 --ink / --shell-ink */
+  --color-text-muted: #69778b;       /* 现状 --muted / --shell-muted */
+  --color-nav-bg: #14243a;           /* 现状 --shell-nav */
+
+  /* ---------- 主色衍生（值均取自现状） ---------- */
+  --color-primary-deep: #1f5ca8;     /* 现状 .tag.info 文字 */
+  --color-primary-ink: #29415b;      /* 现状 .workflow-node 文字 */
+  --color-primary-border: #a9c9ec;   /* 现状 .picker-option:hover 边框 */
+  --color-on-primary: #ffffff;       /* 现状主色底上的前景文字 */
+
+  /* ---------- 成功态（值均取自现状） ---------- */
+  --color-success-strong: #14751a;   /* 现状 .tag.good / .status.success 文字 */
+  --color-success-soft: #e9f7ec;     /* 现状 .tag.good 背景 */
+  --color-success-muted: #eaf5ee;    /* 现状 .readonly-badge 背景 */
+  --color-success-ink: #2f6b4f;      /* 现状 .readonly-badge 文字 */
+
+  /* ---------- 警示态（值均取自现状） ---------- */
+  --color-warning-strong: #946500;   /* 现状 .tag.warn / .status.warning 文字 */
+  --color-warning-soft: #fff4d6;     /* 现状 .tag.warn 背景 */
+  --color-warning-muted: #fff8e6;    /* 现状 .cs-boundary 背景 */
+  --color-warning-border: #f0d58a;   /* 现状 .cs-boundary 边框 */
+  --color-warning-ink: #795b00;      /* 现状 .cs-boundary 文字 */
+
+  /* ---------- 危险态（值均取自现状） ---------- */
+  --color-danger-strong: #a72727;    /* 现状 .tag.critical / .status.error 文字 */
+  --color-danger-soft: #fde9e9;      /* 现状 .tag.critical 背景 */
+  --color-danger-muted: #fdf4f4;     /* 现状 .error-panel 背景 */
+  --color-danger-border: #f0c9c9;    /* 现状 .error-panel 边框 */
+
+  /* ---------- 表面与背景层次（值均取自现状） ---------- */
+  --color-surface-subtle: #fbfcfe;   /* 现状 .step / .assistant-result 背景 */
+  --color-bg-muted: #edf0f4;         /* 现状 .tag.inactive / .tag.insufficient 背景 */
+  --color-bg-tint: #f7fafe;          /* 现状 .detail / .workflow-node 背景 */
+  --color-bg-tint-soft: #f1f6fb;     /* 现状 .cs-suggestions button:hover 背景 */
+  --color-bg-warm: #fffdf5;          /* 现状 #operations-today-panel 背景 */
+  --color-bg-faint: #f8fbff;         /* 现状 .member-table tbody tr:hover 背景 */
+  --color-bg-canvas-start: #eef2f7;  /* 现状 .skeleton 渐变起点 */
+  --color-bg-canvas-end: #f7f9fc;    /* 现状 .skeleton 渐变终点 */
+
+  /* ---------- 边框层次（值均取自现状） ---------- */
+  --color-border-soft: #dce7f2;      /* 现状 .cs-detail 边框 */
+  --color-border-subtle: #eef2f6;    /* 现状 .cs-suggestions button 分隔线 */
+  --color-border-muted: #cbd8e8;     /* 现状 .workflow-node 边框 */
+  --color-border-input: #ccd7e5;     /* 现状表单控件边框 */
+  --color-border-input-strong: #cbd7e5; /* 现状 cockpit/dashboard 表单控件边框 */
+  --color-border-dashed: #cad6e5;    /* 现状 .empty / .chart-empty 虚线边框 */
+
+  /* ---------- 文字层次（值均取自现状） ---------- */
+  --color-text-subtle: #687589;      /* 现状 .tag.inactive / .card-quality 文字 */
+  --color-text-inverse: #dbe7f5;     /* 现状侧栏前景 */
+  --color-text-nav-muted: #8fa5bf;   /* 现状 .nav-label 文字 */
+  --color-text-nav-link: #c4d2e3;    /* 现状 .nav a 文字 */
+  --color-nav-overlay: #ffffff14;     /* 现状侧栏悬停叠色 */
+
+  /* ---------- 中性色阶（11 档，D5） ---------- */
+  --neutral-0: #ffffff;
+  --neutral-50: #fbfcfe;
+  --neutral-100: #f4f7fb;
+  --neutral-200: #edf2f7;
+  --neutral-300: #e4eaf2;
+  --neutral-400: #cbd5e1;
+  --neutral-500: #9fb2c8;
+  --neutral-600: #69778b;
+  --neutral-700: #1e3a5f;
+  --neutral-800: #14243a;
+  --neutral-900: #142033;
+
+  /* ---------- 字号（7 级，D6） ---------- */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 16px;
+  --text-lg: 20px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+
+  /* ---------- 行高（2 级，D6） ---------- */
+  --leading-tight: 1.4;
+  --leading-normal: 1.6;
+
+  /* ---------- 间距（4 的倍数，D6） ---------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* ---------- 圆角（4 级，D6） ---------- */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+
+  /* ---------- 阴影（2 级，D6） ----------
+     --shadow-card 沿用现状 shell/模板原值 #1e3a5f0d（G11：色值可 grep），
+     等价于 D6 的 rgba(30,58,95,.05)。
+     --shadow-overlay 的 alpha 为推导值（G11 豁免项）。 */
+  --shadow-card: 0 8px 24px #1e3a5f0d;
+  --shadow-overlay: 0 16px 40px rgba(30,58,95,.16);
+
+  /* ---------- 字体（D7：系统字体栈，不引入任何外部字体） ---------- */
+  --font-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* ===== 兼容别名（deprecated）：仅为既有引用保留，禁止新增引用 =====
+     全站 --brand 9 处、--muted 32 处、--line 13 处、--ink 7 处引用，
+     逐个改名等于 60+ 处高风险替换，收益为零，故保留别名层。 */
+  --page: var(--color-bg);
+  --panel: var(--color-surface);
+  --ink: var(--color-text);
+  --muted: var(--color-text-muted);
+  --line: var(--color-border);
+  --brand: var(--color-primary);
+  --brand-soft: var(--color-primary-soft);
+  --good: var(--color-success);
+  --warning: var(--color-warning);
+  --critical: var(--color-danger);
+  --danger: var(--color-danger);      /* 补齐全仓零定义的历史悬空引用 */
+  --shadow: var(--shadow-card);
+}
+
+/* ==========================================================================
+   极少量全局重置（D3：仅 html/body 的字体与背景，不含任何组件样式）
+   注意：不设 body{margin}（保持现状）
+   font-variant-numeric: tabular-nums 满足 D6「金额等宽」，可被数字继承；
+   它不属于 G13 禁改的 padding / text-align / font-* 之列。
+   ========================================================================== */
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+}
