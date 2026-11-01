@@ -197,3 +197,87 @@ def test_t12_global_reset_and_panel_card_declared():
         assert w in css, f'ui-v2.css 缺少卡片化选择器 {w}'
     for banned in ('#kpis', '#kpi-grid', '#knowledge'):
         assert banned not in css, f'ui-v2.css 误把网格容器 {banned} 纳入卡片化白名单'
+
+
+# ================================================================ B 段（T-8..T-11）
+
+def _style_of(name: str) -> str:
+    """取模板全部 <style> 内容拼接。"""
+    text = _read(TPL_DIR / name)
+    return '\n'.join(re.findall(r'<style[^>]*>(.*?)</style>', text, re.S))
+
+
+def test_t8_b_segment_deleted_skeleton_copies():
+    """T-8（B 段）：页内骨架副本已删 —— dashboard/cockpit 顶层不再有
+    .crumb/.panel-subtitle/.table-wrap/button 的等价副本；
+    orders/content 的 button 副本已删。
+
+    ⚠️ 按判定器（§6.4.1）实测，含锚点属性（height/width/position 等）的重名规则
+    与全部 @media 响应式规则**有意保留** —— 这是「宁可重复、不可白屏」的裁定，
+    所以本用例只断言已删清单，不断言 .sidebar/.topbar 不存在。
+    """
+    for name in ('dashboard.html', 'cockpit.html'):
+        style = _style_of(name)
+        for gone in ('.crumb{', '.panel-subtitle{', '.table-wrap{'):
+            assert gone not in style, f'{name} 顶层 {gone} 副本未删'
+        assert not re.search(r'[}]button\{', style), f'{name} 顶层 button{{ 副本未删'
+
+    assert '.table-wrap{' not in _style_of('orders.html')
+    assert not re.search(r'[}]button\{', _style_of('orders.html'))
+    assert not re.search(r'[}]button\{', _style_of('content.html'))
+
+
+def test_t9_media_and_anchor_whitelist_intact():
+    """T-9（B 段）：@media 响应式块与尺寸锚点**必须仍在页内**（删除禁区）。
+
+    dashboard 6 个 @media / cockpit 3 个；600px 断点的图表降高、
+    .chart-refreshing 定位锚点、.cards 列数声明一个都不能少。
+    """
+    dash = _style_of('dashboard.html')
+    ckpt = _style_of('dashboard.html')  # noqa 占位避免误用
+    ckpt = _style_of('cockpit.html')
+
+    assert len(re.findall(r'@media', dash)) == 6, \
+        f'dashboard @media 数量异常：{len(re.findall(r"@media", dash))}（应为 6）'
+    assert len(re.findall(r'@media', ckpt)) == 3, \
+        f'cockpit @media 数量异常：{len(re.findall(r"@media", ckpt))}（应为 3）'
+
+    # 600px 断点的响应式图表高度（误删会塌成 0 高）
+    assert '.chart{height:260px' in dash, 'dashboard 600px 断点的 .chart 降高丢失'
+    assert '.chart{height:260px' in ckpt, 'cockpit 600px 断点的 .chart 降高丢失'
+
+    # 列数声明（shell 是 auto-fit，删了会变列数）
+    assert 'grid-template-columns:repeat(4' in dash
+    assert 'grid-template-columns:repeat(3' in ckpt
+
+    # 刷新徽标定位锚点（删了徽标飘到页面角落）
+    assert '.chart-refreshing{position:absolute' in ckpt
+
+
+def test_t10_shell_and_main_regression_lock():
+    """T-10（B 段）：回归锁 —— workspace-shell.css 仍含 P5-S1 的 5 个字面串；
+    app/main.py 的 _WORKSPACE_NAV_ITEMS 图标字符未被修改。
+    """
+    shell = _read(SHELL)
+    for lit in ('position:fixed', 'height:100vh', 'overflow-y:auto',
+                'margin-left:232px', 'margin-left:76px'):
+        assert lit in shell, f'workspace-shell.css 缺少字面串 {lit}'
+
+    main_py = _read(ROOT / 'app' / 'main.py')
+    for icon in ('◎', '▦', '▣', '◫', '✦', '◇', '▤', '♙'):
+        assert icon in main_py, f'app/main.py 的导航图标 {icon} 被改动'
+
+
+def test_t11_chart_size_anchors_survive():
+    """T-11（B 段，G17 的机器实现）：图表尺寸锚点未丢 ——
+    .chart 的 height 是 ECharts 容器唯一高度来源，删掉 = 空白图且不报错。
+    """
+    dash = _style_of('dashboard.html')
+    ckpt = _style_of('cockpit.html')
+
+    for lit in ('.chart{height:300px', '.quadrant-chart{height:360px',
+                '.chart-grid{grid-template-columns', '.chart-empty'):
+        assert lit in dash, f'dashboard 缺少图表锚点 {lit}'
+    for lit in ('.chart{height:320px', '.chart-refreshing{position:absolute',
+                '.chart-empty'):
+        assert lit in ckpt, f'cockpit 缺少图表锚点 {lit}'
