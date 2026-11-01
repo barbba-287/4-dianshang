@@ -254,3 +254,33 @@ body a:focus-visible,body summary:focus-visible{
   body .content{padding:var(--space-4) var(--space-3) var(--space-8)}
   body .panel{padding:var(--space-4)}
 }
+
+/* ---------- 段 9：排版呼吸感（C 段微调，全走 token） ----------
+   实测依据（.testtmp/p5s3_spacing_probe.py，2026-11-01）：
+   - 面板之间仅 16px（shell:33 margin-top:1rem）→ 卡片贴卡片，压迫感主因
+   - .panel h2 margin=0（shell:35）→ 卡片内标题贴内容
+   - .content 直属 h2 上下 margin 对称（19.92/19.92）→ 标题归属不明
+   - .field label→input 4.48px（shell:39 gap:.28rem）→ 偏紧
+   - .actions 相邻表单项 6.4px（shell:45 gap:.4rem）→ 偏紧
+   - /ops 第 2、3 张表与上方文字间隙仅 1px → 表格贴描述文字
+   - .card padding 三页不一（16/12.8/12.8，orders 页内副本所压） */
+
+/* 面板间距 16 → 24px */
+body .panel{margin-top:var(--space-6)}
+
+/* 标题节奏：上大下小，让标题归属于它下面的内容；
+   h1 是页标题只保留下方 16px；h2/h3 上 24 / 下 12 */
+body h1{margin:0 0 var(--space-4)}
+body h2,body h3{margin-top:var(--space-6);margin-bottom:var(--space-3)}
+/* 卡片内标题不加顶部外距（间距由 panel-head 的 margin-bottom 负责），只补下方 8px */
+body .panel h2{margin:0 0 var(--space-2)}
+
+/* 表单：label→input 4.48 → 8px；相邻表单项 6.4 → 16px */
+body .field{gap:var(--space-2)}
+body .actions{gap:var(--space-4)}
+
+/* 表格与上方文字隔开 16px（贴边由 .panel 的 24px padding 兜底） */
+body .table-wrap{margin-top:var(--space-4)}
+
+/* 指标卡 padding 统一 16px（覆盖 orders 页内副本的 12.8px） */
+body .card{padding:var(--space-4)}
