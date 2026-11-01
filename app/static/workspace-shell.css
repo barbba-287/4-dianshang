@@ -1,1 +1,54 @@
 :root{--shell-page:var(--color-bg);--shell-panel:var(--color-surface);--shell-ink:var(--color-text);--shell-muted:var(--color-text-muted);--shell-line:var(--color-border);--shell-brand:var(--color-primary);--shell-nav:var(--color-nav-bg);--shell-shadow:var(--shadow-card)}*{box-sizing:border-box}.shell{display:block;min-height:100vh}.sidebar{position:fixed;inset:0 auto 0 0;z-index:20;width:232px;height:100vh;overflow-y:auto;padding:1.35rem 1rem;color:#dbe7f5;background:var(--shell-nav)}.brand{display:flex;align-items:center;gap:.7rem;margin-bottom:2rem;color:#fff;font-size:1.05rem;font-weight:750;text-decoration:none}.brand-mark{display:grid;place-items:center;width:2rem;height:2rem;border-radius:.55rem;background:var(--shell-brand)}.nav-label{margin:1.25rem .75rem .45rem;color:#8fa5bf;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase}.nav a{display:flex;align-items:center;gap:.65rem;padding:.7rem .75rem;border-radius:.55rem;color:#c4d2e3;font-size:.9rem;text-decoration:none}.nav-group{margin-top:.55rem}.nav-group:first-of-type{margin-top:0}.nav-group-toggle{display:flex;align-items:center;justify-content:space-between;padding:.65rem .75rem;margin:.35rem 0 .15rem;color:#e7f0fb;font-size:.9rem;font-weight:650;letter-spacing:0;line-height:1.35;text-transform:none;cursor:pointer;list-style:none;user-select:none}.nav-group-toggle::-webkit-details-marker{display:none}.nav-group-toggle::after{content:'›';font-size:1.15rem;line-height:1;transform:rotate(0deg);transition:transform .15s ease}.nav-group[open]>.nav-group-toggle::after{transform:rotate(90deg)}.nav-group-toggle:hover,.nav-group-toggle:focus-visible{color:#fff;background:#ffffff0d;border-radius:.45rem;outline:none}.nav-group>.nav{padding:.1rem 0 .35rem}.nav-group>.nav a{padding:.58rem .75rem .58rem 1.35rem;color:#c4d2e3;font-size:.82rem;line-height:1.35}.nav-group>.nav a.nav-page-link{font-weight:600}.nav-group>.nav a.nav-sub{display:block;padding:.3rem .75rem .3rem 2.15rem;color:#9fb2c8;font-size:.74rem;line-height:1.25;border-left:1px solid #38506a;border-radius:0}.nav-group>.nav a.nav-sub:hover,.nav-group>.nav a.nav-sub:focus-visible{color:#fff;background:#ffffff0d;outline:none}.nav-group>.nav a.nav-sub.active{box-shadow:none;color:#fff;background:#ffffff14}.nav-group>.nav a.nav-page-link:hover,.nav-group>.nav a.nav-page-link.active{color:#fff;background:#ffffff14}.nav-group>.nav a.nav-page-link.active{box-shadow:inset 3px 0 0 var(--shell-brand)}.nav-group>.nav a .nav-icon{font-size:.9rem}.nav a .nav-icon{display:inline-grid;place-items:center;width:1.1rem;flex:0 0 1.1rem}.nav a .nav-text{min-width:0}.nav a.active{box-shadow:inset 3px 0 0 var(--shell-brand)}.main{min-width:0;margin-left:232px}.topbar{display:flex;align-items:center;justify-content:space-between;height:4.3rem;padding:0 2rem;background:var(--shell-panel);border-bottom:1px solid var(--shell-line)}.content{max-width:1380px;margin:0 auto;padding:1.65rem 2rem 3rem}.page-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-bottom:1.2rem}.page-heading h1{margin:0;font-size:1.55rem;letter-spacing:-.02em}.panel{margin-top:1rem;padding:1.15rem;background:var(--shell-panel);border:1px solid var(--shell-line);border-radius:.7rem;box-shadow:var(--shell-shadow)}.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-bottom:.9rem}.panel h2{margin:0;font-size:1rem}.panel-subtitle{margin:.25rem 0 0;color:var(--shell-muted);font-size:.78rem}.muted{color:var(--shell-muted)}.row{display:flex;flex-wrap:wrap;align-items:end;gap:.65rem}.field{display:flex;flex:1 1 170px;flex-direction:column;gap:.28rem;color:var(--shell-muted);font-size:.8rem}input,select,button{min-height:2.4rem;padding:.5rem .7rem;border:1px solid #cbd7e5;border-radius:.45rem;background:#fff;color:var(--shell-ink);font:inherit}button{border:0;color:#fff;background:var(--shell-brand);cursor:pointer}button.secondary{color:var(--shell-ink);background:#edf2f7}button.danger{background:#c53b45}button:disabled{color:#fff;background:#9aa9bb;cursor:not-allowed}.actions{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem}.actions button,.actions select{min-height:2.15rem;padding:.4rem .55rem;font-size:.78rem}.visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.status{min-height:1.35rem;font-size:.84rem}.status.error,.error{color:#a72727}.status.success,.ok{color:#14751a}.status.warning,.warn{color:#946500}.table-wrap{overflow-x:auto}table{width:100%;min-width:760px;border-collapse:collapse}th,td{padding:.68rem .6rem;border-bottom:1px solid var(--shell-line);text-align:left;vertical-align:top;font-size:.84rem}th{color:var(--shell-muted);font-size:.75rem}.tag{display:inline-flex;align-items:center;gap:.25rem;padding:.2rem .48rem;border-radius:999px;background:#edf2f7;font-size:.72rem}.empty{padding:1.2rem;color:var(--shell-muted);text-align:center;border:1px dashed #cad6e5;border-radius:.5rem}.step{margin-top:.85rem;padding:1rem;background:#fbfcfe;border:1px solid var(--shell-line);border-radius:.6rem}.step h3{margin:0 0 .55rem;font-size:.95rem}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.85rem}.card{padding:1rem;background:var(--shell-panel);border:1px solid var(--shell-line);border-radius:.6rem;box-shadow:var(--shell-shadow)}html{scroll-behavior:smooth}section[id],.panel[id],.step[id]{scroll-margin-top:5.2rem}.nav-group>.nav a.nav-sub{white-space:normal}@media(max-width:900px){.nav-group .nav-sub{display:none}.sidebar{width:76px;padding:.9rem .65rem}.main{margin-left:76px}.brand{justify-content:center}.brand-text,.nav-label,.nav-group-toggle{display:none}.nav a .nav-text{display:none}.nav a{justify-content:center}.nav a .nav-icon{display:inline-grid}.topbar{padding:0 1rem}.content{padding:1.2rem}}@media(max-width:600px){.shell{display:block}.sidebar{display:none}.main{margin-left:0}.content{padding:.9rem}.page-heading{display:block}.panel{padding:.85rem}}
+
+/* ==========================================================================
+   P5-S2 表格可读性 / 状态徽标 / 空态与加载态（新增层，不改任何既有规则）
+   --------------------------------------------------------------------------
+   依据 dev_task.p5s2-ui-tables-and-empty.md §4.2A；
+   颜色一律取自 tokens.css 语义层，本层不出现裸色值。
+   ========================================================================== */
+
+/* ---------- 数值列：右对齐 + 等宽（§D1.1） ----------
+   特异性说明：模板级 <style> 位于本 shell <link> 之后，同名规则会覆盖本层
+   （如 customer_service 的 .cs-table th,.cs-table td{text-align:left}
+   特异性 0,1,1 高于 .num 的 0,1,0）。因此这里额外提供一条
+   `table th.num,table td.num`（0,1,2）规则，确保任何页级表格样式都无法
+   把数值列重新拉回左对齐；同时补充被页级 white-space 覆盖时的 nowrap。 */
+.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+table th.num,table td.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+
+/* ---------- 表格斑马纹与悬停（§D1.4，裁定 Q-P5S2-1） ----------
+   斑马纹 --color-bg-tint(#f7fafe)；悬停 --neutral-100(#f4f7fb) 深一档，
+   禁止使用 --color-bg-faint(#f8fbff)——与斑马纹几乎同色，偶数行悬停不可见。 */
+table tbody tr:nth-child(even){background:var(--color-bg-tint)}
+table tbody tr:hover{background:var(--neutral-100)}
+
+/* ---------- 状态徽标（§D1.3，五档语义，全站一致） ---------- */
+.badge{display:inline-flex;align-items:center;gap:.25rem;padding:.16rem .5rem;border-radius:var(--radius-pill);font-size:.72rem;line-height:1.5;white-space:nowrap;background:var(--color-bg-muted);color:var(--color-text-subtle)}
+.badge-success{background:var(--color-success-soft);color:var(--color-success-strong)}
+.badge-warning{background:var(--color-warning-soft);color:var(--color-warning-strong)}
+.badge-danger{background:var(--color-danger-soft);color:var(--color-danger-strong)}
+.badge-info{background:var(--color-primary-soft);color:var(--color-primary-deep)}
+.badge-neutral{background:var(--color-bg-muted);color:var(--color-text-subtle)}
+
+/* ---------- 状态列居中（§1.6「状态居中」） ---------- */
+.col-status{text-align:center}
+
+/* ---------- 空态三层结构：标题 / 说明 / 操作引导（§D2.1） ---------- */
+.empty-title{font-weight:650;color:var(--color-text);margin-bottom:.25rem}
+.empty-text{color:var(--color-text-muted);max-width:46ch;margin:0 auto}
+.empty-action{margin-top:.6rem}
+.btn-link{color:var(--color-primary);text-decoration:none;border-bottom:1px solid var(--color-primary-border)}
+.btn-link:hover{color:var(--color-primary-hover);border-bottom-color:var(--color-primary-hover)}
+
+/* ---------- 表格内空态容器（§D2.1）：与 .loading-cell 视觉分离（裁定 Q-P5S2-4） ---------- */
+.empty-cell{padding:0;border:0;background:transparent}
+
+/* ---------- 加载占位（§D2.2 / 裁定 Q-P5S2-4）：弱化、无虚线框，与空态可区分 ---------- */
+.loading-cell{color:var(--color-text-muted);text-align:center;padding:.9rem}
+
+/* ---------- 圆角归一（裁定 Q-P5S2-3）：.panel 12px（差 +0.8px）、.empty 8px（零差异） ----------
+   注意：模板 <style> 位于 shell <link> 之后，模板级 .panel/.empty 会覆盖同特异性的 shell 规则；
+   故此处用双类选择器（.panel.panel / .empty.empty）提高特异性，使圆角归一在全站真正生效，
+   无需改动任何模板（含禁区页）。.card 按裁定保持 .6rem 不动。 */
+.panel.panel{border-radius:var(--radius-lg)}
+.empty.empty{border-radius:var(--radius-md)}

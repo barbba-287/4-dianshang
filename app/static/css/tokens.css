@@ -14,6 +14,9 @@
   color-scheme: light;
 
   /* ---------- 语义色（13 个，D5） ---------- */
+  /* 说明：涨跌色（涨/跌方向对应的绿/红语义）本期不定义 —— 依据 P5-S2 §D4 与 §1.6
+     「⚠️涨跌色的方向：待确认」；在方向未确认前，表格状态只用 success/warning/danger
+     表达，不新增 --color-up / --color-down 之类变量。 */
   --color-primary: #2a78d6;          /* 现状 --brand / --shell-brand */
   --color-primary-hover: #1f63b5;    /* 推导值：主色明度下调，仅用于 :hover */
   --color-primary-soft: #eaf2fc;     /* 现状 --brand-soft */
@@ -33,6 +36,15 @@
   --color-primary-ink: #29415b;      /* 现状 .workflow-node 文字 */
   --color-primary-border: #a9c9ec;   /* 现状 .picker-option:hover 边框 */
   --color-on-primary: #ffffff;       /* 现状主色底上的前景文字 */
+
+  /* ---------- Badge 五档语义（P5-S2 · 全站一致，此后不再讨论） ----------
+     success = 已完成 / 通过 / 就绪
+     warning = 待处理 / 部分完成 / 需关注
+     danger  = 失败 / 已驳回 / 阻断
+     info    = 进行中 / 运行中
+     neutral = 未知 / 未开始 / 中性提示
+     对应实现：workspace-shell.css 的 .badge-success/.badge-warning/.badge-danger/
+     .badge-info/.badge-neutral，色值全部取自本文件既有 token，不新增色值。 */
 
   /* ---------- 成功态（值均取自现状） ---------- */
   --color-success-strong: #14751a;   /* 现状 .tag.good / .status.success 文字 */

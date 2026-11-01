@@ -90,8 +90,11 @@
     function fieldLabel(key) { return FIELD_LABELS[key] || key; }
     function empty(text) {
       const el = document.createElement('div');
-      el.className = 'assistant-empty';
-      el.textContent = text;
+      el.className = 'assistant-empty empty';
+      const body = document.createElement('div');
+      body.className = 'empty-text';
+      body.textContent = text;
+      el.appendChild(body);
       return el;
     }
     function makeTable(headers, rows) {

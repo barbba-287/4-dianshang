@@ -48,7 +48,7 @@
   <section id="external-facts-panel" aria-labelledby="external-facts-heading">
     <h2 id="external-facts-heading">跨境平台事实</h2>
     <p id="external-facts-message" class="status" role="status">正在读取 Shopify 外部库存观察…</p>
-    <div class="table-wrap"><table><thead><tr><th>平台</th><th>来源</th><th>库存位置</th><th>库存快照</th><th>可售数量</th><th>有库存商品</th><th>说明</th></tr></thead><tbody id="external-facts-items"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>平台</th><th>来源</th><th>库存位置</th><th class="num">库存快照</th><th class="num">可售数量</th><th class="num">有库存商品</th><th>说明</th></tr></thead><tbody id="external-facts-items"><tr><td colspan="7" class="loading-cell">加载中…</td></tr></tbody></table></div>
   </section>
 
   <section id="warehouse" aria-labelledby="warehouse-heading">
@@ -94,7 +94,7 @@
 
     <div class="step" id="warehouse-step-inventory">
       <div class="row"><button id="refresh-inventory" class="secondary" type="button">刷新库存</button></div>
-      <div class="table-wrap"><table><thead><tr><th>仓库</th><th>SKU</th><th>商品 ID</th><th>库存</th><th>更新时间</th></tr></thead><tbody id="inventory-items"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>仓库</th><th>SKU</th><th>商品 ID</th><th class="num">库存</th><th>更新时间</th></tr></thead><tbody id="inventory-items"><tr><td colspan="5" class="empty-cell"><div class="empty"><div class="empty-title">尚未加载库存</div><div class="empty-text">库存台账需要按需刷新；点击上方「刷新库存」即可载入已确认入库的实时库存。</div></div></td></tr></tbody></table></div>
     </div>
   </section>
 
@@ -102,7 +102,7 @@
     <h2 id="purchase-heading">补货建议与采购草稿</h2>
     <p id="purchase-message" class="status" role="status">加载已确认的补货建议…</p>
     <div class="row"><button id="refresh-purchases" class="secondary" type="button">刷新建议与草稿</button></div>
-    <div class="table-wrap"><table><thead><tr><th>建议</th><th>仓库/SKU</th><th>数量</th><th>状态</th><th>操作</th></tr></thead><tbody id="purchase-items"></tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>建议</th><th>仓库/SKU</th><th class="num">数量</th><th class="col-status">状态</th><th>操作</th></tr></thead><tbody id="purchase-items"><tr><td colspan="5" class="loading-cell">加载中…</td></tr></tbody></table></div>
     <p class="muted">草稿可编辑备注、供应商和预计到货日期；“提交审批”仅表示人工提交审批，不代表审批通过、已采购或已入库。</p>
   </section>
   <script>
@@ -312,6 +312,19 @@
     }
 
     // P3-S1：采购单状态标签（仅本区块使用，不改共享 statusLabel）。
+    // P5-S2：采购状态视觉档位（文案仍由 purchaseStatusLabel 提供）
+    const purchaseBadgeClass = {
+      draft: 'badge-neutral',
+      submitted: 'badge-warning',
+      approved: 'badge-success',
+      rejected: 'badge-danger',
+      cancelled: 'badge-neutral'
+    };
+
+    function purchaseStatusBadge(value, text) {
+      return `<span class="badge ${purchaseBadgeClass[value] || 'badge-neutral'}">${escapeHtml(text)}</span>`;
+    }
+
     function purchaseStatusLabel(value) {
       const labels = {
         draft: '草稿，待提交审批',
@@ -364,14 +377,14 @@
           const request = requestBySuggestion.get(item.id);
           const state = request ? purchaseStatusLabel(request.status) : '未创建草稿';
           const action = request ? purchaseRequestActions(request) : `<button data-purchase-action="draft" data-id="${item.id}">生成草稿</button>`;
-          rows.push(`<tr><td>#${escapeHtml(item.id)}<br><span class="muted">${escapeHtml(dianshangLabel(item.data_completeness, DianShangLabels.completeness, '未知完整度'))} / ${escapeHtml(dianshangLabel(item.reason, DianShangLabels.reason, '未知原因'))}</span></td><td>仓库 #${escapeHtml(item.warehouse_id)} / SKU #${escapeHtml(item.sku_id)}</td><td>${escapeHtml(item.decision_qty ?? item.suggested_qty ?? '数据不足')}</td><td>${escapeHtml(state)}</td><td>${action}</td></tr>`);
+          rows.push(`<tr><td>#${escapeHtml(item.id)}<br><span class="muted">${escapeHtml(dianshangLabel(item.data_completeness, DianShangLabels.completeness, '未知完整度'))} / ${escapeHtml(dianshangLabel(item.reason, DianShangLabels.reason, '未知原因'))}</span></td><td>仓库 #${escapeHtml(item.warehouse_id)} / SKU #${escapeHtml(item.sku_id)}</td><td class="num">${escapeHtml(item.decision_qty ?? item.suggested_qty ?? '数据不足')}</td><td class="col-status">${purchaseStatusBadge(request ? request.status : '', state)}</td><td>${action}</td></tr>`);
         });
         (requests.items || []).filter(request => !(request.lines || []).some(line => suggestionById.has(line.suggestion_id))).forEach(request => {
           const line = request.lines?.[0] || {};
           const state = purchaseStatusLabel(request.status);
-          rows.push(`<tr><td><strong>${escapeHtml(request.request_no || `采购申请 #${request.id}`)}</strong><br><span class="muted">采购申请</span></td><td>仓库 #${escapeHtml(request.warehouse_id)} / SKU #${escapeHtml(line.sku_id || '数据不足')}</td><td>${escapeHtml(line.requested_qty ?? '数据不足')}</td><td>${escapeHtml(state)}</td><td>${purchaseRequestActions(request)}</td></tr>`);
+          rows.push(`<tr><td><strong>${escapeHtml(request.request_no || `采购申请 #${request.id}`)}</strong><br><span class="muted">采购申请</span></td><td>仓库 #${escapeHtml(request.warehouse_id)} / SKU #${escapeHtml(line.sku_id || '数据不足')}</td><td class="num">${escapeHtml(line.requested_qty ?? '数据不足')}</td><td class="col-status">${purchaseStatusBadge(request.status, state)}</td><td>${purchaseRequestActions(request)}</td></tr>`);
         });
-        purchaseItems.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="5" class="muted">暂无可处理的补货建议或采购申请</td></tr>';
+        purchaseItems.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="5" class="empty-cell"><div class="empty"><div class="empty-title">暂无可处理的补货建议或采购申请</div><div class="empty-text">当前没有待处理的补货建议或采购申请；这不代表库存没有问题，可先刷新建议或新建采购申请。</div><div class="empty-action"><button type="button" id="purchase-empty-refresh">刷新补货建议</button></div></div></td></tr>';
         setMessage(purchaseMessage, `已刷新 ${rows.length} 条补货/采购记录`, 'success');
       } catch (error) { setMessage(purchaseMessage, `采购申请加载失败：${error.message || '网络错误'}`, 'error'); }
       finally { setBusy(refreshPurchasesButton, false); }
@@ -458,8 +471,8 @@
 
     function renderInventory(data) {
       const target = document.querySelector('#inventory-items');
-      if (!data.items.length) { target.innerHTML = '<tr><td colspan="5" class="muted">暂无已确认库存</td></tr>'; return; }
-      target.innerHTML = data.items.map(item => `<tr><td>${escapeHtml(item.warehouse_code)}</td><td>${escapeHtml(item.sku_code)}</td><td>${escapeHtml(item.product_id)}</td><td class="ok">${escapeHtml(item.on_hand_qty)}</td><td>${escapeHtml(item.updated_at)}</td></tr>`).join('');
+      if (!data.items.length) { target.innerHTML = '<tr><td colspan="5" class="empty-cell"><div class="empty"><div class="empty-title">暂无已确认库存</div><div class="empty-text">还没有已确认的入库数量；仓库实收确认后才会计入库存。</div></div></div></td></tr>'; return; }
+      target.innerHTML = data.items.map(item => `<tr><td>${escapeHtml(item.warehouse_code)}</td><td>${escapeHtml(item.sku_code)}</td><td>${escapeHtml(item.product_id)}</td><td class="num ok">${escapeHtml(item.on_hand_qty)}</td><td>${escapeHtml(item.updated_at)}</td></tr>`).join('');
     }
 
     async function loadPendingConfirmations() {
@@ -494,8 +507,10 @@
     async function loadInventory() {
       setBusy(refreshInventoryButton, true);
       setMessage(warehouseMessage, '正在刷新库存…');
+      const target = document.querySelector('#inventory-items');
+      target.innerHTML = '<tr><td colspan="5" class="loading-cell">加载中…</td></tr>';
       try { renderInventory(await api('/api/inventory?page_size=100')); setMessage(warehouseMessage, '库存已刷新', 'success'); }
-      catch (error) { setMessage(warehouseMessage, `库存加载失败：${error.message || '网络错误'}`, 'error'); }
+      catch (error) { target.innerHTML = `<tr><td colspan="5" class="error">库存加载失败：${escapeHtml(error.message || '网络错误')}<button type="button" id="inventory-retry" style="margin-left:.5rem">重试</button></td></tr>`;const retryButton = document.querySelector('#inventory-retry');if (retryButton) retryButton.onclick = loadInventory;setMessage(warehouseMessage, `库存加载失败：${error.message || '网络错误'}`, 'error'); }
       finally { setBusy(refreshInventoryButton, false); }
     }
 
@@ -506,14 +521,14 @@
         const response = await api('/api/dashboard/summary?days=14&recent_limit=1');
         const item = response.external_facts?.shopify_inventory;
         if (!item || !item.snapshot_count) {
-          target.innerHTML = '<tr><td colspan="7" class="muted">暂无 Shopify 外部库存快照，请先在 Shopify 页面点击“同步到外部事实层”。</td></tr>';
+          target.innerHTML = '<tr><td colspan="7" class="empty-cell"><div class="empty"><div class="empty-title">暂无 Shopify 外部库存快照</div><div class="empty-text">还没有从 Shopify 同步到外部事实层的库存快照；这不代表接口失败。</div><div class="empty-action"><a class="btn-link" href="/shopify">去 Shopify 同步到外部事实层</a></div></div></td></tr>';
           messageTarget.textContent = '当前 Workspace 尚未写入 Shopify 外部库存事实。';
           return;
         }
-        target.innerHTML = `<tr><td>Shopify</td><td>${escapeHtml(item.source_mode || '未知')}</td><td>${escapeHtml(item.location_count)}</td><td>${escapeHtml(item.snapshot_count)}</td><td>${escapeHtml(item.available_qty)}</td><td>${escapeHtml(item.positive_item_count)}</td><td>${escapeHtml(item.note)}</td></tr>`;
+        target.innerHTML = `<tr><td>Shopify</td><td>${escapeHtml(item.source_mode || '未知')}</td><td>${escapeHtml(item.location_count)}</td><td class="num">${escapeHtml(item.snapshot_count)}</td><td class="num">${escapeHtml(item.available_qty)}</td><td class="num">${escapeHtml(item.positive_item_count)}</td><td>${escapeHtml(item.note)}</td></tr>`;
         messageTarget.textContent = `已读取 Shopify 真实外部库存：${item.snapshot_count} 条快照，${item.location_count} 个位置；不覆盖内部库存台账。`;
       } catch (error) {
-        target.innerHTML = `<tr><td colspan="7" class="error">跨境事实加载失败：${escapeHtml(error.message || '网络错误')}</td></tr>`;
+        target.innerHTML = `<tr><td colspan="7" class="error">跨境事实加载失败：${escapeHtml(error.message || '网络错误')}<button type="button" id="external-facts-retry" style="margin-left:.5rem">重试</button></td></tr>`;const retryButton = document.querySelector('#external-facts-retry');if (retryButton) retryButton.onclick = loadExternalFacts;
       }
     }
 
