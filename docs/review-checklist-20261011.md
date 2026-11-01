@@ -1694,3 +1694,48 @@ G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 
 - **基线新口径：全量 475 passed / 0 failed（P3-S3 后）**。
 - **P3 三切片全部收口**：本地待推 **15 笔**（P3-S1 5 + S2 4 + S3 6：草案/定稿/红线修订/实施/回填/本结论），
   按阶段策略 **P3 全清即推**——现三片已全清，**待用户裁定推送**。
+
+## 23. P4 前端经营驾驶舱（实施 `94ae9f2` + 任务文件 v1.1）
+
+### 23.1 台账
+
+- **R-56（实施过程异常，不阻断交付；形态升级）**：`claude -p` 本次正常跑完（1h07m，文件按节奏逐个落盘，
+  未出现 R-55 的静默挂死），**但权限层拒绝了全部执行类命令**——pytest 与解释器调用、shell 脚本包装、
+  多种替代入口共 **14 种变体**，以及 `git add` / `git commit`，一律返回
+  `Permission to use Bash has been denied`；只读命令（ls/cat/head/grep/git status/git log）放行。
+  **命令从未启动，故不存在任何 pytest 输出**。实施方按任务书预案如实标「待验收 / H1 未过」，
+  未改测试迁就。与 P3-S3 同源（权限层形状），但本次**连解释器版本探测都被拒**，比 S3 更严。
+- **R-57（缺陷，已代修）**：`app/cockpit.py:655` `"value": gvm_value` 变量名 typo
+  （定义处 `gmv_value`，行 445/448）→ `NameError` → 9 例全部 500 `INTERNAL_ERROR`。
+  **根因是 H1 未过即交付**（0 条用例自跑过）。复核方代修 1 行（零语义变化）后全绿。
+  教训：无自跑能力的会话，交付前至少要做一次「模块可 import + 函数可调」的静态检查；
+  本轮探针脚本（直调 service 绕开全局异常处理器，把绿色 500 还原成 traceback）已固化为标准手法。
+- 交付说明：`.testtmp/delivery.p4.md`（原「待验收」→ 已回填 §3.4 实测结论）。
+
+### 23.2 复核方代收口回填（2026-11-01，提交 `94ae9f2`）
+
+- **提交号**：`94ae9f2`（5 文件 +1719/−1：cockpit.py 781 新增 / cockpit.html 新增 /
+  main.py +36 / schemas.py +97 / test_p4_cockpit.py 770 新增）。不 push。
+- **代收口链**：核 diff → 代跑（首次 9 failed）→ 探针定位 typo → 代修 1 行 → 代跑全绿 → 代提交。
+- **实测**：定向三文件 **18 passed**（P4 11 + frontend 4 + dashboard 3，10.28s）；
+  **全量 486 passed / 0 failed（273.54s）** = 475 基线 + 新增 11，达预期。
+- **守卫实测**：`alembic heads` → `0023` 唯一（零 migration、零新表）；
+  禁区正则（db/dashboard/analytics/business_dates/external_orders/replenishment/purchase_approval/
+  knowledge_admin/rag/config/demo_seed/migrations/dashboard.html/test_api_dashboard/test_frontend/storage）
+  **零命中**；`main.py` 为纯追加（导航项插入 + 锚点 + 2 路由，既有 4 个路由函数体零改动）；
+  `cockpit.py` 红线词仅出现在 docstring。
+- **性能红线（守卫 16）核验**：`grep -c "db.execute"` = **6 条**（≤8），全部在函数顶层顺序执行；
+  全部 `for` 循环均在内存组装已取回的行，**无循环内查询**；趋势数据单条 `GROUP BY date()` 出全窗口；
+  知识库 9 个 `scalar_subquery` 写在同一条 SELECT（一次往返）。
+- **D8 空态红线核验**：两图渲染函数均为 `if(!hasData){chartEmpty(...);return;}` 后才
+  `echarts.init(node)`——**源码顺序亲验**（renderSalesTrend / renderInventoryPie）；两个容器
+  `id="sales-chart"` / `id="inventory-pie"` 各出现 1 次常驻；`.chart-empty` 为虚线框灰字占位。
+- **裁定落实核验**：`overstockTexts={NO_SALES:'因近 30 天无销量滞销',SLOW_MOVING:'预计可售超 90 天'}`
+  **逐字一致**；`FX_TODO = "汇率折算依赖财务模块后续提供"` **逐字一致**且顶层返回、前端仅 console.debug。
+- **接受实施方 7 条偏差**（初判，正式结论待用户指令）：①测试未执行（权限层，如实标注）；
+  ②未提交（同上，已代提交）；③待办明细 UNION 改 2 条普通 SELECT（查询数仍 6，不超预算）；
+  ④环比与当期合并为 1 条 GROUP BY（查询 7→6，符合「一次出全窗口」）；
+  ⑤缺货/积压明细加 50 条上限（与 limitations 一致，卡片计数仍全量）；
+  ⑥库存筛选同时作用于积压表（消除死选项）；⑦`datetime.utcnow()` 沿用仓库既有写法（无 warnings=error）。
+- **基线新口径：全量 486 passed / 0 failed（P4 后）**。
+- **正式复核结论待用户指令**。
