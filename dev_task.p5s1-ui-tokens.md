@@ -3,11 +3,11 @@
 > 切片：P5 第一阶段（UI 界面美化）｜性质：**纯前端**，零后端逻辑改动
 > 依据：`docs/ui-reference-checklist.md` v5 §1.5（设计 token）、§1.4（空态）、§1.3（图表规范不在本轮）
 > 基线：**486 passed / 0 failed**（P4 收口后，复核方提交态实测 277.73s）→ 本片目标 **494 passed / 0 failed**
-> 状态：**草案，待用户审核后开跑**
+> 状态：**已定稿 v1.0（2026-11-01，四条裁定已回填 §3），可开跑**
 
 ---
 
-## 0. 结论摘要（先看这 9 条）
+## 0. 结论摘要（先看这 10 条）
 
 1. **模板是 10 个，不是 8 个。** `/cockpit`（P4 新增）与 `admin_users` 均在列，实测清单见 §1.1。
 2. **项目没有 Jinja2。** `_render_workspace_page`（`app/main.py:328-338`）是「读文件 + 正则替换 `<aside class="sidebar">`」，
@@ -28,6 +28,9 @@
 8. **零后端改动**：`app/main.py` 一行不动，包括 `_render_workspace_page` 与 `login_page` 的内联 HTML（`app/main.py:497`）。
 9. `<script>` 块内的色值（**24 处**）**不在本片范围**——那是 ECharts 图表配色，属 §1.3 图表规范（后续逐页）。
    本片只收敛 `<style>` 块内的 180 处。
+10. **四条裁定已拍板（2026-11-01，见 §3）**：① 验收口径 `494 passed`（既有 486 + 新增 8）；
+    ② **坚决不引外部字体**（系统栈 + `tabular-nums`）；③ `/login` 主色漂移本期不动，登记 **R-59**；
+    ④ 圆角 `rem→px` 归一接受 ≤1.5px 差异。**实施时不得再就此提问或自行变通。**
 
 ---
 
@@ -205,7 +208,8 @@ def _render_workspace_page(template_name: str, principal, active_path: str) -> H
 
 理由：本仓库为私有部署后台，外链字体在内网/离线环境会阻塞首屏；中文字体包体积达数百 KB～数 MB，
 与「保持原生轻量」冲突。**结论：`--font-sans` 用系统栈（现状即 `system-ui`），`--font-mono` 仅用于金额/代码**。
-（若用户要求引入，见 §3 Q-P5S1-2 的条件。）
+**用户 2026-11-01 已裁定：坚决不引外部字体**（§3 Q-P5S1-2）。本片**不产生任何 `@font-face`、不新增任何字体文件、不引用任何字体 CDN**；
+数字等宽通过 `font-variant-numeric: tabular-nums` 实现，不需要字体资源。
 
 ### D8 涨跌色：**本片不定义**
 
@@ -215,14 +219,16 @@ def _render_workspace_page(template_name: str, principal, active_path: str) -> H
 
 ---
 
-## 3. 待裁定（开跑前需用户拍板，未拍板不得自行决定）
+## 3. 裁定记录（2026-11-01 用户已拍板，实施按此为准，勿再议）
 
-| # | 问题 | 我的建议 | 影响 |
+| # | 问题 | 裁定 | 对实施的影响 |
 |---|---|---|---|
-| **Q-P5S1-1** | 用户要求「测试必须保持 486 passed」。本片按项目惯例需新增契约用例 T-1..T-8 → 总数变 **494**。是否接受？ | **接受 486+N，硬闸门改为「既有 486 全绿 + 新增 8 条全绿」**。若严格只允许 486，则本片退化为纯人工验收，无回归保护（不推荐） | 决定 §6 是否成立 |
-| **Q-P5S1-2** | 是否引入 Google Fonts / 本地字体？ | **不引入**（D7）。若坚持：仅允许**本地** woff2，单文件 ≤100KB，不得用 CDN | 影响首屏与离线可用性 |
-| **Q-P5S1-3** | `/login` 页主色是 `#2563eb`（`main.py:497`），与全站 `#2a78d6` **不一致**。修它必须改 `main.py` | **本期不动**（违反零后端），登记为缺陷 R-59，另立切片 | 登录页与内页主色不同 |
-| **Q-P5S1-4** | 圆角 `rem → px` 归一会产生 ≤1.5px 视觉差异 | **接受**（否则无法归一） | 全站圆角微调 |
+| **Q-P5S1-1** | 测试数：本片新增 T-1..T-8 会使总数超过 486 | **接受 `494 passed`（既有 486 + 新增 8）**。用户原话：「零后端改动不等于零测试新增」 | 硬闸门 = **既有 486 全绿 + 新增 8 条全绿 + 0 failed**；§6 用例表**全额生效**，不得降级为人工验收 |
+| **Q-P5S1-2** | 是否引入 Google Fonts / 本地字体 | **坚决不引**（原话：「内网环境外链字体是致命的」）。用系统栈 + `font-variant-numeric: tabular-nums` | D7 定死；`tokens.css` 与所有模板**不得出现任何 `@font-face` 或 `fonts.` / `googleapis` 外链**（G4 扩展覆盖）；不需要字体文件 |
+| **Q-P5S1-3** | `/login` 主色 `#2563eb` 与全站 `#2a78d6` 漂移 | **本期不动**，严守零后端红线；登记缺陷 **R-59** 留待后续切片 | `app/main.py` 仍为禁区（G1）；`tokens.css` **不得**为迁就该页而新增 `#2563eb` 相关 token |
+| **Q-P5S1-4** | 圆角 `rem → px` 归一产生 ≤1.5px 视觉差异 | **接受**（原话：「视觉统一比绝对尺寸更重要」） | 圆角统一用 `--radius-sm/md/lg`，沿 D6 的四级方案，无需保留 rem 兼容值 |
+
+> 裁定结论已同步至 §0 摘要、D7、§6、§9；缺陷 R-59 已登记在 `docs/review-checklist-20261011.md`。
 
 ---
 
@@ -275,7 +281,7 @@ def _render_workspace_page(template_name: str, principal, active_path: str) -> H
 | **G1** | 零后端改动 | `git diff --name-only` 与 `app/*.py`、`migrations/`、`db.py` **零交集** |
 | **G2** | `workspace-shell.css` 五个字面串仍在 | `grep -c "position:fixed\|height:100vh\|overflow-y:auto\|margin-left:232px\|margin-left:76px"` 各 ≥1（**无空格写法，不得格式化**） |
 | **G3** | `<script>` 块零改动 | 10 个模板 script 内 `#[0-9a-f]{3,8}\|rgb(` 计数合计仍为 **24**；`git diff` 不得出现 script 段变更 |
-| **G4** | 不引入外部 UI 框架 | 全仓无 `tailwind` / `bootstrap` / `cdn.` / `unpkg` / `jsdelivr` |
+| **G4** | 不引入外部 UI 框架 / 外部字体 | 全仓无 `tailwind` / `bootstrap` / `cdn.` / `unpkg` / `jsdelivr` / `@font-face` / `googleapis` / `fonts.` |
 | **G5** | 既有 class 名不得删除 | 实施前快照 `workspace-shell.css` 选择器集合，实施后为**超集**（允许新增，禁止删除） |
 | **G6** | 模板 DOM 结构不变 | 10 个模板的 `id="..."` 集合、`class="..."` 属性集合为超集；`<aside class="sidebar">` 仍存在且唯一 |
 | **G7** | P4 的 D8 断言仍绿 | `tests/test_p4_cockpit.py::test_p11_chart_empty_state_contract` 通过（`chartEmpty` 仍早于 `echarts.init`） |
@@ -302,8 +308,8 @@ def _render_workspace_page(template_name: str, principal, active_path: str) -> H
 | **T-7** | 脚本零回归 | 10 个模板 `<script>` 内色值合计 **= 24**（与实施前一致）；`echarts.init` 出现次数不变 |
 | **T-8** | 语义一致 | `--brand`/`--shell-brand` 均解析到 `--color-primary`；`--danger` 已定义且 = `--color-danger`；`--line`/`--shell-line` 均 = `--color-border` |
 
-> 若 Q-P5S1-1 裁定为「不许超过 486」，则本表降级为**人工验收清单**，改由复核方按 G1–G14 手工核对，
-> 并在交付说明中留截图证据。
+> Q-P5S1-1 已裁定 **接受 494 passed**（既有 486 + 新增 8），故本表**全额生效**，不接受降级为人工验收；
+> 交付说明须逐条列出 T-1..T-8 的实测结果（绿 / 红 / 未执行，未执行须说明原因）。
 
 ---
 
@@ -346,7 +352,8 @@ def _render_workspace_page(template_name: str, principal, active_path: str) -> H
 | 让 `<script>` 里 ECharts 配色读 CSS 变量 | 属 §1.3 图表规范，后续切片；本片改会破坏图表且无断言保护 |
 | 给所有页面加骨架屏 / 重排布局 | §1.4 空态与 §1.1 布局是后续切片（P5-S2/S3） |
 | 修改 `tests/test_api_dashboard.py` 的 5 条断言以「配合」格式化 | 测试是既有契约，不得为改样式而改测试 |
-| 顺手修 `/login` 主色不一致 | 需改 `main.py`，违反零后端；登记 Q-P5S1-3 → R-59 |
+| 顺手修 `/login` 主色不一致 | 需改 `main.py`，违反零后端；**已裁定本期不动**（Q-P5S1-3），缺陷登记为 **R-59** 留待后续切片 |
+| 引入 Google Fonts / 任何字体文件 | **已裁定坚决不引**（内网环境外链字体是致命的，Q-P5S1-2）；等宽用 `tabular-nums` 即可 |
 
 ---
 
