@@ -1,6 +1,6 @@
 # 任务文件：P4 前端经营工作台与数据看板（老板/运营全局驾驶舱）
 
-- **版本**：v1.0 草案（2026-11-01，待用户评审 + 三项裁定，评审通过前严禁开跑）
+- **版本**：v1.1 定稿（2026-11-01，用户已评审 + Q-P4-1/2/3 三项裁定落定，可作为实施唯一依据）
 - **切片**：P4（单切片，不分片）
 - **基线**：`475 passed / 0 failed`（P3-S3 收口后，P3 全部 15 笔已推远端 `fa99bb2`）；本片目标 **486 passed / 0 failed**
 - **前置**：`docs/ui-reference-checklist.md` v5（本文引用其 §1.1–§1.6 作验收口）
@@ -15,12 +15,12 @@
 2. **本片新建 `/cockpit` 页面 + `GET /api/dashboard/cockpit` 只读聚合接口**，
    **不改 `dashboard.html` / `dashboard.py` / `analytics*.py`**（理由见 D1：UI 清单 §1.1 已把 `/dashboard`
    重排标为暂缓；且 `tests/test_api_dashboard.py` 对 8 个 panel id 逐条断言，改造=自找回归）。
-3. **7 项指标中 6 项有真实数据源且口径可追**（见 §1.3 盘点表）；**1 项（积压）无既有定义 → 待裁定 Q-P4-1**。
+3. **7 项指标中 6 项有真实数据源且口径可追**（见 §1.3 盘点表）；**1 项（积压）无既有定义 → 已裁定口径 A（Q-P4-1）：滞销 + 慢周转，明细带 reason**。
 4. **GMV 与订单数必须同源同谓词**（`external_orders` + `paid/fulfilled/completed`），
    **严禁用 `daily_sku_sales.order_count` 求和**——它按 (SKU, 日) 计数，跨 SKU 求和会把多 SKU 订单重复计（F-P4-1）。
 5. **demo 环境没有订单事实**（`app/demo_seed.py` 只造 `DailySkuSale`，零 `ExternalOrder`，已实测）→
-   GMV/订单数卡在 demo 下为 0，走空状态。是否补 seed **待裁定 Q-P4-2**（推荐本片不补）。
-6. **多币种混加是错的**（`external_orders.currency` 存在多值）→ **待裁定 Q-P4-3**（推荐按币种分组、不折算）。
+   GMV/订单数卡在 demo 下为 0，走空状态。**已裁定不补 seed（Q-P4-2）：demo 显示 0 与空态即正确行为，严禁改 demo_seed.py**。
+6. **多币种混加是错的**（`external_orders.currency` 存在多值）→ **已裁定按币种分组、绝不折算（Q-P4-3）**，响应体留 `fx_todo` TODO 注记。
 7. **涨跌色不定义**：UI 清单 §1.6 的超期规则已写死「未确认前 token 不定义涨跌色」，
    故环比一律用 **箭头 + 文字**，不上红绿（本片遵守，不另行讨论）。
 8. **零 migration、零写入、零既有接口改动**；唯一触碰既有文件是 `app/main.py`（**纯追加**导航项与 2 条路由）。
@@ -56,7 +56,7 @@
 | **订单数趋势** | `external_orders` 按 `external_created_at` 日聚合 `count(distinct id)` | 无 | ✅ 可上 |
 | **销售额语义基准** | `_is_sale()` = `{"paid","fulfilled","completed"}`（`app/external_orders.py:120-121`）；行净额 = `max(gross−refund, 0)`（`:124-127`） | 既有唯一真值 | ✅ 复用其语义（不改该文件，见 D3） |
 | **缺货预警** | `inventory_balances.on_hand_qty` + `inventory_policies.safety_stock_qty / reorder_point_qty` | 判定语义既有：`on_hand ≤ reorder_point` → warning；`on_hand ≤ safety_stock` → critical（`app/alerts.py:53-55`） | ✅ 可上（直接聚合，不依赖 alert 行） |
-| **积压预警** | 需「库存量 + 销售速度」；`inventory_balances` 只有 `on_hand_qty`（`db.py:658-676`），速度来自 `daily_sku_sales.net_qty` | **无既有定义、无既有阈值** | ⚠️ **待裁定 Q-P4-1** |
+| **积压预警** | 需「库存量 + 销售速度」；`inventory_balances` 只有 `on_hand_qty`（`db.py:658-676`），速度来自 `daily_sku_sales.net_qty` | **无既有定义** | ✅ 已裁定口径 A（Q-P4-1）：`NO_SALES`（近 30 天净销量 0 且 on_hand>0）或 `SLOW_MOVING`（可售 ≥90 天） |
 | **采购待审批数** | `purchase_requests.status == 'submitted'`（状态机：`draft/submitted/approved/rejected/cancelled`，`purchase_approval.py:35-37`） | 可查 | ✅ 可上 |
 | **未完成入库数** | `inbound_orders.status ∈ {'expected','received'}`（`db.py:333` 默认 `expected`；`received`@`repository.py:713`、`confirmed`@`:764`；**无取消态**） | 可查 | ✅ 可上 |
 | **知识库健康** | `document_versions.published_at IS NOT NULL`（S3 发布位）+ `document_chunks`（`db.py:237-255`）+ `document_versions.status ∈ {parsing,ready,failed}` | S3 已建发布门控 | ✅ 可上 |
@@ -108,7 +108,7 @@
 | 1 | GMV | 窗口内 `Σ(gross_amount − refund_amount)`，`_is_sale` 过滤，分币种 | 上一等长窗口 | 「外部平台订单聚合、只读、不等于内部履约收入」（UI 清单原文） |
 | 2 | 订单数 | 窗口内 distinct `external_order_no` | 上一等长窗口 | 同谓词；与 GMV 同源 |
 | 3 | 缺货 SKU | `on_hand ≤ safety_stock` 的 SKU 数 | 不设（当前态） | 有 policy 才判；无 policy 进 `unknown_policy` |
-| 4 | 积压 SKU | 见 Q-P4-1 | 不设 | 明细带 reason 区分（滞销/慢周转） |
+| 4 | 积压 SKU | Q-P4-1 口径 A | 不设 | 明细 `reason ∈ {NO_SALES, SLOW_MOVING}`；前端文案「因近 30 天无销量滞销」/「预计可售超 90 天」 |
 | 5 | 采购待审批 | `status='submitted'` 的单数 | 不设 | 采购单状态机现状 |
 | 6 | 知识库可用切片 | 已发布版本的 chunk 数（`published_at IS NOT NULL` 的版本下 `document_chunks`） | 不设 | 与 RAG 检索池同源（S3 门控后「已发布=可检索」） |
 
@@ -128,7 +128,7 @@
 
 - 缺货：`JOIN inventory_policies ON (sku_id)`，`on_hand ≤ safety_stock` → `out_of_stock`；
   `safety_stock < on_hand ≤ reorder_point` → `below_reorder`（与 `alerts.py:53-55` 语义一致）。
-- 积压：按 Q-P4-1 裁定实现；速度基准复用 `daily_sku_sales.net_qty` 近 30 天，
+- 积压：按 Q-P4-1 口径 A 实现；速度基准复用 `daily_sku_sales.net_qty` 近 30 天，
   日均口径沿用 `build_sku_health` 的「仅 complete 日参与日均」规则（`app/dashboard.py:170-200`），
   不自己发明第二套算法。
 - **分布饼图四类**：`out_of_stock / below_reorder / healthy / overstock`（+`unknown_policy` 单列角标，不占饼）。
@@ -196,38 +196,46 @@
 
 ---
 
-## 3. 待裁定（评审时拍板，当前按推荐默认写死）
+## 3. 裁定记录（2026-11-01 用户已拍板，实施按此为准）
 
-### Q-P4-1【必须裁定】积压（overstock）口径
+### Q-P4-1 积压（overstock）口径 → **采纳口径 A（滞销 + 慢周转组合）**
 
 系统没有任何「积压/滞销」的既有定义（已 grep：`safety_stock/reorder_point` 只用于缺货方向）。
 
-- **口径 A（推荐）**：`overstock = (近 30 天净销量 == 0 且 on_hand > 0)` **或** `days_of_inventory ≥ 90`。
-  理由：滞销（卖不动）与慢周转（卖得慢）是两个不同的老板动作（清仓 vs 观察）；
-  用一个阈值会漏掉「零销量但有库存」这个最刺眼的信号。
-  明细列表用 `reason ∈ {NO_SALES, SLOW_MOVING}` 区分。
-- **口径 B（最简）**：只用 `近 30 天净销量 == 0 且 on_hand > 0`。
-  优点零阈值争议；缺点卖得极慢（日均 0.01）的 SKU 永远不算积压。
-- **口径 C**：只用 `days_of_inventory ≥ 90`。缺点：零销量 SKU 算不出 `days_of_inventory`（分母 0），
-  会被判成 `data_insufficient` 而不是积压——这与业务直觉相反。
+**裁定**：`overstock = (近 30 天净销量 == 0 且 on_hand > 0)` **或** `days_of_inventory ≥ 90`
+（阈值常数 `OVERSTOCK_DAYS_THRESHOLD = 90`）。
 
-**本文件按口径 A 写死（阈值 90 天常数 `OVERSTOCK_DAYS_THRESHOLD`）**；若裁 B/C，只改一处判定与 P-5 用例预期。
+- **每条积压明细必须带 `reason ∈ {NO_SALES, SLOW_MOVING}`**，前端按 reason 显示不同中文提示：
+  - `NO_SALES` → **「因近 30 天无销量滞销」**
+  - `SLOW_MOVING` → **「预计可售超 90 天」**
+  - 两句文案为用户钦定原文，**不得改写、不得只显示 reason 英文枚举**。
+- 一个 SKU **同时命中两个 reason 时只出一条**（`NO_SALES` 优先，因为零销量已蕴含慢周转，
+  两条并列会让老板重复处理同一 SKU）；`reason` 为单值字符串，不是数组。
+- 已排除：口径 B（只判滞销，会漏掉日均 0.01 的慢销品）；口径 C（只判可售天数，零销量
+  算不出 `days_of_inventory` 会被误判 `data_insufficient`，与业务直觉相反）。
 
-### Q-P4-2 demo 环境的 GMV 空状态
+### Q-P4-2 demo 环境的 GMV 空状态 → **不补 seed**
 
-`app/demo_seed.py` 不造 `ExternalOrder`（F-P4-4），所以 demo 登录后 GMV/订单数卡会是 0 + 空状态文案。
+`app/demo_seed.py` 不造 `ExternalOrder`（F-P4-4），demo 登录后 GMV/订单数卡为 0 + 空状态。
 
-- **推荐：本片不补 seed**。理由：改 `demo_seed.py` 属「数据脚本改动」，超出本片「只读 + 前端」红线；
-  且 demo 的意义是演示流程，不是演示金额。空状态文案写「当前 Workspace 无订单事实（demo 环境未生成订单）」，本身也是口径诚实性的示范。
-- 备选：另立小任务让 demo_seed 造 7 天订单（含 cancelled 一笔用于验证谓词），成本约半小时，**不在本片**。
+**裁定：本片不补 seed。** demo 显示 0 与空态**是完全正确的行为**；
+「改数据脚本」不属于前端切片范畴，**严禁越界修改 `app/demo_seed.py`**（写入 §5 禁区）。
+空状态文案写「当前 Workspace 无订单事实（demo 环境未生成订单）」。
 
-### Q-P4-3 多币种 GMV
+### Q-P4-3 多币种 GMV → **分组返回、分币种展示、绝不折算** + 响应体留 TODO 注记
 
 `external_orders.currency` 为自由列（默认 `CNY`），系统**无汇率源**。
 
-- **推荐**：按 `currency` 分组返回 `by_currency: [{currency, gmv, order_count}]`，
-  前端：单币种时只显示一张卡；多币种时主卡显示分币种明细（不做折算、不显示合计）。
-- 备选：只统计 `currency == 'CNY'` 并把其他币种计数写进 `limitations`（会静默丢数据，不推荐）。
+**裁定**：
+- 按 `currency` 分组返回 `by_currency: [{currency, gmv, order_count}]`；
+- 前端单币种时只显示一张卡；多币种时主卡显示分币种明细，**不做折算、不显示跨币种合计**；
+- **响应 JSON 必须留 TODO 注记**，字段名 `fx_todo`，值为字符串原文：
+  **「汇率折算依赖财务模块后续提供」**
+  （位置：`by_currency` 同级的顶层键；`len(by_currency) >= 2` 时字符串按上式原样返回，
+  单币种时同样返回该键以保证前端可无差别渲染——本字段是给未来财务模块的锚点，
+  不是给用户看的错误信息，前端**不展示**，仅在 `console.debug` 输出）。
+
+已排除：只统计 CNY 并把其他币种塞 `limitations`（静默丢数据，老板会看到假总额）。
 
 ---
 
@@ -237,7 +245,7 @@
 
 | 文件 | 内容 | 关键约束 |
 |---|---|---|
-| `app/cockpit.py` | 只读聚合 service：`build_cockpit(db, *, workspace_id, days, as_of)` → dict | **仅 SELECT**；零 `db.add/commit/delete`；零 `settings`/`environ` 开关；不 import fastapi |
+| `app/cockpit.py` | 只读聚合 service：`build_cockpit(db, *, workspace_id, days, as_of)` → dict；积压明细带 `reason`（Q-P4-1 口径 A）；多币种 `by_currency` + 顶层 `fx_todo`（Q-P4-3） | **仅 SELECT**；零 `db.add/commit/delete`；零 `settings`/`environ` 开关；不 import fastapi |
 | `app/templates/cockpit.html` | 三段式页面（6 卡 / 2 图 / 4 列表）+ 口径 `<details>` + `chartEmpty()` 空态占位（D8） | 复用 `_render_workspace_page` 注入侧栏；插值必须 `escapeHtml`；两图必须先判空再 init |
 | `tests/test_p4_cockpit.py` | P-1..P-11（11 例） | 双账号夹具非必需（本片无 maker-checker），但**跨租户隔离必测** |
 
@@ -253,7 +261,8 @@
 `app/db.py`、`app/dashboard.py`、`app/analytics.py`、`app/analytics_queries.py`、`app/business_dates.py`、
 `app/external_orders.py`、`app/replenishment.py`、`app/purchase_approval.py`、`app/knowledge_admin.py`、
 `app/rag/*`、`app/rag_runtime.py`、`app/storage.py`、`app/config.py`、
-`app/templates/dashboard.html` 及全部既有模板、`migrations/`、全部既有测试文件。
+**`app/demo_seed.py`（Q-P4-2 裁定）**、`app/templates/dashboard.html` 及全部既有模板、
+`migrations/`、全部既有测试文件（含 `tests/test_api_dashboard.py`、`tests/test_frontend_warehouse.py`）。
 
 ---
 
@@ -274,6 +283,13 @@
     必须渲染 `.chart-empty` 占位块（中文原因 + 可操作提示）并 `return`。判定必须在 `echarts.init()` 之前（D8 四条禁止项）。
 12. **图表容器必须常驻且可判定**：两个图表容器 `id="sales-chart"` / `id="inventory-pie"` 在 HTML 中始终存在
     （空态是「容器内有占位块」，不是「容器不存在」），以便 P-9 做结构断言。
+13. **`app/demo_seed.py` 严禁触碰**（Q-P4-2 裁定：demo 显示 0 与空态即正确行为；
+    补 seed 属数据脚本改动，不在前端切片范畴）。同属禁区的还有 `tests/test_api_dashboard.py`
+    与 `app/dashboard.py`——旧接口与旧页面的既有断言一条都不许改。
+14. **积压 reason 与文案必须一一对应**：`NO_SALES` ↔「因近 30 天无销量滞销」，
+    `SLOW_MOVING` ↔「预计可售超 90 天」。**不得改写成同义句、不得把 reason 英文直接显示给用户**。
+15. **`fx_todo` 必须逐字返回**「汇率折算依赖财务模块后续提供」（Q-P4-3），
+    不得改写、不得省略、不得仅在多币种时返回（单币种也返回，前端可无差别渲染）。
 
 ---
 
@@ -284,8 +300,8 @@
 | P-1 | GMV 与订单数基础聚合 | 造 3 单：2 单 `paid`（含 1 单部分退款）+ 1 单 `cancelled` → GMV = 两单净额之和，**cancelled 不计**；订单数 = 2 |
 | P-2 | 窗口与环比 | 7 天窗口 vs 前 7 天；`window/days/from/to/prev_from/prev_to` 精确；环比 = `(cur−prev)/prev`，prev=0 时返回 `null` 而非 `Infinity` |
 | P-3 | 稀疏日期不补 0 | 中间缺 2 天 → `gmv[i] is None`、`order_counts[i] == 0`、`missing_days == 2`（**不得**把缺失日写成 0） |
-| P-4 | 多币种不混加（按 Q-P4-3） | 造 CNY 2 单 + USD 1 单 → `by_currency` 两组，主值不出现「跨币种合计」 |
-| P-5 | 缺货 / 积压判定 | 有 policy 且 `on_hand ≤ safety_stock` → 计缺货；`safety < on_hand ≤ reorder` → `below_reorder`；**无 policy 的 SKU 进 `unknown_policy` 且不计缺货**；积压按 Q-P4-1 口径 A 命中 `NO_SALES` 与 `SLOW_MOVING` 各一 |
+| P-4 | 多币种不混加（Q-P4-3） | 造 CNY 2 单 + USD 1 单 → `by_currency` 两组，主值不出现「跨币种合计」；响应顶层含 `fx_todo == "汇率折算依赖财务模块后续提供"`（原文逐字相等） |
+| P-5 | 缺货 / 积压判定 | 有 policy 且 `on_hand ≤ safety_stock` → 计缺货；`safety < on_hand ≤ reorder` → `below_reorder`；**无 policy 的 SKU 进 `unknown_policy` 且不计缺货**；积压按 Q-P4-1 口径 A 命中 `NO_SALES` 与 `SLOW_MOVING` 各一，且各条 `reason` 单值、前端文案为用户钦定两句 |
 | P-6 | 待办计数状态边界 | `submitted` 采购单计、`approved/rejected/cancelled/draft` 不计；入库 `expected/received` 计、`confirmed` 不计 |
 | P-7 | 知识库健康只认已发布 | 造 draft（`published_at IS NULL`）+ published 各一版本，各 3 chunk → `available_chunks == 3`、`published_versions == 1`；`failed` 版本单独计数 |
 | P-8 | 权限与跨租户隔离 | `customer_service` / `readonly` 访问 → 403；`operations` / `admin` → 200；另造 workspace 2 的订单/库存，**断言不出现在 workspace 1 的响应里** |
@@ -324,7 +340,8 @@
 5. **禁止**为了让页面「看起来有数据」而写死任何值（含示例 JSON、mock 常量）。
 6. 完成后 `git commit`（前缀 `p4:`，**不 push**），并把交付说明写到 **`.testtmp/delivery.p4.md`**：
    提交号、定向/全量结果、`app/cockpit.py` 的 SELECT 清单（逐条列出查了哪些表）、
-   `cockpit.html` 三段式结构片段、11 条用例与本文 §6 的对应关系、偏差清单（无则写"无"）。
+   `cockpit.html` 三段式结构片段、11 条用例与本文 §6 的对应关系、偏差清单（无则写"无"）；
+   另需贴出：积压 reason 两处前端文案原文（须与 Q-P4-1 逐字一致）、`fx_todo` 字符串原文。
 7. **不要**跑 `git push`；**不要**动 `.env`；**不要**改 `migrations/`。
 
 ---
@@ -336,10 +353,10 @@
 3. **用 `daily_sku_sales.order_count` 求和算订单数** —— 多 SKU 订单重复计（F-P4-1）。
 4. **GMV 取 `daily_sku_sales.net_amount`** —— 本片统一取 `external_orders`，两源混用不可接受（F-P4-2）；
    若将来要做，必须单独验证两源差额并写进口径说明。
-5. **为 demo 造订单数据** —— 超出红线（Q-P4-2，推荐不补）。
+5. **为 demo 造订单数据／改 `app/demo_seed.py`** —— Q-P4-2 已裁定不补，属越界（demo 显示 0 与空态即正确）。
 6. **新建全局 token 文件** —— 属 §1.5 独立改造项，本片不扩范围。
 7. **读向量库统计切片数** —— 与 RAG 运行时耦合；DB 即真值（D5）。
 8. **引入第二个图表库 / CDN 加载 ECharts** —— 违反 §1.3 规则 1，且离线环境不可用。
 9. **默认把无 policy 的 SKU 判成缺货** —— 语义错误（F-P4-6）。
-10. **前端做币种折算** —— 无汇率源，折算即编造（Q-P4-3）。
+10. **前端做币种折算／显示跨币种合计** —— 无汇率源，折算即编造（Q-P4-3 已裁定分组返回、绝不折算）。
 11. **空数据时让 ECharts 自己画空坐标系** —— 视觉上等同白屏/渲染失败；必须先判空再决定是否 init（D8）。
