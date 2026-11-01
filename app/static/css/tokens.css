@@ -171,3 +171,35 @@ body {
   font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
 }
+
+/* ==========================================================================
+   P5-S3 视觉骨架层（L1 补充：动效时长 / 焦点环 / 侧栏深色阶 / 面板阴影）
+   --------------------------------------------------------------------------
+   依据 dev_task.p5s3-visual-overhaul.md §4；只追加，不改任何既有 token 值。
+   ========================================================================== */
+
+:root {
+  /* 侧边栏深色阶（现有 --color-nav-bg 保留为基色不动） */
+  --color-nav-bg-deep: #0e1b2c;
+  --color-nav-hover-bg: #ffffff12;
+  --color-nav-active-bg: #ffffff1f;
+  --color-nav-section-ink: #7d90a8;
+
+  /* 焦点环（主色 20% alpha，用于 input/button 的 focus-visible） */
+  --color-focus-ring: #2a78d633;
+
+  /* 面板 */
+  --color-panel-border: #e8eef6;
+  --shadow-panel: 0 1px 2px #1018280a, 0 10px 28px -14px #1018281f;
+  --shadow-panel-hover: 0 1px 2px #1018280d, 0 16px 36px -16px #10182826;
+
+  /* 顶栏 */
+  --topbar-height: 4rem;
+  --color-topbar-bg: #ffffffd9;
+  --shadow-topbar: 0 1px 0 #e8eef6;
+
+  /* 动效 */
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --ease-out: cubic-bezier(.4, 0, .2, 1);
+}
