@@ -3,12 +3,17 @@
 | 项 | 值 |
 |---|---|
 | 切片 | P5-S3 |
-| 版本 | v1.0（草案，待用户裁定 Q-P5S3-1..7） |
+| 版本 | **v1.1（定稿）** — Q-P5S3-1..7 七条裁定全部回填（§9），新增「删除前等效声明 + 图表尺寸验证」硬条款（§6.4） |
 | 前置 | P5-S1 `0df5dc9`（token 层）、P5-S2 `17aa757`（表格/徽标/空态）均已收口 |
 | 基线 | **502 passed / 0 failed**（`17aa757` 实测 287.69s） |
-| 目标 | 502 → **512**（新增 `tests/test_p5s3_visual_skeleton.py` T-1..T-10） |
+| 目标 | 502 → **514**（新增 `tests/test_p5s3_visual_skeleton.py` T-1..T-12） |
 | 分支 | `feat/warehouse-mvp`（当前分支，不新建） |
 | 提交 | 完成后提交，**不 push** |
+
+> **定稿记录（2026-11-01）**：用户全盘接受七条裁定建议，并追加一条硬要求 ——
+> 「删除页内 `<style>` 前，必须把依赖这些样式的 DOM 节点（尤其 ECharts 容器与 `.cards` 网格）
+> 在全局层做好等效声明；删完必须人工在 F12 确认布局不坍塌、ECharts 尺寸不为 0」。
+> 已落为 **§6.4 硬条款 + G17 机器守卫 + T-11/T-12 用例 + §11 R1 处置**，四处同时生效。
 
 ---
 
@@ -85,10 +90,10 @@ def _render_workspace_page(template_name: str, principal, active_path: str) -> H
 
 用 `.testtmp/p5s3_survey.py` 实测（脚本已落盘，可复跑）：
 
-| 模板 | `<style>` 体积 | 选择器数 | 与 shell 重复 | 页内自带骨架副本 | 危害 |
+| 模板 | `<style>` 体积 | 去重选择器 | 与 shell 重复 | 页内自带骨架副本 | 危害 |
 |---|---:|---:|---:|---|---|
-| **dashboard.html** | 6867 B | 84 | **26** | `body` `.sidebar` `.main` `.content` `.panel` `.topbar` `.avatar` | 🔴 **改 shell 对它完全无效** |
-| **cockpit.html** | 5612 B | 63 | **26** | 同上 | 🔴 **改 shell 对它完全无效** |
+| **dashboard.html** | 6867 B | 84（实际 94 条规则，含 `@media`） | **26** | `body` `.sidebar` `.main` `.content` `.panel` `.topbar` `.avatar` | 🔴 **改 shell 对它完全无效** |
+| **cockpit.html** | 5612 B | 63（实际 74 条规则） | **26** | 同上 | 🔴 **改 shell 对它完全无效** |
 | **admin_users.html** | 2263 B | 31 | 3 | `body` `.sidebar` `.content` | 🟠 布局被页内接管 |
 | **warehouse.html** | 140 B | 3 | 2 | `body` `.sidebar` `.content` | 🟠 同上（3 条全是骨架副本） |
 | orders.html | 1492 B | 19 | 14 | `.panel` 控件 | 🟡 组件样式分叉 |
@@ -218,7 +223,28 @@ body .sidebar { … }    /* 即使漏删副本也能压住 —— 双保险 */
 
 ## §5 新建 `app/static/css/ui-v2.css`
 
-**新建文件，约 260 行。** 下面 7 段按顺序写，**不要自创选择器，不要加 `!important`**。
+**新建文件，约 280 行。** 下面 **9 段**（段 0 + 段 1..8）按顺序写，**不要自创选择器，不要加 `!important`**。
+落盘顺序：§5.1 的文件头注释放文件最顶 → §5.0 的 reset → §5.2..§5.8 依次。
+
+### 5.0 段 0 — 全局 reset（**新增，必读**）
+
+⚠️ **实测坑（务必先看）**：`tokens.css:161-172` 只有 `body{background;color;font-family;font-variant-numeric}`，
+**明确注释「不设 body{margin}，保持现状」**。而全站只有 4 个模板带 `body{margin:0}`：
+
+| 有 `body{margin:0}` | **没有** |
+|---|---|
+| admin_users.html、cockpit.html、dashboard.html、warehouse.html | **index、orders、content、shopify、assistant、customer_service（6 个）** |
+
+→ 这 6 个页面长期存在 **浏览器默认 8px 白边**（内容四周内缩 8px、可用宽度少 16px）。
+这是现存缺陷，不是本片引入的。**本片顺手修掉**：
+
+```css
+/* ---------- 段 0：全局 reset（修 6 个页面缺 body{margin:0} 的 8px 白边） ---------- */
+body{margin:0}
+```
+
+> 加了这一条后，上述 6 个页面会整体位移 8px（内容左移/上移、变宽 16px）—— **这是修 bug，不是破版**。
+> 交付说明里必须写明「这 6 个页面有 8px 位移属预期」。
 
 ### 5.1 段 1 — 文件头与图标变量占位
 
@@ -520,7 +546,7 @@ body a:focus-visible,body summary:focus-visible{
 - 既有 87 个变量的**值一个都不许改**（P5-S1 T-3 / T-8 会红）。
 
 ### 6.2 `app/static/css/ui-v2.css`（新建）
-- 按 §5 的 8 段写，约 260 行。
+- 按 §5 的 9 段写（段 0 + 段 1..8），约 280 行。
 - 文件头注释必须含 §5.1 的 4 条硬约束。
 
 ### 6.3 10 个模板（`app/templates/*.html`）
@@ -534,30 +560,114 @@ body a:focus-visible,body summary:focus-visible{
 
 必须满足顺序：`tokens.css` → `workspace-shell.css` → `ui-v2.css` → `<style>`。
 
-**(b) 删除页内骨架/组件副本**（§2.3 表）。逐页清单：
+**(b) 删除页内骨架/组件副本**（§2.3 表）。**不得凭「看起来是骨架」就删 —— 必须走 §6.4 的判定规则。**
 
 | 模板 | 删什么 | 保留什么 |
 |---|---|---|
-| **dashboard.html** | 删 `.shell` `.sidebar` `.brand*` `.nav*` `.main` `.topbar` `.content` `.page-heading`(骨架部分) `.panel` `.panel-head` `.panel-subtitle` `.cards` `.card` `.field` `input/select/button` `table/th/td` `.table-wrap` `.muted` `.empty` `body` —— 共 26 条 | 页面专属：`.chart-grid` `.quadrant-*` `.metric-*` `.kpi-*` `.toolbar` `.chart` `.legend` 等 |
-| **cockpit.html** | 同上 26 条 | 页面专属：`.chart-*` `.error-panel` `.chart-empty`（**必须留，P-11 断言**）`.quadrant-*` |
-| **admin_users.html** | 删 `body{}` `.sidebar{}` `.content{}` 三条 | `.admin-grid` `.member-*`、`.content{max-width:1360px}` 一并删除（统一到 1380） |
-| **warehouse.html** | 删**整个 `<style>` 块**（140 B / 3 条全是骨架副本）。保留 `<style></style>` 空标签或整块移除，二选一 | 无 |
-| **orders.html** | 删 `.panel` `.card` `.cards` `.table-wrap` `table/th/td` `input/select/button` `.muted` `.field` (`.tag` `.warn` `.good` 改由 badge 承担，**本片不动，保留**) | `.filters` `.value` `.detail` `.tag/.warn/.good`（O-P5S3-2） |
-| **content.html** | 删 `.panel` `.cards` `.field` `.muted` `.status` `input/select/button` | `.grid` `.workflow-*` `.status` 的状态色变体保留 |
-| **shopify.html** | 删 `.panel` `.cards` `.card` `.table-wrap` `table/th/td` `.muted` | `.tag` `.warn` 保留（O-P5S3-2） |
-| **customer_service.html** | 只删 `button` `button:disabled` 两条 | `.cs-*` 全部保留（含 `.cs-table` 的 `text-align:left` —— P5-S2 靠高特异性处理，**不动**） |
-| **index.html** | 不删任何规则（仅重复 `.step` `.step h3` 两条，保留或删均可，删更干净） | 全部 |
+| **dashboard.html** | 删 `.shell` `.sidebar` `.brand*` `.nav*` `.main` `.topbar` `.content` `.page-heading` `.panel-head` `.panel-subtitle` `.muted` `.field` `input/select/button` `table/th/td` `.table-wrap` `.empty` `body` | **`.chart*` `.quadrant-*` `.cards`(列数) `.card*` `.sync-*` `.toolbar` `.legend` 及全部 `@media`** —— 见 §6.4 白名单 |
+| **cockpit.html** | 同上 | **`.chart*` `.chart-refreshing` `.error-panel` `.cards`(列数) `.card*` `.todo-grid` `.metric-definitions` 及全部 `@media`** —— 见 §6.4 白名单 |
+| **admin_users.html** | 删 `body{}` `.sidebar{}` `.content{}` 三条（`.content{max-width:1360px}` 属 Q5 统一范围，一并删） | `.admin-grid` `.member-*` 全部 |
+| **warehouse.html** | 删**整个 `<style>` 块**（140 B / 3 条全是骨架副本），连 `<style>` 标签一起移除 | 无 |
+| **orders.html** | 删 `.panel` `.card` `.cards` `.table-wrap` `table/th/td` `input/select/button` `.muted` `.field` | `.filters` `.value` `.detail` `.tag/.warn/.good`（O-P5S3-2） |
+| **content.html** | 删 `.panel` `.cards` `.field` `.muted` `input/select/button` | `.grid` `.workflow-*` `.status` 的状态色变体 |
+| **shopify.html** | 删 `.panel` `.cards` `.card` `.table-wrap` `table/th/td` `.muted` | `.tag` `.warn`（O-P5S3-2） |
+| **customer_service.html** | 只删 `button` `button:disabled` 两条 | `.cs-*` 全部（含 `.cs-table{text-align:left}` —— P5-S2 靠高特异性处理，**不动**） |
+| **index.html** | 只删重复的 `.step` `.step h3` 两条（可选） | 全部 |
 | **assistant.html** | **零改动**（除加 `<link>`） | 全部 |
 
-> **删之前必须做的动作**：逐条对比「页内值」与「shell 值」，**把差异记进交付说明**。
-> 如果某条页内规则的值与 shell **不同**（例如 `.content{max-width:1440px}` vs shell `1380px`），
-> 按 §3.2 的策略**删页内、以 shell 为准**，并在交付说明里列出「视觉上会变的地方」。
+### 6.4 ⚠️ 硬条款：删除前等效声明 + 图表尺寸验证（用户追加要求，**不可省**）
 
-### 6.4 `tests/test_p5s3_visual_skeleton.py`（新建）
+本片要动 dashboard / cockpit 的页内样式：两页合计 **168 条规则**（dashboard 94 / cockpit 74，含 `@media` 内的），
+其中约 **26 个选择器与 shell 重名**。**这两页承载全部 ECharts 图表，删错一条就是白屏。**
+
+#### 6.4.1 判定规则（逐条过，不满足就保留）
+
+一条页内规则 **可删**，当且仅当**同时**满足：
+
+| 条件 | 说明 |
+|---|---|
+| (a) `workspace-shell.css` 中存在同名或等价选择器 | 例如 `.panel{…}` 在 shell 有 |
+| (b) 它的每条声明，要么被 shell 同名规则等价覆盖，要么被 `ui-v2.css` 的 `body .xxx` 更高特异性覆盖 | 逐声明比对，不是整个块看一眼 |
+| (c) **它不含任何尺寸/布局锚点属性** —— `height` `min-height` `max-height` `width` `max-width` `grid-template-columns` `grid-template-rows` `position` `inset` `flex-basis` | ★ 这是白屏的根源 |
+
+**任何一条不满足 → 保留，并在交付说明「保留清单」里登记原因。**
+
+#### 6.4.2 必保白名单（machine-checked，G17 / T-11 会验）
+
+以下是实测确认的「尺寸锚点」，**一个字都不许删**：
+
+**dashboard.html**
+```
+.chart{height:300px;min-height:240px}
+.quadrant-chart{height:360px;min-height:280px}
+.chart-grid{grid-template-columns:minmax(0,1.35fr) minmax(340px,1fr)}
+.quadrant-layout{grid-template-columns:minmax(0,1.5fr) minmax(280px,1fr)}
+.quadrant-summary{grid-template-columns:repeat(5,minmax(0,1fr))}
+.sync-health-kpi{grid-template-columns:repeat(6,minmax(0,1fr))}
+.sync-retry-grid{grid-template-columns:1fr 1fr}
+.cards{grid-template-columns:repeat(4,minmax(0,1fr))}   ← shell 是 auto-fit，删了会变列数
+.chart-empty{…height:100%…}
+```
+
+**cockpit.html**
+```
+.chart{height:320px;min-height:260px;position:relative}   ← position:relative 是 .chart-refreshing 的定位锚点
+.chart-refreshing{position:absolute;top:.4rem;right:.5rem;…}
+.chart-grid{grid-template-columns:minmax(0,1.35fr) minmax(340px,1fr)}
+.cards{grid-template-columns:repeat(3,minmax(0,1fr))}
+.todo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.error-panel{display:flex;…}
+.chart-empty{…height:100%…}
+```
+
+**两页共同**：所有 `@media(max-width:…)` 块内的 `.chart{height:260px}`、`.cards{grid-template-columns:repeat(2,…)}`、`.chart-grid{grid-template-columns:1fr}` 等**响应式值全部保留**。
+
+> **为什么这么严**：`.chart` 的 `height` 是 ECharts 容器的**唯一高度来源**。
+> `echarts.init(el)` 在高度为 0 的容器上会渲染空图且**不报错** —— 页面看着"没崩"，图表却全没了。
+> 这类故障在 CI 里 100% 检测不到（502 条用例没有一条执行页面 JS），只能靠本节纪律 + 人工核验。
+
+#### 6.4.3 删完必须做的人工验证（F12，写入交付说明）
+
+用浏览器（Chrome/Edge）逐页核验，**截图存档**：
+
+| 检查项 | 合格标准 |
+|---|---|
+| ① `/dashboard` 图表区 | 4 张图（销售趋势 / 库存风险 / 商品四象限 / 同步健康）**都有内容**，`document.querySelector('.chart').offsetHeight` 返回 **300**（窗口 >1200px 时） |
+| ② `/dashboard` 四象限图 | `document.querySelector('.quadrant-chart').offsetHeight` 返回 **360** |
+| ③ `/cockpit` 图表区 | 全部图表有内容，`.chart` 高度 **320** |
+| ④ `/cockpit` 刷新徽标 | `.chart-refreshing` 出现在图表**右上角内部**，不是飘到页面角落 |
+| ⑤ `.cards` 网格 | dashboard 一行 4 张、cockpit 一行 3 张（不是挤成一行 8 张或塌成一列） |
+| ⑥ 控制台 | **零** `Uncaught` 报错、零 404（含 ECharts 的 `[ECharts] ...` 警告要记录） |
+| ⑦ 其余 8 页 | 布局无坍塌、表格无横向撕裂、侧边栏高亮正常 |
+
+验证脚本模板（粘进 F12 Console 直接跑）：
+
+```js
+// 图表容器尺寸核验
+[...document.querySelectorAll('.chart,.quadrant-chart')].map(el => ({
+  id: el.id || el.className, h: el.offsetHeight, w: el.offsetWidth,
+  hasCanvas: !!el.querySelector('canvas'),
+  canvasSize: (()=>{const c=el.querySelector('canvas');return c?[c.width,c.height]:null})()
+}))
+```
+
+合格判据：**每项 `h > 0` 且 `hasCanvas === true`**。任何一项 `h === 0` 或 `hasCanvas === false` → **立刻停止，恢复该条规则**。
+
+#### 6.4.4 等效声明的落点
+
+如果某条尺寸规则**确实**更适合放在全局层（例如希望 10 页统一），可以在 `ui-v2.css` 里写等效声明**之后**再删模板里的 —— 但必须：
+
+1. 新声明用 `body` 前缀（保证赢）；
+2. 数值**逐字相同**（`.chart{height:300px}` → `body .chart{height:300px}`，不许"顺手"改成 320px）；
+3. 在交付说明里成对登记「删了哪条 / 加在哪行」。
+
+**没有等价声明，不许删。** 宁可留着重复规则，也不要图表白屏。
+
+### 6.5 `tests/test_p5s3_visual_skeleton.py`（新建）
 
 10 条用例，见 §8。
 
-### 6.5 明确不动的文件
+### 6.6 明确不动的文件
 
 `app/main.py`、`app/static/workspace-shell.css`、`app/static/format.js`、`app/static/labels.js`、
 `app/static/echarts.min.js`、`tests/test_p5s1_tokens.py`、`tests/test_p5s2_tables_and_empty.py`、
@@ -565,7 +675,7 @@ body a:focus-visible,body summary:focus-visible{
 
 ---
 
-## §7 守卫（G1–G16，交付前必须逐条自查并在交付说明里给结果）
+## §7 守卫（G1–G18，交付前必须逐条自查并在交付说明里给结果）
 
 | 编号 | 守卫 | 自查方法 |
 |---|---|---|
@@ -585,13 +695,17 @@ body a:focus-visible,body summary:focus-visible{
 | G14 | `ui-v2.css` 内无裸 hex 色值（`#xxx` / `#xxxxxx`），颜色一律 `var(--…)` | 例外：§5.2/§5.7 的 6 处阴影 alpha 与 `#ffffff0f` 等半透明分隔线，须在交付说明列清单 |
 | G15 | 页面宽度统一后，9 个模板内不再有 `max-width:1360px/1440px/1120px` | `grep -E` 返回空 |
 | G16 | 未引入 Tailwind / Bootstrap / DaisyUI / FontAwesome 任何文件或链接 | `git status` 无新增第三方资源 |
+| **G17** | **图表尺寸锚点仍在**：`dashboard.html` 含 `.chart{height:300px`、`.quadrant-chart{height:360px`、`.chart-grid{grid-template-columns`、`.cards{grid-template-columns:repeat(4`；`cockpit.html` 含 `.chart{height:320px`、`.chart-refreshing{position:absolute`、`.cards{grid-template-columns:repeat(3`；两页 `.chart-empty` 仍在 | `grep -F` 逐串核验；T-11 会机器验 |
+| **G18** | **`body{margin:0}` 已由 `ui-v2.css` 段 0 提供**（补 6 个模板缺失的 reset） | `grep -c 'body{margin:0}' ui-v2.css` ≥ 1；T-12 会验 |
 
 > **G14 的例外处理**：`box-shadow` 里的半透明色值（`#2a78d680`、`#1018280a` 等）无法用 token 表达。
 > 逐条写进交付说明「裸色值清单」，说明用途与位置。**正文颜色、边框、背景一律走 var()。**
+>
+> **G17 是本片的红线级守卫**：它保护的是「图表不白屏」。任何一条不过，本片视为失败，不接受「视觉上看起来还行」的解释。
 
 ---
 
-## §8 验收用例（`tests/test_p5s3_visual_skeleton.py`，T-1..T-10）
+## §8 验收用例（`tests/test_p5s3_visual_skeleton.py`，T-1..T-12）
 
 沿用 `test_p5s1_tokens.py` 的写法（`TPL_DIR` / `_read` / `_style_blocks` 工具函数可直接复用或复制）。
 
@@ -607,22 +721,28 @@ body a:focus-visible,body summary:focus-visible{
 | **T-8** | 9 个模板（除 assistant）内不再含 `max-width:1360px` / `1440px` / `1120px`；且 `dashboard`/`cockpit` 的 `<style>` 内不再出现 `.sidebar{` / `.main{` / `body{` | §6.3(b) 清理完成 |
 | **T-9** | 卡片化覆盖：`ui-v2.css` 的选择器组必须包含 `section[id$="-panel"]`、`section#warehouse`、`section#purchase-workflow` 三串；且**不含** `#kpis` / `#kpi-grid` / `#knowledge`（防误伤网格容器） | §5.5 |
 | **T-10** | 回归锁：`workspace-shell.css` 仍含 P5-S1 的 5 个字面串；`app/main.py` 的 `_WORKSPACE_NAV_ITEMS` 图标字符未被修改（断言仍含 `◎` `▦` `▣`） | G1 + B-5 |
+| **T-11** | **图表尺寸锚点未丢（G17 的机器实现）**：`dashboard.html` 的 `<style>` 必须含 `.chart{height:300px`、`.quadrant-chart{height:360px`、`.chart-grid{grid-template-columns`、`.cards{grid-template-columns:repeat(4`、`.chart-empty`；`cockpit.html` 必须含 `.chart{height:320px`、`.chart-refreshing{position:absolute`、`.cards{grid-template-columns:repeat(3`、`.chart-empty`。逐串 `in` 断言 | §6.4.2 |
+| **T-12** | **全局 reset 到位**：`ui-v2.css` 含 `body{margin:0}`；且含 `body .panel` 与 `body .card` 两条等效声明 | G18 + §6.4.4 |
 
-**预期总数：502 + 10 = 512 passed / 0 failed。**
+**预期总数：502 + 12 = 514 passed / 0 failed。**
+
+> 关于 T-11 的写法：直接对模板文本做字面串 `in` 断言（与 P5-S1 T-5 同风格），
+> **不要**解析 CSS —— 解析器会被合并选择器与重复键骗（P5-S1 复核时踩过，R-20 教训）。
 
 ---
 
-## §9 待裁定（Q-P5S3-1..7）
+## §9 裁定记录（Q-P5S3-1..7，**用户 2026-11-01 已全部拍板，勿再议**）
 
-| 编号 | 问题 | 我的建议 | 理由 |
+| 编号 | 问题 | 裁定结果 | 理由 |
 |---|---|---|---|
-| **Q-P5S3-1** | 是否按用户建议引 **Tailwind CDN / Bootstrap 5 / DaisyUI**？ | ❌ **全部否决** | ① **内网环境**，CDN 加载失败 = 整页裸奔（P5-S1 Q-2 已就同一问题裁定「外链致命」）；② Tailwind **Play CDN 是运行时 JIT**，需拉 ~120KB JS 在浏览器编译，首屏 FOUC 闪烁；③ Bootstrap/DaisyUI 会引入**第二套变量体系**，与 `tokens.css` 冲突；④ 要发挥 `btn btn-primary` 就得**改写全部 94 个按钮的 class**，直接踩 B-3 红线；⑤ 现有 5 条测试以字面串锁死样式文件，换框架 = 全红 |
-| **Q-P5S3-2** | 图标怎么换？ | ✅ **CSS 属性选择器 + `mask-image` data-URI SVG**（§5.3） | 零后端改动（不碰 `main.py`）、零 DOM 改动（`<span class="nav-icon">` 保留，测试 `test_frontend_warehouse.py:70` 依赖它）、不依赖字体与网络、颜色自动跟随 `currentColor`。备选「改 `main.py` 里 10 个图标字符串」我**不推荐**：那要动后端，且违背 B-5 |
+| **Q-P5S3-1** | 是否引 **Tailwind CDN / Bootstrap 5 / DaisyUI**？ | ❌ **否决，纯手写 CSS**（用户已确认「推翻我之前的外部框架建议」） | ① **内网环境**，CDN 加载失败 = 整页裸奔（P5-S1 Q-2 已就同一问题裁定「外链致命」）；② Tailwind **Play CDN 是运行时 JIT**，需拉 ~120KB JS 在浏览器编译，首屏 FOUC 闪烁；③ Bootstrap/DaisyUI 会引入**第二套变量体系**，与 `tokens.css` 冲突；④ 要发挥 `btn btn-primary` 就得**改写全部 94 个按钮的 class**，直接踩 B-3 红线；⑤ 现有 5 条测试以字面串锁死样式文件，换框架 = 全红 |
+| **Q-P5S3-2** | 图标怎么换？ | ✅ **CSS 属性选择器 + `mask-image` data-URI SVG**（§5.3） | 零后端改动（不碰 `main.py`）、零 DOM 改动（`<span class="nav-icon">` 保留，测试 `test_frontend_warehouse.py:70` 依赖它）、不依赖字体与网络、颜色自动跟随 `currentColor` |
 | **Q-P5S3-3** | 新建 `ui-v2.css` 还是改 `workspace-shell.css`？ | ✅ **新建 `ui-v2.css`** | shell 被 5 条用例字面串锁死；新层可一键回滚（删 `<link>`）；失败不影响 502 条基线 |
-| **Q-P5S3-4** | dashboard/cockpit 的**完整骨架副本**（26 条/页）怎么处理？ | ✅ **全删**，以 shell + ui-v2 为准 | 不删则本片对这两页（最重要的两个驾驶舱）**完全无效**。这两页是用户最常看的页面 |
-| **Q-P5S3-5** | 页面宽度统一 1380px（现 dashboard 1440 / admin 1360 / warehouse 1120） | ✅ **统一 1380** | 视觉一致性优先；三档宽度差异肉眼可见（同一套卡片在不同页宽度不同 = 廉价感来源） |
+| **Q-P5S3-4** | dashboard/cockpit 的**完整骨架副本**怎么处理？ | ✅ **彻底清理**（用户原话「家规大于国法必须靠 L0 根治」），但**受 §6.4 白名单约束** | 不删则本片对这两页**完全无效**；但删前必须做等效声明 + 图表尺寸验证 |
+| **Q-P5S3-5** | 页面宽度统一（现 dashboard 1440 / admin 1360 / warehouse 1120） | ✅ **统一 1380px** | 视觉一致性优先；三档宽度差异肉眼可见 |
 | **Q-P5S3-6** | `index.html` 5 个无 `.panel` 的 section 怎么卡片化？ | ✅ **不改 DOM**，用 `section[id$="-panel"]`（覆盖 3 个）+ 2 个特例 id（`#warehouse` / `#purchase-workflow`）兜底（§5.5） | index 是首页、26 个按钮、4 处 `querySelectorAll`，改 DOM 风险最高而收益最低。**另 3 个（`#kpis`/`#kpi-grid`/`#knowledge`）是网格容器，明确排除** |
-| **Q-P5S3-7** | 是否加 `"Inter"` 字体？是否做暗色模式？ | ❌ **都不做** | Inter 需外链（内网死）；系统栈已含 Segoe UI / PingFang SC，观感已足够。暗色模式是独立工程（23 张表 + 24 处 ECharts 色值），不在本片 |
+| **Q-P5S3-7** | 是否加 `"Inter"` 字体？是否做暗色模式？ | ❌ **都不做** | Inter 需外链（内网死）；系统栈已含 Segoe UI / PingFang SC。暗色模式是独立工程（23 张表 + 24 处 ECharts 色值），不在本片 |
+| **Q-P5S3-8**（用户追加） | 删页内 `<style>` 会不会把图表搞塌？ | ✅ **强制"先等效声明、后删除"，且删完必须 F12 人工验证** | 已落成 §6.4 硬条款 + G17 守卫 + T-11/T-12 用例 |
 
 ---
 
@@ -649,11 +769,13 @@ body a:focus-visible,body summary:focus-visible{
 
 | 风险 | 表现 | 处置 |
 |---|---|---|
-| R1 删页内副本后某页变丑 | 例如 dashboard 图表区失去独有的 `.chart` 尺寸 | 删前逐条比对，把「页内独有且 shell 无对应」的规则**保留**；只有「与 shell 同名」的才删 |
+| R1 删页内副本后 **ECharts 图表白屏/尺寸归零** | `.chart` / `.quadrant-chart` 的高度被删 → `echarts.init` 得到 0 高容器，**渲染空白且不报错**，CI 完全检测不到 | **§6.4 三道锁**：判定规则(c) 禁删尺寸属性 → §6.4.2 白名单 → G17 + T-11 机器守卫 → §6.4.3 F12 人工验证（`offsetHeight > 0` 且 `hasCanvas === true`）。任一项不过即视为失败 |
+| R1b 删页内副本后某页变丑（非图表） | 例如 dashboard `.cards` 从 4 列变自适应、`.card-value` 字号变化 | 白名单已含 `.cards{grid-template-columns}` 与 `.card-*`；其余「页内值 ≠ shell 值」的规则保留并在交付说明登记 |
 | R2 `body .panel{padding:24px}` 让宽表格横向溢出 | 23 张表里 `.table-wrap` 出现横向滚动条 | **接受**（本就 `overflow:auto`）。不得改 `min-width` |
-| R3 `font-size:0` 后图标不显示 | 浏览器不支持 `mask-image`（极旧内核） | `@supports not (mask-image: none)` 回落：`.nav-icon{font-size:.9rem}` 显示原字符（§5.3 末尾加 3 行） |
-| R4 顶栏 sticky 遮挡锚点跳转 | `#xxx-panel` 跳过去被顶栏压住 | shell 已有 `section[id]{scroll-margin-top:5.2rem}` → 恰好够（顶栏 4rem）。**不要动它** |
-| R5 全量 flaky | R-19，约 1/3 概率 1 个随机错误 | 重跑一次全绿即过，但**必须登记** |
+| R3 `font-size:0` 后图标不显示 | 浏览器不支持 `mask-image`（极旧内核） | `@supports not (…mask-image…)` 回落显示原字符（§5.3 末尾 4 行） |
+| R4 顶栏 sticky 遮挡锚点跳转 | `#xxx-panel` 跳过去被顶栏压住 | shell 已有 `section[id]{scroll-margin-top:5.2rem}`（顶栏 4rem，够）。**不要动它** |
+| R5 `body{margin:0}` 引入后 6 个页面位移 8px | index/orders/content/shopify/assistant/customer_service 内容整体外移 | **预期行为**（修的是长期存在的 8px 白边缺陷），交付说明须写明 |
+| R6 全量 flaky | R-19，约 1/3 概率 1 个随机错误 | 重跑一次全绿即过，但**必须登记** |
 
 **回滚方案**：`git revert <commit>`；或临时删掉 10 个模板的 `ui-v2.css` `<link>` —— 页面立即回到当前状态（shell 未被改过，G1 保证）。
 
@@ -664,13 +786,20 @@ body a:focus-visible,body summary:focus-visible{
 1. `.testtmp/delivery.p5s3.md` 落盘，含：
    - 改动文件清单 + 每个文件的关键改动位置（行号）
    - **删掉的页内规则逐条清单**（哪条、原值、shell 对应值、是否等价）
-   - G1–G16 逐条自查结果
+   - **保留的页内规则清单**（按 §6.4.1 判定为「不可删」的，逐条给原因）
+   - **G1–G18 逐条自查结果**（G17 必须逐串给出 `grep -F` 的命中证据）
+   - **§6.4.3 F12 验证结果**：每页的 `offsetHeight` / `hasCanvas` 实测值 + 截图
    - 裸色值清单（G14 例外项）
+   - 6 个页面 8px 位移的确认（R5）
    - 未做项 / 偏差说明
-2. 自跑 `pytest tests/test_p5s3_visual_skeleton.py -q` → 10 passed
-3. 自跑全量（**必须用带 `env -u` 前缀的命令**，见下）→ **512 passed / 0 failed**
+2. 自跑 `pytest tests/test_p5s3_visual_skeleton.py -q` → **12 passed**
+3. 自跑全量（**必须用带 `env -u` 前缀的命令**，见下）→ **514 passed / 0 failed**
 4. 提交到当前分支，**不要 push**
-5. 交付说明里附**页面截图对照**（至少 `/ops`、`/dashboard`、`/cockpit` 三页的前后对比）
+5. 交付说明里附**页面截图对照**（至少 `/ops`、`/dashboard`、`/cockpit` 三页的前后对比），
+   且必须包含 §6.4.3 的图表容器核验输出
+
+> **不通过判据（任一命中即视为未完成）**：任一张图 `offsetHeight === 0` 或 `hasCanvas === false`；
+> G17 任一字面串缺失；514 未达；交付说明缺 F12 实测值。
 
 全量回归命令（逐字照抄，不要省 `env -u`）：
 
@@ -685,3 +814,4 @@ cd /d/ai/dianshang && env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 
 | 版本 | 日期 | 内容 |
 |---|---|---|
 | v1.0 | 2026-11-01 | 初稿：现状盘点（纠正三条前提假设）+ 三层方案 + 15 个新 token + ui-v2.css 8 段草案 + G1–G16 + T-1..T-10 + Q-P5S3-1..7 |
+| **v1.1** | 2026-11-01 | **定稿**。Q-P5S3-1..7 全部回填为用户裁定（§9），新增 Q-P5S3-8（删样式风险）。新增 §5.0 全局 reset（修 6 页 8px 白边）、**§6.4 删除前等效声明硬条款**（判定规则 / 必保白名单 / F12 验证 / 等效声明落点）、G17–G18、T-11–T-12，用例 10→12，目标 512→**514** |
