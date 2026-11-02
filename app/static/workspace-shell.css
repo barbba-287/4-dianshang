@@ -13,8 +13,8 @@
    特异性 0,1,1 高于 .num 的 0,1,0）。因此这里额外提供一条
    `table th.num,table td.num`（0,1,2）规则，确保任何页级表格样式都无法
    把数值列重新拉回左对齐；同时补充被页级 white-space 覆盖时的 nowrap。 */
-.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
-table th.num,table td.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.num{text-align:left;white-space:nowrap;font-variant-numeric:tabular-nums}
+table th.num,table td.num{text-align:left;white-space:nowrap;font-variant-numeric:tabular-nums}
 
 /* ---------- 表格斑马纹与悬停（§D1.4，裁定 Q-P5S2-1） ----------
    斑马纹 --color-bg-tint(#f7fafe)；悬停 --neutral-100(#f4f7fb) 深一档，

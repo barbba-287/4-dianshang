@@ -39,15 +39,32 @@ def _tpl(name: str) -> str:
 # ---------------------------------------------------------------- T-1
 
 def test_t1_numeric_column_class_is_global_and_unique():
-    """T-1：`.num` 数值列类在全站只有一处定义（shell），且右对齐 + 等宽。"""
+    """T-1：`.num` 数值列类在全站只有一处定义（shell），且左对齐 + 等宽。
+
+    对齐口径变更（2026-11-02 用户裁定）：原 P5-S2 为右对齐，用户复核后认为右对齐
+    「有些奇怪」，改判左对齐（与文字列同一竖线；等宽字体保证位数不跳）。
+    """
     shell = _shell()
     assert '.num{' in shell, 'workspace-shell.css 缺少 .num 数值列类'
 
     rule = re.search(r'\.num\{([^}]*)\}', shell)
     assert rule, '无法解析 .num 规则'
     body = rule.group(1)
-    assert 'text-align:right' in body, '.num 必须右对齐，实际：%s' % body
+    assert 'text-align:left' in body, '.num 必须左对齐（2026-11-02 裁定），实际：%s' % body
+    assert 'text-align:right' not in body, '.num 不得再右对齐，实际：%s' % body
     assert 'tabular-nums' in body, '.num 必须等宽数字，实际：%s' % body
+
+    # th/td 的显式规则必须与之一致（否则表头与数据错位）
+    td_rule = re.search(r'table th\.num,table td\.num\{([^}]*)\}', shell)
+    assert td_rule, '缺少 table th.num,table td.num 规则'
+    assert 'text-align:left' in td_rule.group(1), \
+        'th/td 数字列必须同为左对齐，实际：%s' % td_rule.group(1)
+
+    # 页内不得有把数字列改回右对齐的副本（dashboard 的四象限表格同样左对齐）
+    for path in sorted(TPL_DIR.glob('*.html')):
+        text = _read(path)
+        assert 'text-align:right' not in text, \
+            '%s 仍含 text-align:right（数字列对齐必须全站一致）' % path.name
 
     # 全站 .num{ 定义恰好 1 处（cockpit 页内那份已删除；.quadrant-num 不算）
     definitions = 0
