@@ -317,3 +317,20 @@ def test_t13_spacing_hardening_block():
     # token 刻度：--space-5 必须存在且为 20px
     tokens = _read(ROOT / 'app' / 'static' / 'css' / 'tokens.css')
     assert '--space-5: 20px' in tokens
+
+
+def test_t14_bare_section_padding():
+    """T-14（段 5 补丁）：/ops 裸 section 区块必须有内边距 —— 卡片化时只给了
+    背景/边框/圆角，漏了 padding，导致商品资料/跨境平台事实/仓储协同/补货建议
+    四个区块内容全部贴边（2026-11-02 用户复核）。
+    今日待办的 16px 来自 index 页内 #operations-today-panel (1,0,0)——注意
+    [id$=…] 是属性选择器（class 级），本规则 (0,1,2) 特意保持 16px 与其天然一致。
+    """
+    css = re.sub(r'\s+', ' ', _read_css(UI_V2))  # 多行规则归一成单行再断言
+    # padding 规则在位（三行选择器组，16px 与用户认可的今日待办一致）
+    assert 'body section[id$="-panel"], body section#warehouse, body section#purchase-workflow{padding:var(--space-4)}' in css, \
+        '缺少裸 section padding 规则'
+    # 首个 h2 顶部归零（否则 padding 16 + margin 24 = 40px 巨空）
+    assert 'body section#purchase-workflow > h2:first-child{margin-top:0}' in css
+    # 不得误用 24px（会与今日待办的 16px 分裂）
+    assert 'purchase-workflow{padding:var(--space-6)}' not in css

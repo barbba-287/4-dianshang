@@ -151,6 +151,17 @@ body .step{
   box-shadow:var(--shadow-panel);
 }
 body .panel{padding:var(--space-6)}
+/* 裸 section 区块补内边距（2026-11-02 用户复核：卡片的「面」给了，「里的气」漏了——
+   /ops 5 个区块只有 #operations-today-panel 有页内 1rem，其余 4 个 padding=0 全贴边。
+   注意 [id$=…] 是属性选择器（class 级），本规则 (0,1,2) 压不过页内 #operations-today-panel
+   (1,0,0)——正好 today 保持页内 16px，其余 4 个由本规则补到 16px，五块统一。 */
+body section[id$="-panel"],
+body section#warehouse,
+body section#purchase-workflow{padding:var(--space-4)}
+/* 区块首个标题不吃 24px 顶部外距（否则 16+24=40px 巨空） */
+body section[id$="-panel"] > h2:first-child,
+body section#warehouse > h2:first-child,
+body section#purchase-workflow > h2:first-child{margin-top:0}
 body .step{padding:var(--space-4) var(--space-6);margin-top:var(--space-4)}
 body .panel-head{margin-bottom:var(--space-4)}
 body .panel h2{font-size:.98rem;font-weight:650;letter-spacing:-.005em}
