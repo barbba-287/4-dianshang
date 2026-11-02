@@ -334,3 +334,78 @@ def test_t14_bare_section_padding():
     assert 'body section#purchase-workflow > h2:first-child{margin-top:0}' in css
     # 不得误用 24px（会与今日待办的 16px 分裂）
     assert 'purchase-workflow{padding:var(--space-6)}' not in css
+
+
+# ================================================================ 段 11（P5-S4 细节精修）
+
+def test_t15_p5s4_button_demotions():
+    """T-15（段 11）：退出登录与 assistant 快捷提问降级 ghost ——
+    #logout (1,0,1) / button[data-question] (0,1,2) 必须存在于 ui-v2.css，
+    hover 分别走危险色与主色 soft token。
+    """
+    css = re.sub(r'\s+', ' ', _read_css(UI_V2))
+
+    for sel in ('body #logout{', 'body #logout:hover:not(:disabled){',
+                'body button[data-question]{', 'body button[data-question]:hover:not(:disabled){'):
+        assert sel in css, f'段 11 缺少降级规则 {sel}'
+
+    # 提取 body #logout 的 hover 规则体，断言危险色 token
+    logout_hover = css[css.index('body #logout:hover:not(:disabled){'):]
+    logout_hover = logout_hover[:logout_hover.index('}') + 1]
+    for tok in ('--color-danger-muted', '--color-danger-strong', '--color-danger-border'):
+        assert tok in logout_hover, f'#logout hover 缺少 {tok}'
+
+    # chip hover 走主色 soft
+    chip_hover = css[css.index('body button[data-question]:hover:not(:disabled){'):]
+    chip_hover = chip_hover[:chip_hover.index('}') + 1]
+    for tok in ('--color-primary-soft', '--color-primary-deep', '--color-primary-border'):
+        assert tok in chip_hover, f'data-question chip hover 缺少 {tok}'
+
+
+def test_t16_p5s4_today_panel_and_chart_warning_alignment():
+    """T-16（段 11）：今日待办白卡化（米黄底 → 白底 + 左侧 3px 警示色条）；
+    dashboard/cockpit 图表橙色已对齐 --color-warning 的 #d58b00，亮橙 #eb6834 清零。
+    """
+    css = re.sub(r'\s+', ' ', _read_css(UI_V2))
+
+    rule = css[css.index('body section#operations-today-panel{'):]
+    rule = rule[:rule.index('}') + 1]
+    assert 'background:var(--color-surface)' in rule, '今日待办必须白卡化'
+    assert 'border-left:3px solid var(--color-warning)' in rule, '缺少左侧警示色条'
+    assert '--color-bg-warm' not in rule, '不得再引用米黄底 token'
+
+    for name in ('dashboard.html', 'cockpit.html'):
+        text = _read(TPL_DIR / name)
+        assert '#eb6834' not in text, f'{name} 仍含亮橙 #eb6834'
+        assert 'rgba(235,104,52' not in text, f'{name} 仍含亮橙 rgba'
+        assert '#d58b00' in text, f'{name} 缺少对齐后的 #d58b00'
+
+
+def test_t17_p5s4_section11_hygiene():
+    """T-17（段 11 卫生）：段 11 分界之后无 !important、无裸 hex 色值（G14 延续）；
+    全文件 ！important 总数保持 8（T-13 授权区不因追加而失效）。
+    """
+    raw = _read(UI_V2)
+    css = _read_css(UI_V2)
+
+    assert len(re.findall(r'!important', css)) == 8, \
+        '!important 总数应为 8（reduced-motion 2 + 段 10 的 6），段 11 不得新增'
+
+    marker = '段 11：细节精修'
+    assert marker in raw, 'ui-v2.css 缺少段 11 注释分界'
+    # marker 在注释文字内部，分界必须回退到包含它的注释块的起点
+    tail = raw[raw.rfind('/*', 0, raw.index(marker)):]
+    tail_no_comment = re.sub(r'/\*.*?\*/', '', tail, flags=re.S)
+
+    bangs_after = len(re.findall(r'!important', tail_no_comment))
+    assert bangs_after == 0, f'段 11 出现 {bangs_after} 处 !important（应为 0）'
+
+    hexes = re.findall(r'#[0-9a-fA-F]{3,8}\b', tail_no_comment)
+    assert not hexes, f'段 11 出现裸色值 {hexes}（G14：必须走 token）'
+
+    # 控件圆角统一 8px（就地改的两处声明）
+    flat = re.sub(r'\s+', ' ', css)
+    assert 'border:1px solid var(--color-border-input); border-radius:var(--radius-md);' in flat, \
+        '输入控件圆角应为 var(--radius-md)'
+    assert 'border:0;border-radius:var(--radius-md);' in flat, \
+        '按钮圆角应为 var(--radius-md)'

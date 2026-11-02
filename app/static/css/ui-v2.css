@@ -196,7 +196,7 @@ body textarea{
   min-height:2.35rem;
   padding:.42rem .7rem;
   border:1px solid var(--color-border-input);
-  border-radius:var(--radius-sm);
+  border-radius:var(--radius-md);
   background:var(--color-surface);
   color:var(--color-text);
   font:inherit;
@@ -214,7 +214,7 @@ body input:focus,body select:focus,body textarea:focus{
 body button{
   min-height:2.35rem;
   padding:.42rem .85rem;
-  border:0;border-radius:var(--radius-sm);
+  border:0;border-radius:var(--radius-md);
   background:var(--color-primary);color:var(--color-on-primary);
   font:inherit;font-weight:600;
   box-shadow:0 1px 2px #2a78d626;
@@ -321,3 +321,50 @@ body .field{gap:var(--space-2) !important}
 /* 4b. 表单行与行之间（仓库编码 → 关联商品）：20px */
 body .row{row-gap:var(--space-5) !important}
 body .actions{row-gap:var(--space-5) !important}
+
+/* ---------- 段 11：细节精修（P5-S4，全走既有 token，不新增任何色值/!important） ---------- */
+
+/* 11.1 退出登录降级 ghost：10 页统一 <button id="logout">，特异性 (1,0,1) 压过 body button (0,0,2) */
+body #logout{
+  background:var(--color-surface);
+  color:var(--color-text-muted);
+  box-shadow:inset 0 0 0 1px var(--color-border-input);
+  font-weight:500;
+}
+body #logout:hover:not(:disabled){
+  background:var(--color-danger-muted);
+  color:var(--color-danger-strong);
+  box-shadow:inset 0 0 0 1px var(--color-danger-border);
+}
+body #logout:focus-visible{
+  outline:none;
+  box-shadow:inset 0 0 0 1px var(--color-border-input),0 0 0 3px var(--color-focus-ring);
+}
+
+/* 11.2 assistant 快捷提问 chip：属性选择器按 class 级计，(0,1,2) 压过 body button (0,0,2) */
+body button[data-question]{
+  background:var(--color-surface);
+  color:var(--color-text-muted);
+  box-shadow:inset 0 0 0 1px var(--color-border-input);
+  font-weight:500;
+}
+body button[data-question]:hover:not(:disabled){
+  background:var(--color-primary-soft);
+  color:var(--color-primary-deep);
+  box-shadow:inset 0 0 0 1px var(--color-primary-border);
+}
+
+/* 11.3 今日待办：米黄底 → 白卡 + 左侧警示色条
+   特异性 (1,0,1) 压过页内 #operations-today-panel (1,0,0)；
+   padding 不在此声明（T-14 与页内 1rem 各自生效，勿碰）。 */
+body section#operations-today-panel{
+  background:var(--color-surface);
+  border:1px solid var(--color-panel-border);
+  border-left:3px solid var(--color-warning);
+  border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-panel);
+}
+
+/* 11.4 KPI 指标卡 hover 抬升（只加阴影不加位移，避免图表页抖动） */
+body .card{transition:box-shadow var(--dur-base) var(--ease-out)}
+body .card:hover{box-shadow:var(--shadow-panel-hover)}
