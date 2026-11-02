@@ -1907,3 +1907,35 @@ G0-2 Shopify API 调用 **3 次**（Gate 0 探针 1 次 + 步骤 A orders 1 页 
 
 P5-S1 收口后本地 ahead 2（`0df5dc9` 实施 + 本结论），连同 P4 遗留待推项按阶段策略等用户推送裁定。
 P1-1（`main.py` 拆分）继续冻结。R-59 待立项。
+
+## §27 临时开启 Shopify live（2026-11-02，P5-S6 后前端联调）— 台账
+
+**事由**：用户反馈 `/shopify` 页面长期红字「Shopify live 未配置店铺、Token 或启用开关」，申请临时开启核验真实数据。
+**结论先行**：非缺陷——`main.py:1998` 的 Gate 按 v1.4 §5.2 设计正常拦截；店铺域与 Token 早已配置，缺的是双开关。
+
+### 四条件核验（runbook v1.4 §5.2）
+
+| 条件 | 证据 | 结果 |
+|---|---|---|
+| 1 事前裁定 | 用户 2026-11-02 对话明确选择「临时开启 live 看真实数据」 | ✅ |
+| 2 基线不动 | 走**乙路线**：`SHOPIFY_LIVE_ENABLED=true` 进程前缀启动，`.env` 全程零改动（收口后 grep 仍为 `false`） | ✅ |
+| 3 开门复测 Gate 0 | ① 台账：Claude Code 当日 0 轮（中转 403 未消耗），本会话 <55 轮止损线；② 配额探针 `.testtmp/live_gate0_probe.py` 单次只读 GraphQL：**currentlyAvailable=1999**（≥20），restoreRate=100 | ✅ |
+| 4 有人值守 + 急停 | 用户全程在场；急停可用（关窗口/杀进程秒级生效；`/api/admin/live-switch` E1 路径未触发） | ✅ |
+
+### 执行与结果
+
+- 首轮误起：8000 端口残留 16:36 的旧 `--reload` 无前缀进程（PID 188456），页面仍红字；经 `Win32_Process` 命令行核对定位后终止（含子进程 215740）。
+- 正式开启：`start_live_temp.bat`（`set SHOPIFY_LIVE_ENABLED=true` + 无 `--reload`）双击启窗；`/login` 200、capabilities 未带会话返回 401（预期）。
+- 通道实测（适配器直连，只读）：`live_enabled=True simulated=False`，**商品 17 / 库存 28 / 订单 3**，均为开发店 `dianshang-dev` 真实数据。
+- 用户浏览器目视确认（对话「我看完了」）。
+
+### 收口还原
+
+- 进程终止后 8000 空闲、无残留 python；临时 `start_live_temp.bat` 已删除。
+- 无前缀新进程验证：`shopify_live_enabled=False`、runtime 热开关 True、**`live_allowed=False`**。
+- `.env` `SHOPIFY_LIVE_ENABLED=false` 未变；本次零代码改动、零 `.env` 改动、零 push。
+
+### 遗留
+
+- `/shopify` 在未启用态以**红色「读取失败」**呈现配置未开（语义错位：未启用≠失败），候选小切片：改灰字提示 + 空态指引。
+- 证据脚本 `.testtmp/live_gate0_probe.py` 留档（未入库）。
