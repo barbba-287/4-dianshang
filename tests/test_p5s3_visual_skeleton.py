@@ -281,3 +281,39 @@ def test_t11_chart_size_anchors_survive():
     for lit in ('.chart{height:320px', '.chart-refreshing{position:absolute',
                 '.chart-empty'):
         assert lit in ckpt, f'cockpit 缺少图表锚点 {lit}'
+
+
+def test_t13_spacing_hardening_block():
+    """T-13（段 10）：呼吸感强化块 —— !important 只允许出现在段 10 的 6 条规则里；
+    段 10 的选择器与值必须逐条在位（用户 2026-11-02 硬性视觉要求）。
+    """
+    raw = _read(UI_V2)      # 原文（含注释），用于找段 10 标记
+    css = _read_css(UI_V2)  # 剥注释版，用于数 !important（注释里的文字不计数）
+    # 剥注释后，!important 只允许两类：prefers-reduced-motion 块的 2 处
+    # + 段 10 的 6 条规则 = 8
+    bangs = [m.start() for m in re.finditer(r'!important', css)]
+    assert len(bangs) == 8, f'!important 出现 {len(bangs)} 次，应为 8（reduced-motion 2 + 段 10 的 6）'
+    # 分界 = 段 10 第一条规则的起点（其后全部是授权区）
+    first_rule = css.index('body h2{margin-bottom:var(--space-4) !important}')
+    rm = css.index('prefers-reduced-motion')
+    # 块内两处（transition-duration / animation-duration），终点取第二处之后
+    rm_end = css.index('duration:.01ms !important',
+                       css.index('duration:.01ms !important', rm) + 1) \
+        + len('duration:.01ms !important')
+    for b in bangs:
+        assert b > first_rule or (rm < b < rm_end), \
+            f'!important 出现在非授权区（offset {b}）'
+
+    for lit in (
+        'body h2{margin-bottom:var(--space-4) !important}',
+        'body .status{margin-bottom:var(--space-4) !important}',
+        'body .table-wrap{margin-top:var(--space-4) !important}',
+        'body .field{gap:var(--space-2) !important}',
+        'body .row{row-gap:var(--space-5) !important}',
+        'body .actions{row-gap:var(--space-5) !important}',
+    ):
+        assert lit in css, f'段 10 缺少规则 {lit}'
+
+    # token 刻度：--space-5 必须存在且为 20px
+    tokens = _read(ROOT / 'app' / 'static' / 'css' / 'tokens.css')
+    assert '--space-5: 20px' in tokens

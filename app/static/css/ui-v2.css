@@ -284,3 +284,29 @@ body .table-wrap{margin-top:var(--space-4)}
 
 /* 指标卡 padding 统一 16px（覆盖 orders 页内副本的 12.8px） */
 body .card{padding:var(--space-4)}
+
+
+/* ---------- 段 10：呼吸感强化（2026-11-02 用户硬性视觉要求） ----------
+   用户复核截图后裁定 C 段力度不够，授权在本段使用 !important 压制旧值
+   （任务文件 G12 的唯一例外区；新用例 T-13 锁定本段只能有这 6 处）。
+   病因实测：
+   - /ops 的区块是裸 <section id="*-panel">（无 .panel 类），C 段的
+     body .panel h2 在该页未命中 → 标题下间距仍是 shell 旧值
+   - warehouse 表单是 .row > .field（JS 渲染），C 段只调了 .actions
+   - --space-5: 20px 为本次新增 token（刻度 4/8/12/16/20/24/32） */
+
+/* 1. 区块大标题（跨境平台事实 / 仓储协同 / 商品资料…）：下 16px */
+body h2{margin-bottom:var(--space-4) !important}
+
+/* 2. 标题下说明文字（.status 段落）：下 16px，把表格推开 */
+body .status{margin-bottom:var(--space-4) !important}
+
+/* 3. 表格主体：与上方文字 16px */
+body .table-wrap{margin-top:var(--space-4) !important}
+
+/* 4a. label → input：8px */
+body .field{gap:var(--space-2) !important}
+
+/* 4b. 表单行与行之间（仓库编码 → 关联商品）：20px */
+body .row{row-gap:var(--space-5) !important}
+body .actions{row-gap:var(--space-5) !important}
