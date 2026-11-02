@@ -6,7 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/static/css/tokens.css">
 <link rel="stylesheet" href="/static/workspace-shell.css">
-<link rel="stylesheet" href="/static/css/ui-v2.css">
+<link rel="stylesheet" href="/static/css/ui-v2.css"><script src="/static/toast.js?v=20261102" defer></script>
 <script src="/static/labels.js?v=20260915-2"></script>
   <style>
     #operations-today-panel { margin: 1rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: var(--color-bg-warm); }
@@ -452,13 +452,13 @@
         for (let attempt = 0; attempt < 60; attempt += 1) {
           await new Promise(resolve => setTimeout(resolve, 250));
           const statusBody = await api(`/api/crawl/${jobId}`);
-          if (statusBody.status === 'succeeded') { setMessage(message, '采集完成', 'success'); await loadProducts(); return; }
+          if (statusBody.status === 'succeeded') { setMessage(message, '采集完成', 'success');toast.success('采集完成'); await loadProducts(); return; }
           if (['failed', 'cancelled'].includes(statusBody.status)) throw new Error(`${statusBody.error_message || `任务${statusBody.status}`} ${statusBody.error_code ? `[${dianshangLabel(statusBody.error_code, DianShangLabels.errorCode, '未知错误')}]` : ''}`);
           setMessage(message, `正在采集（任务 #${jobId}，${statusLabel(statusBody.status)}）…`);
         }
         throw new Error('采集等待超时，请稍后查看任务状态');
       } catch (error) {
-        setMessage(message, `采集失败：${error.message || '网络错误'}`, 'error');
+        setMessage(message, `采集失败：${error.message || '网络错误'}`, 'error');toast.error(`采集失败：${error.message || '网络错误'}`);
       } finally { setBusy(crawlButton, false); }
     }
 

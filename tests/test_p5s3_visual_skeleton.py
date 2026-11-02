@@ -110,7 +110,10 @@ def test_t4_topbar_sticky_not_fixed():
     assert UI_V2.exists()
     css = _read_css(UI_V2)
 
-    assert 'position:fixed' not in css.replace(' ', ''), 'ui-v2.css 不得出现 position:fixed'
+    # #toast-root 是视口固定浮层（P5-S6），天然需要 fixed；剥离后再断言其余部分为 0
+    css_wo_toast = re.sub(r'#toast-root\{[^}]*\}', '', css)
+    assert 'position:fixed' not in css_wo_toast.replace(' ', ''), \
+        'ui-v2.css 不得出现 position:fixed（#toast-root 浮层除外）'
 
     bodies = _rule_body(css, '.topbar')
     assert bodies, 'ui-v2.css 缺少 .topbar 规则'
@@ -454,3 +457,80 @@ def test_t19_p5s5_static_assets_no_cache():
         '静态响应必须注入 Cache-Control: no-cache'
     assert re.search(r'app\.mount\("/static",\s*_NoCacheStaticFiles\(', main_py), \
         '/static 必须用 _NoCacheStaticFiles 挂载'
+
+# ---------------------------------------------------------------- P5-S6
+
+def test_t20_p5s6_echarts_theme_registered():
+    """T-20（P5-S6）：ECharts 主题统一 —— echarts-theme.js 存在且注册 'wb'；
+    palette 对齐 tokens 语义色；dashboard/cockpit 引入主题且所有 init 带 'wb'。"""
+    theme_path = ROOT / 'app' / 'static' / 'echarts-theme.js'
+    assert theme_path.exists(), 'app/static/echarts-theme.js 不存在'
+    theme = _read(theme_path)
+    assert "registerTheme('wb'" in theme, "echarts-theme.js 未注册 'wb' 主题"
+    for key in ('splitLine', 'tooltip', 'color:'):
+        assert key in theme, f'echarts-theme.js 缺少 {key} 配置'
+    # palette 必须与 tokens.css 语义色同值（防漂移）
+    tokens = _read(TOKENS)
+    for var in ('--color-primary', '--color-success', '--color-warning', '--color-danger'):
+        m = re.search(re.escape(var) + r':\s*(#[0-9a-fA-F]{6})', tokens)
+        assert m, f'tokens.css 缺少 {var}'
+        assert m.group(1).lower() in theme.lower(), \
+            f'echarts-theme.js palette 缺少 {var} 的值 {m.group(1)}'
+    # 两页接入
+    for name, init_n in (('dashboard.html', 3), ('cockpit.html', 2)):
+        t = _read(ROOT / 'app' / 'templates' / name)
+        assert '/static/echarts-theme.js' in t, f'{name} 未引入 echarts-theme.js'
+        assert t.count('echarts.init(') == init_n, f'{name} echarts.init 数量异常'
+        assert t.count("echarts.init(") == t.count("'wb')"), \
+            f'{name} 存在未带 \'wb\' 主题的 echarts.init 调用'
+
+
+def test_t21_p5s6_table_sticky_and_hover():
+    """T-21（P5-S6）：表格细节 —— 桌面放开 overflow 锁、表头吸顶避开 fixed topbar、
+    行 hover 用 --color-primary-soft（零裸色值）。"""
+    css = re.sub(r'\s+', ' ', _read_css(UI_V2))
+    assert 'body .table-wrap{overflow:visible}' in css, \
+        '必须压过段 5 的 body .table-wrap{overflow:auto}，否则 sticky 参照系错误'
+    assert '@media (max-width:760px){body .table-wrap{overflow-x:auto}}' in css, \
+        '窄屏必须恢复横向滚动'
+    m = re.search(r'thead th\{[^}]*\}', css)
+    assert m, 'ui-v2.css 缺少 thead th 吸顶规则'
+    assert 'position:sticky' in m.group(0) and 'top:3.7rem' in m.group(0), \
+        '表头吸顶必须是 sticky 且 top:3.7rem（避开 3.4rem fixed topbar）'
+    assert 'tbody tr:hover td{background:var(--color-primary-soft)}' in css, \
+        '行 hover 必须用 --color-primary-soft（禁裸色值）'
+
+
+def test_t22_p5s6_toast_component():
+    """T-22（P5-S6）：全局 Toast —— toast.js 三种类型、ui-v2 段 13 样式、
+    10 模板引入、index/orders 示范调用。"""
+    toast = _read(ROOT / 'app' / 'static' / 'toast.js')
+    assert 'window.toast' in toast, 'toast.js 未暴露 window.toast'
+    for kind in ('success', 'error', 'warning'):
+        assert kind in toast, f'toast.js 缺少 {kind} 类型'
+        assert f'.toast-{kind}' in _read_css(UI_V2), f'ui-v2.css 缺少 .toast-{kind} 样式'
+    tag = '<script src="/static/toast.js'
+    for path in TEMPLATES:
+        t = _read(path)
+        assert t.count(tag) == 1, f'{path.name} toast.js 引入次数应为 1'
+    idx = _read(ROOT / 'app' / 'templates' / 'index.html')
+    assert 'toast.success(' in idx and 'toast.error(' in idx, \
+        'index.html 缺少 toast 示范调用'
+    orders = _read(ROOT / 'app' / 'templates' / 'orders.html')
+    assert 'toast.success(' in orders, 'orders.html 缺少 toast 示范调用'
+
+
+def test_t23_p5s6_login_page_polish():
+    """T-23（P5-S6）：登录页精修 —— 消灭 #2563eb 漂移（R-59），主色与 tokens
+    --color-primary 同值；保留表单契约字段。"""
+    main_py = _read(ROOT / 'app' / 'main.py')
+    assert '2563eb' not in main_py, 'main.py 登录页仍残留 #2563eb（R-59）'
+    tokens = _read(TOKENS)
+    m = re.search(r'--color-primary:\s*(#[0-9a-fA-F]{6})', tokens)
+    assert m, 'tokens.css 缺少 --color-primary'
+    assert m.group(1).lower() in main_py.lower(), \
+        '登录页主色必须使用 --color-primary 的同值 hex'
+    # 表单契约不被样式重构破坏
+    for frag in ("name='login'", "name='password'", "name='workspace'",
+                 "id='message'", "<h1>员工登录</h1>", "action='/login'"):
+        assert frag in main_py, f'登录页缺少契约片段 {frag}'

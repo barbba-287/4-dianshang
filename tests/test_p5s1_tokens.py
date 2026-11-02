@@ -159,13 +159,17 @@ def test_t6_no_hardcoded_color_in_template_styles():
 # ---------------------------------------------------------------- T-7
 
 def test_t7_script_blocks_unchanged():
-    """T-7：10 个模板 <script> 内色值合计 = 24（与实施前一致）。"""
+    """T-7：10 个模板 <script> 内色值合计 = 21（P5-S6 后）。
+
+    迁移说明：chart 轴/legend 颜色已迁至 app/static/echarts-theme.js（registerTheme 'wb'）；
+    剩余 21 处 = series 语义色（cockpit 7 + dashboard 13）+ 1 处 customer_service 的
+    jQuery 选择器 $('#add') 误计入。"""
     total = 0
     for path in TEMPLATES:
         script = _script_blocks(_read(path))
         total += len(HEX_RE.findall(script))
         total += len(RGBA_RE.findall(script))
-    assert total == 24, '<script> 内色值合计应为 24，实际 %d' % total
+    assert total == 21, '<script> 内色值合计应为 21，实际 %d' % total
 
 
 # ---------------------------------------------------------------- T-8

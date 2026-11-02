@@ -368,3 +368,59 @@ body section#operations-today-panel{
 /* 11.4 KPI 指标卡 hover 抬升（只加阴影不加位移，避免图表页抖动） */
 body .card{transition:box-shadow var(--dur-base) var(--ease-out)}
 body .card:hover{box-shadow:var(--shadow-panel-hover)}
+
+/* ===== 12. 表格细节（P5-S6，Tabler 对齐）===== */
+/* 12a 解 overflow 锁：祖先 overflow-x:auto 会让 position:sticky 的参照系
+   变成不纵向滚动的容器 → 吸顶失效。桌面放开，窄屏恢复横向滚动（吸顶随之放弃）。 */
+/* 12a 解 overflow 锁：段 5 的 body .table-wrap{overflow:auto}（圆角裁剪）同样会
+   把 sticky 参照系变成不纵向滚动的容器 → 吸顶失效。特异性对齐 (0,1,1) 且位于其后，
+   桌面放开；窄屏恢复横向滚动（吸顶随之放弃）。 */
+body .table-wrap{overflow:visible}
+@media (max-width:760px){body .table-wrap{overflow-x:auto}}
+/* 12b 表头吸顶：top = topbar(sticky, 3.4rem) + 0.3rem 呼吸；白底遮行，底边细线替代边框
+   （token 均存在，无需回退值——段 11+ 卫生检查禁裸 hex） */
+thead th{
+  position:sticky;
+  top:3.7rem;
+  z-index:10;
+  background:var(--color-surface);
+  box-shadow:0 1px 0 var(--color-border-subtle);
+}
+/* 12c 行 hover 淡蓝（Tabler 7.5% 主色量级，取既有 token --color-primary-soft，
+   零裸色值；只作用 td 背景，徽标/按钮自带底色不受影响） */
+tbody tr:hover td{background:var(--color-primary-soft)}
+
+/* ===== 13. 全局 Toast（配合 /static/toast.js）===== */
+#toast-root{
+  position:fixed;
+  bottom:var(--space-4);
+  right:var(--space-4);
+  z-index:1000;
+  display:grid;
+  gap:var(--space-2);
+  justify-items:end;
+}
+.toast{
+  display:flex;
+  align-items:center;
+  gap:var(--space-2);
+  max-width:22rem;
+  padding:var(--space-2) var(--space-3);
+  background:var(--color-surface);
+  border:1px solid var(--color-border);
+  border-left:3px solid var(--color-success);
+  border-radius:var(--radius-md);
+  box-shadow:var(--shadow-panel-hover);
+  font-size:.875rem;
+  color:var(--color-text);
+  animation:wb-toast-in var(--dur-base) var(--ease-out);
+}
+.toast-mark{font-weight:700}
+.toast-success{border-left-color:var(--color-success)}
+.toast-success .toast-mark{color:var(--color-success)}
+.toast-error{border-left-color:var(--color-danger)}
+.toast-error .toast-mark{color:var(--color-danger)}
+.toast-warning{border-left-color:var(--color-warning)}
+.toast-warning .toast-mark{color:var(--color-warning)}
+.toast.toast-leave{opacity:0;transform:translateY(4px);transition:opacity .25s,transform .25s}
+@keyframes wb-toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
