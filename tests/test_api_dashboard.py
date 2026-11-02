@@ -188,11 +188,12 @@ def test_dashboard_sync_health_latest_is_deduplicated(client):
     assert 'growth_window:\'7\'' in response.text
     assert 'baseline_window:\'14\'' in response.text
     assert 'page_size:\'100\'' in response.text
-    assert '库存/可售天数按当前选择仓库范围统计，销量未按仓库过滤' in response.text
     assert 'quadrantChart?.resize()' in response.text
     assert '<title>运营驾驶舱</title>' in response.text
     assert '<h1>运营驾驶舱</h1>' in response.text
-    for marker in ('sales-trend-panel','inventory-risk-panel','product-quadrant-panel','sync-health-panel','sku-health-panel','alerts-panel','recent-inbounds-panel','metric-definitions-panel'):
+    # P5-S5：静态解释文案与「指标口径」面板已按用户裁定移出 UI（原行 191 的
+    # 副标题文案断言与 metric-definitions-panel marker 一并撤销）
+    for marker in ('sales-trend-panel','inventory-risk-panel','product-quadrant-panel','sync-health-panel','sku-health-panel','alerts-panel','recent-inbounds-panel'):
         assert f'id="{marker}"' in response.text
     assert response.text.count('id="logout"') == 1
     assert 'id="logout-link"' not in response.text

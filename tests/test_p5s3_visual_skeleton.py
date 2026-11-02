@@ -409,3 +409,48 @@ def test_t17_p5s4_section11_hygiene():
         '输入控件圆角应为 var(--radius-md)'
     assert 'border:0;border-radius:var(--radius-md);' in flat, \
         '按钮圆角应为 var(--radius-md)'
+
+
+# ================================================================ P5-S5（解释文案出清 + 静态缓存护栏）
+
+def test_t18_p5s5_explanatory_copy_removed():
+    """T-18（P5-S5）：解释/口径类文案已移出 UI（用户裁定「解释自己知道就行」）——
+    dashboard/cockpit 不再含静态 panel-subtitle、页副标题、口径面板与其渲染 JS。
+    保留白名单：cockpit 的 #unknown-policy-note（无策略 SKU 动态数据警告，空时不可见）。
+    """
+    dash = _read(TPL_DIR / 'dashboard.html')
+    ckpt = _read(TPL_DIR / 'cockpit.html')
+
+    # 静态 panel-subtitle 出清（cockpit 允许恰好 1 处 = 带 id 的动态警告）
+    assert 'panel-subtitle' not in dash, 'dashboard 仍有 panel-subtitle'
+    assert ckpt.count('panel-subtitle') == 1 and 'id="unknown-policy-note"' in ckpt, \
+        'cockpit 仅允许保留 #unknown-policy-note 一处'
+
+    # 口径面板与渲染 JS 出清
+    for banned in ('指标口径', '口径说明', 'renderLimitations', '$(\'#limitations\')',
+                   'cockpit-limitations', 'metric-definitions-panel'):
+        assert banned not in dash, f'dashboard 仍含 {banned}'
+        assert banned not in ckpt, f'cockpit 仍含 {banned}'
+
+    # 页副标题与 KPI 卡解释出清
+    for banned in ('用少量关键视图', '只读事实层', '缺失日期保留为空', '当前态指标，无环比',
+                   '多币种未折算，主值不显示合计', '表格是查找具体 SKU 的主入口'):
+        assert banned not in dash and banned not in ckpt, f'解释文案未清：{banned}'
+
+    # 保留白名单仍然在位（数据状态类，不属于解释）
+    assert 'id="unknown-policy-note"' in ckpt
+    assert '统计截至' in dash and '统计截至' in ckpt  # 时间戳消息行
+
+
+def test_t19_p5s5_static_assets_no_cache():
+    """T-19（P5-S5）：静态资源禁用启发式缓存 —— main.py 必须以注入
+    Cache-Control: no-cache 的 StaticFiles 子类挂载 /static，
+    防止用户浏览器发版后沿用旧 CSS/JS（数字列「左对齐」的根因）。
+    """
+    main_py = _read(ROOT / 'app' / 'main.py')
+    assert 'class _NoCacheStaticFiles(StaticFiles)' in main_py, \
+        'main.py 缺少 _NoCacheStaticFiles 子类'
+    assert 'Cache-Control' in main_py and '"no-cache"' in main_py, \
+        '静态响应必须注入 Cache-Control: no-cache'
+    assert re.search(r'app\.mount\("/static",\s*_NoCacheStaticFiles\(', main_py), \
+        '/static 必须用 _NoCacheStaticFiles 挂载'

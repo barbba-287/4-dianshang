@@ -240,7 +240,19 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title=get_settings().app_name, version="0.2.0-week2", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """静态资源禁用启发式缓存：必须每次协商（ETag/304），防止用户浏览器
+    在发版后继续使用旧 CSS/JS（P5-S5：用户反馈数字列「左对齐」实为旧缓存）。"""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _NoCacheStaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 _WORKSPACE_NAV_ITEMS = (
@@ -265,7 +277,7 @@ _PAGE_ANCHORS = {
         ("cockpit-overstock-panel", "积压与滞销待办"),
         ("cockpit-purchase-panel", "采购待审批"),
         ("cockpit-inbound-panel", "未完成入库"),
-        ("cockpit-metric-panel", "指标口径与已知限制"),
+        # P5-S5：「指标口径与已知限制」面板已移出 UI，锚点一并撤销
     ),
     "/dashboard": (
         ("sales-trend-panel", "销量趋势"),
