@@ -1,6 +1,6 @@
 # dev_task.p6s1-csv-import — P6-S1 多平台报表 CSV 导入通道
 
-> 生成时间：2026-11-03（v1.0 草案，Q1–Q6 待用户裁定）
+> 生成时间：2026-11-03（**v1.1 定稿**：用户 2026-11-03 14:57 指示"实施吧"，Q1–Q6 全部按推荐值裁定生效）
 > 生成方式：WorkBuddy 只读调研（`app/connectors.py`、`app/external_sync.py`、`app/main.py`、
 > `app/schemas.py`、`app/storage.py`、`app/templates/shopify.html`、`docs/v6.2-no-api-operations.md`）
 > 执行角色：Claude Code（实施）；WorkBuddy（复核）
@@ -9,7 +9,20 @@
 > `docs/engineering-roadmap.md` P12（更多平台）、用户 2026-11-03 裁定"平台目的就是汇总"
 > 测试基线：**528 passed / 0 failed**（P5-S7 收口 `b3bc6a2`）
 
-## 0. 待裁定（Q1–Q6，推荐值已给，用户逐条确认后本文升 v1.1 定稿）
+## 0. 裁定记录（2026-11-03 14:57 用户"实施吧"= Q1–Q6 全按推荐值生效）
+
+| # | 裁定 | 本片落位 |
+|---|---|---|
+| Q1 | /shopify 泛化为「数据源」，/shopify 保留 301 兜底 | 模板改名 `sources.html`；导航项 path `/sources` 文案「数据源」；三处空态链接同步改指 |
+| Q2 | 允许 `platform=shopify` 走 CSV | 平台白名单 = `PLATFORMS` 全量 6 个 |
+| Q3 | v1 只认标准英文列 + 前端模板下载 | 中文映射留 P6-S2 |
+| Q4 | 只做 inventory + orders | `events` 后置 |
+| Q5 | utf-8-sig → utf-8 → gb18030 自动探测 | 全失败 → 422 `EXTERNAL_INPUT_ENCODING` |
+| Q6 | 强制两步：预览成功才可入库 | 前端提交按钮由预览成功解锁 |
+
+**v1.1 修正一处 v1.0 设计**：`errors` 明细不逐行收集（orders 的 lines 预处理在 `load_orders` 内部，
+逐行复刻会与既有实现漂移）。解析错误整单返回一条（含字段名/行号信息由错误消息自身承载），
+响应字段仍为 `errors: [{message}]`。实施偏差在交付说明登记。
 
 | # | 问题 | 推荐 | 影响面 |
 |---|---|---|---|

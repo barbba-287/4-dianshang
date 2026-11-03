@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
@@ -827,6 +827,32 @@ class ExternalInventoryIngestResponse(BaseModel):
     snapshot_ids: list[int]
     sync_run_id: str | None = None
     sync_status: str | None = None
+
+
+class ExternalImportPreviewResponse(BaseModel):
+    """P6-S1 报表导入预览（不写库）。"""
+
+    platform: str
+    kind: str
+    total: int
+    detected_encoding: str
+    normalized_rows: list[dict[str, Any]]
+    errors: list[dict[str, str]]
+
+
+class ExternalImportCommitResponse(BaseModel):
+    """P6-S1 报表导入入库（建来源批次，幂等语义与既有 ingest 一致）。"""
+
+    platform: str
+    kind: str
+    total: int
+    inserted: int
+    updated: int
+    no_op: int
+    conflict: int
+    sync_run_id: str | None = None
+    sync_status: str | None = None
+    detected_encoding: str
 
 
 class ExternalEventIngestRequest(BaseModel):

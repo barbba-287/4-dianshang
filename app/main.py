@@ -156,6 +156,8 @@ from app.schemas import (
     ShopifyPreviewResponse,
     ExternalInventoryIngestRequest,
     ExternalInventoryIngestResponse,
+    ExternalImportCommitResponse,
+    ExternalImportPreviewResponse,
     ExternalInventoryPreviewRequest,
     ExternalInventoryPreviewResponse,
     DashboardSummaryResponse,
@@ -3815,6 +3817,124 @@ def external_events_ingest(payload: ExternalEventIngestRequest, request: Request
             fail_sync_run(db, run, exc)
         raise DomainError(code="EXTERNAL_SYNC_FAILED", message="外部事件同步失败", http_status=500) from exc
     return ExternalEventIngestResponse(platform=payload.platform, inserted=result.inserted, no_op=result.no_op, conflict=result.conflict, total=result.total, sync_run_id=result.sync_run_id, sync_status=result.sync_status)
+
+
+# ---------- P6-S1 多平台报表导入（CSV 上传） ----------
+
+_IMPORT_KINDS = ("inventory", "orders")
+
+
+async def _import_parse(
+    *,
+    file: UploadFile,
+    platform: str,
+    kind: str,
+    account_ref: str | None,
+    store_ref: str | None,
+    warehouse_ref: str | None,
+) -> tuple[list, str]:
+    """P6-S1 共用解析：大小闸 → 编码探测 → 标准化。文件内容不落盘。"""
+    if file is None:
+        raise DomainError(code="NO_FILE", message="未提供文件", http_status=400)
+    from app.connectors import PLATFORMS
+    if platform not in PLATFORMS:
+        raise DomainError(code="EXTERNAL_INPUT_INVALID", message=f"不支持的平台: {platform}", http_status=422)
+    if kind not in _IMPORT_KINDS:
+        raise DomainError(code="EXTERNAL_INPUT_INVALID", message=f"不支持的导入类型: {kind}", http_status=422)
+    raw = await file.read()
+    try:
+        enforce_size_limit(len(raw))
+    except StorageError as exc:
+        raise DomainError(code="FILE_TOO_LARGE", message=str(exc), http_status=413) from exc
+    from app.imports import parse_upload
+    try:
+        records, encoding = parse_upload(
+            raw, platform=platform, kind=kind,
+            defaults={"account_ref": account_ref, "store_ref": store_ref, "warehouse_ref": warehouse_ref},
+        )
+    except ValueError as exc:
+        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
+    return records, encoding
+
+
+@app.post("/api/external/imports/preview", response_model=ExternalImportPreviewResponse)
+async def external_import_preview(
+    request: Request,
+    file: UploadFile = File(...),
+    platform: str = Form(...),
+    kind: str = Form(...),
+    account_ref: str | None = Form(default=None),
+    store_ref: str | None = Form(default=None),
+    warehouse_ref: str | None = Form(default=None),
+):
+    """报表导入预览：只解析不写库（Q6 两步裁定的第一步）。"""
+    principal = require_principal(request, permission="catalog.write")
+    records, encoding = await _import_parse(
+        file=file, platform=platform, kind=kind,
+        account_ref=account_ref, store_ref=store_ref, warehouse_ref=warehouse_ref,
+    )
+    return ExternalImportPreviewResponse(
+        platform=platform, kind=kind, total=len(records), detected_encoding=encoding,
+        normalized_rows=[vars(record) for record in records[:20]],
+        errors=[],
+    )
+
+
+@app.post("/api/external/imports", response_model=ExternalImportCommitResponse)
+async def external_import_commit(
+    request: Request,
+    db: Session = Depends(get_db),
+    file: UploadFile = File(...),
+    platform: str = Form(...),
+    kind: str = Form(...),
+    account_ref: str | None = Form(default=None),
+    store_ref: str | None = Form(default=None),
+    warehouse_ref: str | None = Form(default=None),
+):
+    """报表导入入库：建来源批次 → 幂等写入外部事实层。
+
+    入库路径逐段照抄 /api/external/orders/ingest（main.py:3033 范式）：
+    begin_sync_run → ingest_* → complete_sync_run；失败 fail_sync_run。
+    幂等键由 payload_hash / idempotency_key 承担，重复上传同文件 = no_op。
+    """
+    principal = require_principal(request, permission="catalog.write")
+    records, encoding = await _import_parse(
+        file=file, platform=platform, kind=kind,
+        account_ref=account_ref, store_ref=store_ref, warehouse_ref=warehouse_ref,
+    )
+    if not records:
+        raise DomainError(code="EXTERNAL_INPUT_EMPTY", message="文件没有可导入的数据行", http_status=422)
+    from app.external_sync import ImportStats, begin_sync_run, complete_sync_run, fail_sync_run, validate_inventory_batch_scope
+    run = None
+    try:
+        if kind == "inventory":
+            batch_account_ref, batch_store_ref, _warehouse = validate_inventory_batch_scope(records)
+            run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=platform, sync_type="inventory", account_ref=batch_account_ref, store_ref=batch_store_ref, source_mode="csv")
+            from app.external_sync import ingest_inventory
+            stats = ingest_inventory(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
+        else:
+            from app.external_orders import ingest_orders
+            batch_account_ref = records[0].account_ref
+            batch_store_ref = records[0].store_ref
+            if any(record.account_ref != batch_account_ref or record.store_ref != batch_store_ref for record in records):
+                raise ValueError("MIXED_EXTERNAL_ACCOUNT")
+            run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=platform, sync_type="orders", account_ref=batch_account_ref, store_ref=batch_store_ref, source_mode="csv")
+            result = ingest_orders(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
+            stats = ImportStats(total=result.total, inserted=result.inserted, no_op=result.no_op, conflict=result.conflict)
+        complete_sync_run(db, run, stats)
+    except ValueError as exc:
+        if run is not None:
+            fail_sync_run(db, run, exc)
+        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
+    except Exception as exc:
+        if run is not None:
+            fail_sync_run(db, run, exc)
+        raise DomainError(code="EXTERNAL_SYNC_FAILED", message="报表导入失败", http_status=500) from exc
+    return ExternalImportCommitResponse(
+        platform=platform, kind=kind, total=stats.total, inserted=stats.inserted,
+        updated=stats.updated, no_op=stats.no_op, conflict=stats.conflict,
+        sync_run_id=run.run_id, sync_status="succeeded", detected_encoding=encoding,
+    )
 
 
 @app.get("/api/external/reconciliation/{snapshot_id}")

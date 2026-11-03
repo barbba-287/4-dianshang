@@ -344,8 +344,14 @@ def normalize_order_row(row: dict[str, Any], *, platform: str, source_mode: str,
     )
 
 
-def load_orders(content: str | bytes, *, platform: str, source_mode: str = "json") -> list[ExternalOrderRecord]:
+def load_orders(content: str | bytes, *, platform: str, source_mode: str = "json", defaults: dict[str, Any] | None = None) -> list[ExternalOrderRecord]:
     rows = _decode_input(content, source_mode=source_mode)
+    # P6-S1: defaults 仅在行缺列时 setdefault（不覆盖 CSV 已有值）；默认 None = 既有行为不变。
+    if defaults:
+        for row in rows:
+            for key, value in defaults.items():
+                if value is not None and not row.get(key):
+                    row[key] = value
     # JSON records contain nested lines. CSV accepts one order per row with a JSON `lines` column.
     if source_mode == "csv":
         for row in rows:
@@ -452,17 +458,28 @@ class MockConnector:
         return [normalize_order_row(row, platform=self.platform, source_mode=self.source_mode, index=index) for index, row in enumerate(self._rows)]
 
 
-def load_records(content: str | bytes, *, platform: str, source_mode: str = "json") -> list[InventorySnapshotRecord]:
-    """读取并标准化库存记录；不访问网络、不产生数据库副作用。"""
-    return MockConnector(platform=platform, content=content, source_mode=source_mode).inventory_snapshots()
+def load_records(content: str | bytes, *, platform: str, source_mode: str = "json", defaults: dict[str, Any] | None = None) -> list[InventorySnapshotRecord]:
+    """读取并标准化库存记录；不访问网络、不产生数据库副作用。
+
+    P6-S1: `defaults` 仅在行缺列时逐行 setdefault（不覆盖已有值）；
+    默认 None = 与 MockConnector 路径逐字节等价（既有测试零改动）。
+    """
+    rows = _decode_input(content, source_mode=source_mode)
+    if defaults:
+        for row in rows:
+            for key, value in defaults.items():
+                if value is not None and not row.get(key):
+                    row[key] = value
+    return [normalize_inventory_row(row, platform=platform, source_mode=source_mode, index=index) for index, row in enumerate(rows)]
 
 
 def load_events(content: str | bytes, *, platform: str, source_mode: str = "json") -> list[CanonicalEvent]:
     return MockConnector(platform=platform, content=content, source_mode=source_mode, kind="events").events()
 
 
-def load_orders(content: str | bytes, *, platform: str, source_mode: str = "json") -> list[ExternalOrderRecord]:
-    return MockConnector(platform=platform, content=content, source_mode=source_mode, kind="orders").orders()
+# P6-S1 修复：此处曾有第二个 `load_orders`（MockConnector 版）覆盖上方带 CSV lines
+# 预处理的定义，导致 CSV 订单导入必然抛 "lines 必须是非空对象数组"（存量 bug，
+# 与 P5-S6 colors.critical 同类——重复定义静默屏蔽）。已删除重复定义。
 
 
 def connector_capabilities() -> list[dict[str, Any]]:
