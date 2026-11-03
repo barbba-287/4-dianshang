@@ -1987,3 +1987,30 @@ P1-1（`main.py` 拆分）继续冻结。R-59 待立项。
 - 浏览器登录探针未做（真实库无可知密码账号、不注入探针账号）；替代：真实 HTTP 路由探针 + C-15 TestClient 契约。
 - R-60（新登记，P3 观察）：`/api/external/inventory/ingest` 走 SyncApplicationService 而 `/api/external/imports` 走手写范式，两条库存入库路径并存；P6 后续切片评估是否收敛。
 - 中文列头映射（Q3 后置项）= P6-S2 候选首位。
+
+## §30 P6-S2 智能中文列头映射（2026-11-03，WorkBuddy 实施）
+
+**背景**：用户评审通过 v1.0 三处调整全采纳；映射方向按开工提示修正为 `{真实CSV列名: 系统字段名}`（前端 select option value 即 CSV 原始列头原文，规避归一化/全角/空格回传失配）。基线 543/0。
+
+### 交付
+
+- 新 `app/column_mappings.py`（FIELD_ALIASES 17 字段约 70 别名 + 加载期冲突自检 + REQUIRED_FIELDS）；
+  imports.py parse_upload 重构（ImportOutcome；缺必填 records=None 不进 normalize；
+  映射后经 DictWriter 重序列化回 load_* 全链路 → **connectors.py 零触碰达成**）；
+  preview 缺列 422→200+missing（评审裁定）；commit 缺列 422 EXTERNAL_MISSING_FIELDS；
+  前端映射确认区（绿勾/下拉/必填禁用入库/FIELD_LABELS 展示名常量）。
+- 新基线 **556 passed / 0 failed**（306.30s 无 flaky；D-1..D-11 共 13 条）。
+
+### 语义明确
+
+- column_mapping = **完整替换语义（所见即所得）**：前端提交预览区显示的全部映射；未提及列不自动补充。
+- 幂等不因映射破坏：payload_hash 基于映射后行（D-10 实证）。
+
+### 测试连带登记（2 处）
+
+- C-7 断言更新为 EXTERNAL_MISSING_FIELDS（码语义化，message 保留字段名）。
+- D-1 grep 范围限后端文件（sources.html FIELD_LABELS 为展示名，评审裁定放前端）。
+
+### 残留
+
+- 映射习惯持久化（记住商家上次映射）= v2 候选；事件流映射随 kind=events 后置。

@@ -148,7 +148,10 @@ def test_c7_missing_required_column(tmp_path, monkeypatch):
     bad = "account_ref,available_qty,as_of\na,7,2026-11-01T10:00:00Z\n"
     response = _upload(client, content=bad.encode())
     assert response.status_code == 422, response.text
-    assert "external_sku" in response.json()["detail"]["code"]
+    # P6-S2：commit 缺必填列 → EXTERNAL_MISSING_FIELDS（message 含字段名）
+    detail = response.json()["detail"]
+    assert detail["code"] == "EXTERNAL_MISSING_FIELDS"
+    assert "external_sku" in detail["message"]
 
 
 def test_c8_oversize_413(tmp_path, monkeypatch):

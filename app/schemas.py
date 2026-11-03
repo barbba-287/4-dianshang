@@ -830,7 +830,7 @@ class ExternalInventoryIngestResponse(BaseModel):
 
 
 class ExternalImportPreviewResponse(BaseModel):
-    """P6-S1 报表导入预览（不写库）。"""
+    """P6-S1 报表导入预览（不写库）；P6-S2 增补列头映射四键。"""
 
     platform: str
     kind: str
@@ -838,6 +838,10 @@ class ExternalImportPreviewResponse(BaseModel):
     detected_encoding: str
     normalized_rows: list[dict[str, Any]]
     errors: list[dict[str, str]]
+    csv_headers: list[str] = []
+    mapping_suggestion: dict[str, str] = {}
+    unmapped_columns: list[str] = []
+    missing_required_fields: list[str] = []
 
 
 class ExternalImportCommitResponse(BaseModel):

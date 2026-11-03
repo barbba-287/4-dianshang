@@ -3838,8 +3838,9 @@ async def _import_parse(
     account_ref: str | None,
     store_ref: str | None,
     warehouse_ref: str | None,
-) -> tuple[list, str]:
-    """P6-S1 共用解析：大小闸 → 编码探测 → 标准化。文件内容不落盘。"""
+    column_mapping: str | None = None,
+):
+    """P6-S1/S2 共用解析：大小闸 → 编码探测 → 列头映射 → 标准化。文件内容不落盘。"""
     if file is None:
         raise DomainError(code="NO_FILE", message="未提供文件", http_status=400)
     from app.connectors import PLATFORMS
@@ -3852,15 +3853,27 @@ async def _import_parse(
         enforce_size_limit(len(raw))
     except StorageError as exc:
         raise DomainError(code="FILE_TOO_LARGE", message=str(exc), http_status=413) from exc
+    # P6-S2：column_mapping 为前端回传 JSON 字符串 {真实CSV列名: 系统字段名}
+    user_mapping: dict[str, str] | None = None
+    if column_mapping:
+        import json as _json
+        try:
+            parsed = _json.loads(column_mapping)
+        except _json.JSONDecodeError as exc:
+            raise DomainError(code="MAPPING_INVALID", message="column_mapping 必须是 JSON 对象", http_status=422) from exc
+        if not isinstance(parsed, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()):
+            raise DomainError(code="MAPPING_INVALID", message="column_mapping 必须是字符串到字符串的对象", http_status=422) from exc
+        user_mapping = parsed
     from app.imports import parse_upload
     try:
-        records, encoding = parse_upload(
+        outcome = parse_upload(
             raw, platform=platform, kind=kind,
             defaults={"account_ref": account_ref, "store_ref": store_ref, "warehouse_ref": warehouse_ref},
+            column_mapping=user_mapping,
         )
     except ValueError as exc:
         raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
-    return records, encoding
+    return outcome
 
 
 @app.post("/api/external/imports/preview", response_model=ExternalImportPreviewResponse)
@@ -3872,17 +3885,28 @@ async def external_import_preview(
     account_ref: str | None = Form(default=None),
     store_ref: str | None = Form(default=None),
     warehouse_ref: str | None = Form(default=None),
+    column_mapping: str | None = Form(default=None),
 ):
-    """报表导入预览：只解析不写库（Q6 两步裁定的第一步）。"""
+    """报表导入预览：只解析不写库（Q6 两步裁定的第一步）。
+
+    P6-S2：缺必填列**不再 422**——返回 missing_required_fields 让前端补映射
+    （评审裁定："预览返回 200 才能把控制权交给前端"）；commit 缺列仍 422。
+    """
     principal = require_principal(request, permission="catalog.write")
-    records, encoding = await _import_parse(
+    outcome = await _import_parse(
         file=file, platform=platform, kind=kind,
         account_ref=account_ref, store_ref=store_ref, warehouse_ref=warehouse_ref,
+        column_mapping=column_mapping,
     )
+    records = outcome.records or []
     return ExternalImportPreviewResponse(
-        platform=platform, kind=kind, total=len(records), detected_encoding=encoding,
+        platform=platform, kind=kind, total=len(records), detected_encoding=outcome.encoding,
         normalized_rows=[vars(record) for record in records[:20]],
         errors=[],
+        csv_headers=outcome.csv_headers,
+        mapping_suggestion=outcome.mapping,
+        unmapped_columns=outcome.unmapped,
+        missing_required_fields=outcome.missing,
     )
 
 
@@ -3896,18 +3920,28 @@ async def external_import_commit(
     account_ref: str | None = Form(default=None),
     store_ref: str | None = Form(default=None),
     warehouse_ref: str | None = Form(default=None),
+    column_mapping: str | None = Form(default=None),
 ):
     """报表导入入库：建来源批次 → 幂等写入外部事实层。
 
     入库路径逐段照抄 /api/external/orders/ingest（main.py:3033 范式）：
     begin_sync_run → ingest_* → complete_sync_run；失败 fail_sync_run。
     幂等键由 payload_hash / idempotency_key 承担，重复上传同文件 = no_op。
+    P6-S2：缺必填列 422 EXTERNAL_MISSING_FIELDS（预览放行、入库拦截，评审裁定）。
     """
     principal = require_principal(request, permission="catalog.write")
-    records, encoding = await _import_parse(
+    outcome = await _import_parse(
         file=file, platform=platform, kind=kind,
         account_ref=account_ref, store_ref=store_ref, warehouse_ref=warehouse_ref,
+        column_mapping=column_mapping,
     )
+    records = outcome.records
+    if records is None:
+        raise DomainError(
+            code="EXTERNAL_MISSING_FIELDS",
+            message="必填字段未映射: " + ", ".join(outcome.missing),
+            http_status=422,
+        )
     if not records:
         raise DomainError(code="EXTERNAL_INPUT_EMPTY", message="文件没有可导入的数据行", http_status=422)
     from app.external_sync import ImportStats, begin_sync_run, complete_sync_run, fail_sync_run, validate_inventory_batch_scope
@@ -3939,7 +3973,7 @@ async def external_import_commit(
     return ExternalImportCommitResponse(
         platform=platform, kind=kind, total=stats.total, inserted=stats.inserted,
         updated=stats.updated, no_op=stats.no_op, conflict=stats.conflict,
-        sync_run_id=run.run_id, sync_status="succeeded", detected_encoding=encoding,
+        sync_run_id=run.run_id, sync_status="succeeded", detected_encoding=outcome.encoding,
     )
 
 
