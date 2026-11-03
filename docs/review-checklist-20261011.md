@@ -1939,3 +1939,25 @@ P1-1（`main.py` 拆分）继续冻结。R-59 待立项。
 
 - `/shopify` 在未启用态以**红色「读取失败」**呈现配置未开（语义错位：未启用≠失败），候选小切片：改灰字提示 + 空态指引。
 - 证据脚本 `.testtmp/live_gate0_probe.py` 留档（未入库）。
+
+## §28 live 常开裁定登记（2026-11-03，用户正式裁定）
+
+**裁定**：用户原话「对啊，肯定要恢复，我就这一个 api 连上了，不打开看啥」→ **Shopify live 常开**（runbook v1.4 §5.1 预留的「放开 = 用户单独裁定」正式触发）。
+**范围**：仅开发店 `dianshang-dev.myshopify.com`（Shopify 官方样例数据，Snowboard 系列）；全链路只读（capabilities `read_only: true`，预览/同步均不执行 mutation、不写回平台）。
+
+### 执行记录
+
+- `.env`：`SHOPIFY_LIVE_ENABLED=false → true`（改前备份 `.testtmp/env.backup-before-live-常开-20261103`；`.env` 不入库，无凭证轮换问题）。
+- 验证：无前缀新进程 `live_allowed=True`（settings=True ∧ runtime=True）。
+- 关联历史：§27 为 2026-11-02 临时开启台账（看完即收）；本条为持久裁定，**覆盖 §27 的「基线不动」条款**。
+
+### 常开附带项（runbook §5.1 要求）
+
+- **R-25**（热开关无前端调用点、状态仅存进程内存）：常开后 runtime 开关默认放行，不构成阻塞；多副本部署前必须先解决跨进程状态同步（登记未变，维持 P3 处置）。
+- **R-26**（多 worker 限制）：单进程假设（app/background.py 同款）——**本机单 worker 运行无影响**；若未来 uvicorn `--workers N` 或多副本，取消 token/单飞闸门/热开关均不跨进程，届时须专项处置。
+- **监控**：轻量方案=live 同步台账（runs 表）+ 失败告警沿用既有错误体系；专项 UI 暂缓。
+
+### 后续
+
+- `/shopify` 恢复常显开发店真实数据；`SHOPIFY_LIVE_NOT_CONFIGURED` 红字只在店铺/Token 缺失时出现。
+- 「未启用≠失败」的 UI 语义修复项因常开而**自然降级为低优先级**（仅在凭证缺失场景出现）。
