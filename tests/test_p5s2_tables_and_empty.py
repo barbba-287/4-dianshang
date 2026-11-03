@@ -175,8 +175,8 @@ def test_t6_empty_state_component_unified():
         assert not offenders, \
             '%s 仍存在 <td colspan class="muted"> 形态空态：%d 处' % (page, len(offenders))
 
-    # 禁区页保持原样（零改动守护）
-    for page in ('admin_users', 'shopify'):
+    # 禁区页保持原样（零改动守护；P6-S1 起 shopify.html 改名 sources.html）
+    for page in ('admin_users', 'sources'):
         text = _tpl(page)
         assert 'class="muted"' in text, '%s 是禁区页，不应有改动' % page
 

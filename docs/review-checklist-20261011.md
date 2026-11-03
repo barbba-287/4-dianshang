@@ -1961,3 +1961,29 @@ P1-1（`main.py` 拆分）继续冻结。R-59 待立项。
 
 - `/shopify` 恢复常显开发店真实数据；`SHOPIFY_LIVE_NOT_CONFIGURED` 红字只在店铺/Token 缺失时出现。
 - 「未启用≠失败」的 UI 语义修复项因常开而**自然降级为低优先级**（仅在凭证缺失场景出现）。
+
+## §29 P6-S1 多平台报表 CSV 导入（2026-11-03，WorkBuddy 实施）
+
+**背景**：用户裁定下一步 = CSV 导入通道（「平台目的就是汇总」）。任务文件 v1.1（Q1–Q6 按推荐值：/shopify 泛化 /sources、允许 shopify 报表、v1 只认英文列、只做 inventory+orders、三档编码探测、强制两步预览）。基线 528/0。
+
+### 存量 bug（实施中发现并修复）
+
+- `load_orders` 被第二处定义（MockConnector 版）覆盖，带 CSV lines 预处理的完整版从未生效 → **CSV 订单导入自始不可用**（实证：normalize 必抛 "lines 必须是非空对象数组"）。删重复定义恢复。与 P5-S6 `colors.critical` 同类（定义/引用静默屏蔽），教训：模块级 grep 函数名须查重复定义。
+
+### 交付
+
+- `bef6003`（a 后端）+ 本轮提交（b 前端）；交付说明 `.testtmp/delivery.p6s1.md`。
+- 新基线 **543 passed / 0 failed**（310.61s 无 flaky；新增 C-1..C-15）。
+
+### 测试连带登记（合理改动，非禁区突破）
+
+- `test_p5s3_visual_skeleton.py` 管理链接断言 /shopify → /sources（P5-S7 状态条链接改指）。
+- `test_p5s2_tables_and_empty.py` T-6 禁区页清单 shopify → sources（模板改名连带）。
+- 既有 528 条中其余全部零改动通过（`load_*` defaults 默认 None 等价性由全量背书）。
+
+### 偏差与残留
+
+- 解析错误整单一条不逐行收集（v1.1 已声明）；行级错误号留 P6-S2。
+- 浏览器登录探针未做（真实库无可知密码账号、不注入探针账号）；替代：真实 HTTP 路由探针 + C-15 TestClient 契约。
+- R-60（新登记，P3 观察）：`/api/external/inventory/ingest` 走 SyncApplicationService 而 `/api/external/imports` 走手写范式，两条库存入库路径并存；P6 后续切片评估是否收敛。
+- 中文列头映射（Q3 后置项）= P6-S2 候选首位。

@@ -522,7 +522,7 @@
         const response = await api('/api/dashboard/summary?days=14&recent_limit=1');
         const item = response.external_facts?.shopify_inventory;
         if (!item || !item.snapshot_count) {
-          target.innerHTML = '<tr><td colspan="7" class="empty-cell"><div class="empty"><div class="empty-title">暂无 Shopify 外部库存快照</div><div class="empty-text">还没有从 Shopify 同步到外部事实层的库存快照；这不代表接口失败。</div><div class="empty-action"><a class="btn-link" href="/shopify">去 Shopify 同步到外部事实层</a></div></div></td></tr>';
+          target.innerHTML = '<tr><td colspan="7" class="empty-cell"><div class="empty"><div class="empty-title">暂无 Shopify 外部库存快照</div><div class="empty-text">还没有从 Shopify 同步到外部事实层的库存快照；这不代表接口失败。</div><div class="empty-action"><a class="btn-link" href="/sources">去 Shopify 同步到外部事实层</a></div></div></td></tr>';
           messageTarget.textContent = '当前 Workspace 尚未写入 Shopify 外部库存事实。';
           return;
         }

@@ -263,7 +263,7 @@ _WORKSPACE_NAV_ITEMS = (
     ("/orders", "订单事实", "▣", (ROLE_ADMIN, ROLE_OPERATIONS), "inventory.read"),
     ("/ops", "运营工作台", "◫", (ROLE_ADMIN, ROLE_OPERATIONS), None),
     ("/content", "商品页生产", "✦", (ROLE_ADMIN, ROLE_OPERATIONS), "content.read"),
-    ("/shopify", "Shopify 接入", "◇", (ROLE_ADMIN, ROLE_OPERATIONS), "inventory.read"),
+    ("/sources", "数据源", "◇", (ROLE_ADMIN, ROLE_OPERATIONS), "inventory.read"),
     ("/assistant", "AI 运营助手", "✦", (ROLE_ADMIN, ROLE_OPERATIONS), "analytics.read"),
     ("/warehouse", "仓库收货", "▤", (ROLE_ADMIN, ROLE_OPERATIONS, ROLE_WAREHOUSE), "inbound.read"),
     ("/admin/users", "成员权限", "♙", (ROLE_ADMIN,), None),
@@ -319,7 +319,7 @@ def _visible_navigation(principal, active_path: str) -> str:
 
     nav_by_path = {item[0]: item for item in _WORKSPACE_NAV_ITEMS}
     groups = (
-        ("运营分析", "Workspace", tuple(nav_by_path[path] for path in ("/cockpit", "/dashboard", "/orders", "/ops", "/assistant", "/content", "/shopify") if path in nav_by_path)),
+        ("运营分析", "Workspace", tuple(nav_by_path[path] for path in ("/cockpit", "/dashboard", "/orders", "/ops", "/assistant", "/content", "/sources") if path in nav_by_path)),
         ("仓储履约", "Warehouse", tuple(nav_by_path[path] for path in ("/warehouse",) if path in nav_by_path)),
         ("系统管理", "System", tuple(nav_by_path[path] for path in ("/admin/users",) if path in nav_by_path)),
         ("客服知识", "Knowledge", _SYSTEM_NAV_ITEMS),
@@ -600,10 +600,16 @@ def content_page(request: Request) -> HTMLResponse:
     return _render_workspace_page("content.html", principal, "/content")
 
 
+@app.get("/sources", response_class=HTMLResponse)
+def sources_page(request: Request) -> HTMLResponse:
+    principal = require_principal(request, permission="inventory.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    return _render_workspace_page("sources.html", principal, "/sources")
+
+
 @app.get("/shopify", response_class=HTMLResponse)
 def shopify_page(request: Request) -> HTMLResponse:
-    principal = require_principal(request, permission="inventory.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
-    return _render_workspace_page("shopify.html", principal, "/shopify")
+    """P6-S1：/shopify 已泛化为 /sources（数据源页）；旧链接 301 兜底。"""
+    return RedirectResponse(url="/sources", status_code=301)
 
 
 @app.get("/ops", response_class=HTMLResponse)

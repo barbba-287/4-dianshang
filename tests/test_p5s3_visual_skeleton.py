@@ -547,7 +547,7 @@ def test_t24_p5s7_source_status_bar():
         '状态条容器必须以 hidden 起始（加载失败时静默）'
     assert 'function renderSourceStatus(health)' in dash, '缺少 renderSourceStatus 定义'
     assert 'renderSourceStatus(health);' in dash, 'loadSyncHealth 成功分支未调用 renderSourceStatus'
-    assert 'href="/shopify">管理</a>' in dash, '缺少指向 /shopify 的管理链接'
+    assert 'href="/sources">管理</a>' in dash, '缺少指向 /sources（数据源页，P6-S1 泛化）的管理链接'
     assert "badge-warning" in dash and "badge-neutral" in dash and "badge-success" in dash, \
         '徽标必须复用 shell 既有 .badge 类（badge-success/warning/neutral）'
     # 容器位于 KPI 区之前（顶部）

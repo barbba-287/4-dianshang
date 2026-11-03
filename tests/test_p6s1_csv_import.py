@@ -232,3 +232,17 @@ def test_c14_run_queryable_with_csv_mode(tmp_path, monkeypatch):
     assert _upload(client).status_code == 200
     runs = client.get("/api/external/sync/runs").json()
     assert any(run["source_mode"] == "csv" for run in runs)
+
+
+def test_c15_sources_page_contract(tmp_path, monkeypatch):
+    """/sources 数据源页契约 + /shopify 301 兜底（Q1 裁定）。"""
+    client, db_mod = _client(tmp_path, monkeypatch)
+    page = client.get("/sources")
+    assert page.status_code == 200, page.text
+    html = page.text
+    for marker in ('id="import-csv"', 'id="import-preview"', 'id="import-commit"', 'id="import-runs"', '<h1>数据源</h1>'):
+        assert marker in html, f"缺少 {marker}"
+    assert 'nav-text">数据源' in html, "侧边导航未更新为「数据源」"
+    legacy = client.get("/shopify", follow_redirects=False)
+    assert legacy.status_code == 301
+    assert legacy.headers["location"] == "/sources"
