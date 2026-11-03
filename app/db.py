@@ -447,6 +447,31 @@ class ExternalSyncRun(Base):
     quality_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class ExternalImportRejection(Base):
+    """P6-S3 报表导入脏行隔离表：批次内被跳过的原始行 + 系统拦截原因。
+
+    - `raw_data` 存 JSON 文本，键序即上传列序——异常明细导出直接回放了商家原表，
+      改完可原样重传；`row_number` 是 1-based 数据行序号（表头不计）。
+    - 唯一约束 (workspace_id, run_id, row_number)：同文件重传（幂等 no_op）时
+      rejected 行不重复膨胀；`run_id` 只做软引用（与死信表同范式，不设外键）。
+    """
+
+    __tablename__ = "external_import_rejections"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "run_id", "row_number", name="uq_external_import_rejection_row"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+    row_number: Mapped[int] = mapped_column(Integer)
+    raw_data: Mapped[str] = mapped_column(Text)
+    error_code: Mapped[str] = mapped_column(String(64), default="EXTERNAL_INPUT_INVALID")
+    error_reason: Mapped[str] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class ExternalSyncDeadLetter(Base):
     """P2-4 死信表：run 级失败的隔离带（人工重放入口）。
 

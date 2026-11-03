@@ -238,6 +238,8 @@ class ExternalSyncRunResponse(BaseModel):
     upstream_request_count: int = 0
     # P2-3 数据质量门禁（观察态）：只透出结论，全量报告走 CLI `quality show <run_id>`。
     quality_status: str | None = None
+    # P6-S3：该批次被跳过的脏行数（仅 CSV 导入批次可能 > 0；其它批次恒 0）。
+    rejected_count: int = 0
 
 
 class ExternalSyncRetryResponse(ExternalSyncRunResponse):
@@ -830,7 +832,7 @@ class ExternalInventoryIngestResponse(BaseModel):
 
 
 class ExternalImportPreviewResponse(BaseModel):
-    """P6-S1 报表导入预览（不写库）；P6-S2 增补列头映射四键。"""
+    """P6-S1 报表导入预览（不写库）；P6-S2 增补列头映射四键；P6-S3 增补脏行明细。"""
 
     platform: str
     kind: str
@@ -842,6 +844,9 @@ class ExternalImportPreviewResponse(BaseModel):
     mapping_suggestion: dict[str, str] = {}
     unmapped_columns: list[str] = []
     missing_required_fields: list[str] = []
+    # P6-S3：行级校验失败明细（最多 MAX_REJECTED_ROWS 条；总数另计不受截断影响）。
+    rejected_rows: list[dict[str, Any]] = []
+    rejected_total: int = 0
 
 
 class ExternalImportCommitResponse(BaseModel):
@@ -857,6 +862,8 @@ class ExternalImportCommitResponse(BaseModel):
     sync_run_id: str | None = None
     sync_status: str | None = None
     detected_encoding: str
+    # P6-S3：本次跳过的脏行数（allow_skipped 模式下 > 0）。
+    rejected_count: int = 0
 
 
 class ExternalEventIngestRequest(BaseModel):

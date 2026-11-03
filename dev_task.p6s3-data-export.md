@@ -1,15 +1,21 @@
 # dev_task.p6s3-data-export — P6-S3 通用数据导出与异常追溯（CSV Export）
 
-> 生成时间：2026-11-04（v1.0 草案，Q1–Q3 待用户裁定）
+> 生成时间：2026-11-03 17:20（v1.1 定稿，Q1–Q3 用户裁定完毕）
 > 前置：P6-S1（`bef6003`/`749e463`）+ P6-S2（`9a0c2d1`），基线 **556 passed / 0 failed**
 
-## 0. 待裁定（Q1–Q3，推荐值已给）
+## 0. 裁定记录（2026-11-03 17:10，全部采纳并追加三条硬要求）
 
-| # | 问题 | 推荐 |
+| # | 问题 | 裁定 |
 |---|---|---|
-| Q1 | 行级容错的提交语义（见 §1.2，**本片最大的语义决策**） | **opt-in**：表单加「跳过异常行」勾选，默认关（strict，现状语义）；勾选后坏行剔除落库、好行照常入库 |
-| Q2 | rejected 行落库需要 1 条 Alembic migration（打破 P6 前两片「零 migration」惯例） | 接受——新表纯新增，不碰任何旧表；由 init_db 的 Alembic 链路自动升级 |
-| Q3 | actor 归因载体：库内**没有** AuditLog 表 | 结构化 `logger.info`（actor/run_id/view/行数），不新建审计表；要落库审计另立项 |
+| Q1 | 行级容错提交语义 | **opt-in**（默认关，勾选开启）。strict 严格模式一字不改；勾选后坏行剔除落库、好行照常入库 |
+| Q2 | 新表 + migration | **批准** `external_import_rejections`，打破「零 migration」惯例仅此一次。字段至少含 `id / run_id / row_number / raw_data / error_reason / created_at`（实施再加 workspace_id、kind 以保隔离与分类） |
+| Q3 | actor 归因 | 结构化 `logger.info`，**不建审计表** |
+
+用户追加三条硬要求（实施必须满足）：
+
+1. **异常明细 CSV 必须含「系统拦截原因」列**：商家原本上传的列全部保留，最后追加一列 `系统拦截原因`（原因文本带行号，如「第 3 行：数量必须是非负整数」）。
+2. **容错提示必须显眼**：勾选后表单出现**黄底**提示——「将跳过错误行，错误数据可在批次历史中导出修改」。strict 默认下预览报错保持清晰。
+3. **红线不变**：不改旧解析逻辑（`connectors.py` 零触碰）、不引重依赖（禁 pandas/openpyxl）。
 
 ## 1. 侦查结论（2026-11-04 只读核实）
 
@@ -38,12 +44,12 @@
 ### 2.1 后端：新表 `external_import_rejections`（Q2）
 
 ```
-id / workspace_id(FK, index) / run_id(String64, index) / row_no(Integer)
-reason_code(String64) / reason_message(String500)
-raw_row_json(Text)          # 原始行（列名→原文值），商家改完重传的凭据
-kind(String16)              # inventory / orders
+id / workspace_id(FK, index) / run_id(String64, index) / kind(String16)
+row_number(Integer)         # 1-based 数据行序号（表头不计）
+raw_data(Text)              # 原始行 JSON：{原始列头: 原文}，列序即上传列序（商家改完重传的凭据）
+error_code(String64) / error_reason(String500)
 created_at
-幂等：uq (workspace_id, run_id, row_no) —— 同文件重传 no_op 时 rejected 不重复膨胀（E-9）
+幂等：uq (workspace_id, run_id, row_number) —— 同文件重传 no_op 时 rejected 不重复膨胀（E-9）
 ```
 
 - migration：`alembic/versions/` 新增一个 revision（仅 add this table）。

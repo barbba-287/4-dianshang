@@ -13,6 +13,7 @@ from typing import Literal
 
 from hashlib import sha256
 import html
+import io
 import json
 import logging
 import re
@@ -3637,7 +3638,7 @@ def get_external_sync_run(run_id: str, request: Request, db: Session = Depends(g
     return _external_sync_run_response(run)
 
 
-def _external_sync_run_response(run):
+def _external_sync_run_response(run, rejected_count: int = 0):
     from app.external_sync import resource_status, retryable_resources, upstream_request_count
     from datetime import datetime
     now = datetime.utcnow()
@@ -3658,6 +3659,8 @@ def _external_sync_run_response(run):
         upstream_request_count=upstream_request_count(run),
         # P2-3 数据质量门禁结论（只增不改：全量报告走 CLI `quality show <run_id>`）。
         quality_status=getattr(run, "quality_status", None),
+        # P6-S3：该批次被跳过的脏行数（允许跳过模式下入库时登记）。
+        rejected_count=rejected_count,
     )
 
 
@@ -3705,7 +3708,21 @@ def list_external_sync_runs(request: Request, platform: str | None = None, statu
     if platform: filters.append(ExternalSyncRun.platform == platform)
     if status: filters.append(ExternalSyncRun.status == status)
     rows = db.scalars(select(ExternalSyncRun).where(*filters).order_by(ExternalSyncRun.id.desc()).limit(limit)).all()
-    return [_external_sync_run_response(row) for row in rows]
+    # P6-S3：一次分组查询补齐脏行数（避免 N+1；非 CSV 批次天然不命中）。
+    from app.db import ExternalImportRejection
+    counts: dict[str, int] = {}
+    if rows:
+        run_ids = [row.run_id for row in rows]
+        for rid, total in db.execute(
+            select(ExternalImportRejection.run_id, func.count())
+            .where(
+                ExternalImportRejection.workspace_id == principal.workspace_id,
+                ExternalImportRejection.run_id.in_(run_ids),
+            )
+            .group_by(ExternalImportRejection.run_id)
+        ).all():
+            counts[rid] = int(total)
+    return [_external_sync_run_response(row, rejected_count=counts.get(row.run_id, 0)) for row in rows]
 
 
 
@@ -3828,6 +3845,29 @@ def external_events_ingest(payload: ExternalEventIngestRequest, request: Request
 # ---------- P6-S1 多平台报表导入（CSV 上传） ----------
 
 _IMPORT_KINDS = ("inventory", "orders")
+_EXPORT_VIEWS = ("raw", "rejected")
+
+
+def _persist_rejections(db: Session, *, workspace_id: int, run_id: str, kind: str, rejected) -> int:
+    """P6-S3：把本次跳过的脏行落到隔离表（run_id 软引用，唯一约束幂等）。"""
+    from app.db import ExternalImportRejection
+    saved = 0
+    for item in rejected:
+        db.add(
+            ExternalImportRejection(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                kind=kind,
+                row_number=item.row_number,
+                raw_data=json.dumps(item.raw_data, ensure_ascii=False),
+                error_code=item.reason_code,
+                error_reason=item.reason_message,
+            )
+        )
+        saved += 1
+    if saved:
+        db.commit()
+    return saved
 
 
 async def _import_parse(
@@ -3907,6 +3947,17 @@ async def external_import_preview(
         mapping_suggestion=outcome.mapping,
         unmapped_columns=outcome.unmapped,
         missing_required_fields=outcome.missing,
+        # P6-S3：脏行明细（只读，不落库；落库发生在 allow_skipped 的入库批次）。
+        rejected_rows=[
+            {
+                "row_number": item.row_number,
+                "reason_code": item.reason_code,
+                "reason_message": item.reason_message,
+                "raw_data": item.raw_data,
+            }
+            for item in outcome.rejected
+        ],
+        rejected_total=outcome.rejected_total,
     )
 
 
@@ -3921,6 +3972,7 @@ async def external_import_commit(
     store_ref: str | None = Form(default=None),
     warehouse_ref: str | None = Form(default=None),
     column_mapping: str | None = Form(default=None),
+    allow_skipped: bool = Form(default=False),
 ):
     """报表导入入库：建来源批次 → 幂等写入外部事实层。
 
@@ -3928,6 +3980,8 @@ async def external_import_commit(
     begin_sync_run → ingest_* → complete_sync_run；失败 fail_sync_run。
     幂等键由 payload_hash / idempotency_key 承担，重复上传同文件 = no_op。
     P6-S2：缺必填列 422 EXTERNAL_MISSING_FIELDS（预览放行、入库拦截，评审裁定）。
+    P6-S3：行级脏数据默认 **strict 拦截**（422 EXTERNAL_ROWS_REJECTED）；仅当
+    `allow_skipped=true`（用户勾选「跳过异常行」）时才剔除坏行入库并落隔离表。
     """
     principal = require_principal(request, permission="catalog.write")
     outcome = await _import_parse(
@@ -3942,8 +3996,26 @@ async def external_import_commit(
             message="必填字段未映射: " + ", ".join(outcome.missing),
             http_status=422,
         )
+    if outcome.rejected and not allow_skipped:
+        first = outcome.rejected[0]
+        raise DomainError(
+            code="EXTERNAL_ROWS_REJECTED",
+            message=(
+                f"{outcome.rejected_total} 行数据校验失败（第 {first.row_number} 行：{first.reason_message}）；"
+                "如需跳过错误行入库，请勾选「跳过异常行」"
+            ),
+            http_status=422,
+        )
     if not records:
-        raise DomainError(code="EXTERNAL_INPUT_EMPTY", message="文件没有可导入的数据行", http_status=422)
+        raise DomainError(
+            code="EXTERNAL_INPUT_EMPTY",
+            message=(
+                f"文件没有可导入的数据行（{outcome.rejected_total} 行全部校验失败）"
+                if outcome.rejected_total
+                else "文件没有可导入的数据行"
+            ),
+            http_status=422,
+        )
     from app.external_sync import ImportStats, begin_sync_run, complete_sync_run, fail_sync_run, validate_inventory_batch_scope
     run = None
     try:
@@ -3970,11 +4042,87 @@ async def external_import_commit(
         if run is not None:
             fail_sync_run(db, run, exc)
         raise DomainError(code="EXTERNAL_SYNC_FAILED", message="报表导入失败", http_status=500) from exc
+    # P6-S3：脏行随成功批次落隔离表（strict 模式走不到这里——上面已 422 拦截）。
+    rejected_saved = _persist_rejections(
+        db, workspace_id=principal.workspace_id, run_id=run.run_id, kind=kind, rejected=outcome.rejected,
+    )
     return ExternalImportCommitResponse(
         platform=platform, kind=kind, total=stats.total, inserted=stats.inserted,
         updated=stats.updated, no_op=stats.no_op, conflict=stats.conflict,
         sync_run_id=run.run_id, sync_status="succeeded", detected_encoding=outcome.encoding,
+        rejected_count=rejected_saved,
     )
+
+
+# ---------- P6-S3 批次数据导出（原始事实层 / 异常明细） ----------
+
+
+@app.post("/api/external/imports/{run_id}/export")
+def export_import_run(
+    run_id: str,
+    request: Request,
+    view: str = Query(default="raw"),
+    db: Session = Depends(get_db),
+):
+    """P6-S3 批次导出：view=raw 原始事实层 / view=rejected 异常明细。
+
+    只读查询：不写任何业务表（唯一的写是日志）。workspace 隔离照既有范式，
+    run 不属于当前 workspace 一律 404（不泄露存在性）。
+    """
+    principal = require_principal(request, permission="catalog.read")
+    if view not in _EXPORT_VIEWS:
+        raise DomainError(code="EXPORT_VIEW_INVALID", message="view 仅支持 raw / rejected", http_status=422)
+    from app.db import ExternalImportRejection, ExternalInventorySnapshot, ExternalOrder, ExternalSyncRun
+    from app.import_exports import csv_download, raw_table, rejected_table
+    run = db.scalar(
+        select(ExternalSyncRun).where(
+            ExternalSyncRun.run_id == run_id,
+            ExternalSyncRun.workspace_id == principal.workspace_id,
+        )
+    )
+    if run is None:
+        raise DomainError(code="SYNC_RUN_NOT_FOUND", message="同步运行不存在", http_status=404)
+    if run.source_mode != "csv":
+        raise DomainError(code="EXPORT_NOT_CSV_IMPORT", message="仅 CSV 导入批次支持导出", http_status=422)
+
+    if view == "rejected":
+        rejections = db.scalars(
+            select(ExternalImportRejection)
+            .where(
+                ExternalImportRejection.workspace_id == principal.workspace_id,
+                ExternalImportRejection.run_id == run.run_id,
+            )
+            .order_by(ExternalImportRejection.row_number)
+        ).all()
+        headers, rows = rejected_table(rejections)
+    else:
+        if run.sync_type == "orders":
+            records = db.scalars(
+                select(ExternalOrder)
+                .where(
+                    ExternalOrder.workspace_id == principal.workspace_id,
+                    ExternalOrder.sync_run_id == run.run_id,
+                )
+                .order_by(ExternalOrder.id)
+            ).all()
+        else:
+            records = db.scalars(
+                select(ExternalInventorySnapshot)
+                .where(
+                    ExternalInventorySnapshot.workspace_id == principal.workspace_id,
+                    ExternalInventorySnapshot.sync_run_id == run.run_id,
+                )
+                .order_by(ExternalInventorySnapshot.id)
+            ).all()
+        headers, rows = raw_table(records, run.sync_type)
+
+    safe_run_id = re.sub(r"[^A-Za-z0-9_-]", "", run.run_id)[:32] or "run"
+    # P6-S3 Q3 裁定：actor 归因走结构化日志，不建审计表。
+    logger.info(
+        "报表导出 actor=%s workspace=%s run_id=%s view=%s rows=%s",
+        principal.subject, principal.workspace_id, run.run_id, view, len(rows),
+    )
+    return csv_download(f"wb-export-{safe_run_id}-{view}.csv", headers, rows)
 
 
 @app.get("/api/external/reconciliation/{snapshot_id}")

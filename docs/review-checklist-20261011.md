@@ -2014,3 +2014,35 @@ P1-1（`main.py` 拆分）继续冻结。R-59 待立项。
 ### 残留
 
 - 映射习惯持久化（记住商家上次映射）= v2 候选；事件流映射随 kind=events 后置。
+
+## §31 P6-S3 通用数据导出与异常追溯（2026-11-03，WorkBuddy 实施）
+
+**背景**：用户裁定 Q1 行级容错 opt-in（默认 strict 不变）/ Q2 新表 external_import_rejections + 0024 migration（打破零 migration 仅此一次）/ Q3 actor 归因走结构化日志。基线 556/0。
+
+### 交付
+
+- 行级容错二分隔离（imports.py；O(k·log n)，全绿路径零开销；MAX_REJECTED_ROWS=500 截断、总数不失真）；
+  commit `allow_skipped` 表单：strict 422 EXTERNAL_ROWS_REJECTED，勾选后好行入库+脏行落隔离表（唯一约束幂等，E-9 实证重传不膨胀）；
+  runs 响应增 rejected_count（列表分组查询防 N+1）；导出端点 POST /api/external/imports/{run_id}/export
+  （catalog.read、workspace 404 不泄露、非 CSV 422、异常明细 = 原列序+「系统拦截原因」列、UTF-8 BOM、
+  公式注入转义含负数豁免）；前端批次历史「导出结果/导出异常」fetch+Blob + 跳过勾选黄底提示。
+- 新基线 **569 passed / 0 failed**（328.20s 无 flaky；E-1..E-13 共 13 条）。0024 up/down 临时库实测。
+
+### 存量 bug：alembic 静默禁用全部应用日志（R-61，本片最有价值发现）
+
+- `migrations/env.py:69 fileConfig(...)` 默认 `disable_existing_loggers=True`：`init_db()` 在应用进程内
+  跑 alembic 时把 `app.main` 等一切既有 logger 置 `disabled=True` → **生产 uvicorn 启动后应用日志
+  从第一条起全部静默丢弃**（与测试无关，一直存在）。
+- 排查存档：E-6 单跑绿/全量挂 → 自带 handler 仍空 → 监视线程轮询 disabled + `sys._current_frames()`
+  抓现场 → 正落在 `alembic.runtime.migration Running stamp_revision`。
+- 修复：`fileConfig(..., disable_existing_loggers=False)`（alembic 官方推荐）。E-6 自带 handler 版本保留为加固。
+
+### 测试连带登记（4 处，响应契约有意扩展）
+
+- Q-9b（test_p2s3_quality.py）与 test_p2s2_source_batch.py 两处：run 响应键集 + `rejected_count`。
+- test_alembic.py：head 断言 0023→0024（惯例第 6 次）。
+
+### 偏差与残留
+
+- 导出仅限 CSV 批次；脏行收集上限 500（rejected_total 不失真）。
+- P6-S4 候选：异常行「一键重传修好的文件」、导出权限下沉到 ops 以下角色评估。

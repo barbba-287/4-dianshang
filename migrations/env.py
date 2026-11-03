@@ -64,9 +64,12 @@ from app.db import (  # noqa: F401  触发模型注册
 # Alembic Config 对象，提供 .ini 中的值
 config = context.config
 
-# 读取 Python logging 配置
+# 读取 Python logging 配置。
+# disable_existing_loggers=False：alembic 常在应用进程内被调用（init_db → upgrade/stamp），
+# 默认 True 会把 "app.main" 等一切既有 logger 置 disabled=True —— 生产 uvicorn 启动后
+# 应用日志全部静默丢弃（P6-S3 排查 E-6 全量失败时实证）。False 只接管 ini 声明的 logger。
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # 让 autogenerate 能比较 Base.metadata
 target_metadata = Base.metadata

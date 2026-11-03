@@ -776,9 +776,10 @@ def test_q9b_http_run_response_appends_quality_status_only(http_env):
         "inserted", "updated", "no_op", "conflict", "stale", "error_code", "error_message",
         "resource_status", "retryable_resources",
     }
-    # P2-2 的三个归因键 + P2-3 的一个质量键；其余键一个不多一个不少。
+    # P2-2 的三个归因键 + P2-3 的一个质量键 + P6-S3 的一个异常计数键；
+    # 其余键一个不多一个不少。
     assert set(run_body) == legacy_keys | {
-        "actor", "request_id", "upstream_request_count", "quality_status",
+        "actor", "request_id", "upstream_request_count", "quality_status", "rejected_count",
     }
     # 既有键值不变。
     assert run_body["status"] == "succeeded"

@@ -867,7 +867,10 @@ def test_s10_run_response_appends_attribution_fields_only(harness, monkeypatch):
     }
     # 只增不改：既有键一个不多一个不少，新增键为归因三键。
     # P2-3 必要连带：run 详情响应追加 `quality_status`（观察态质量结论），键集断言同步跟进。
-    assert set(body) == legacy_keys | {"actor", "request_id", "upstream_request_count", "quality_status"}
+    # P6-S3 必要连带：追加 `rejected_count`（异常行落库计数，供前端判断是否可导出异常明细）。
+    assert set(body) == legacy_keys | {
+        "actor", "request_id", "upstream_request_count", "quality_status", "rejected_count",
+    }
     # 既有键值不变。
     assert body["run_id"] == run_id
     assert body["platform"] == "shopify"
@@ -888,7 +891,9 @@ def test_s10_run_response_appends_attribution_fields_only(harness, monkeypatch):
     items = listing.json()
     assert items
     first = items[0]
-    assert set(first) == legacy_keys | {"actor", "request_id", "upstream_request_count", "quality_status"}
+    assert set(first) == legacy_keys | {
+        "actor", "request_id", "upstream_request_count", "quality_status", "rejected_count",
+    }
 
 
 # ---------------------------------------------------------------------------
