@@ -534,3 +534,56 @@ def test_t23_p5s6_login_page_polish():
     for frag in ("name='login'", "name='password'", "name='workspace'",
                  "id='message'", "<h1>员工登录</h1>", "action='/login'"):
         assert frag in main_py, f'登录页缺少契约片段 {frag}'
+
+
+# ---------------------------------------------------------------- P5-S7
+
+def test_t24_p5s7_source_status_bar():
+    """T-24（P5-S7）：dashboard 顶部数据源状态条——容器注入、渲染函数挂接、
+    管理链接指向 /shopify；全部复用既有 loadSyncHealth 数据链路（零新端点）。"""
+    dash = _read(TPL_DIR / 'dashboard.html')
+    assert 'id="source-status"' in dash, 'dashboard 缺少 #source-status 容器'
+    assert '<div class="source-status" id="source-status" hidden></div>' in dash, \
+        '状态条容器必须以 hidden 起始（加载失败时静默）'
+    assert 'function renderSourceStatus(health)' in dash, '缺少 renderSourceStatus 定义'
+    assert 'renderSourceStatus(health);' in dash, 'loadSyncHealth 成功分支未调用 renderSourceStatus'
+    assert 'href="/shopify">管理</a>' in dash, '缺少指向 /shopify 的管理链接'
+    assert "badge-warning" in dash and "badge-neutral" in dash and "badge-success" in dash, \
+        '徽标必须复用 shell 既有 .badge 类（badge-success/warning/neutral）'
+    # 容器位于 KPI 区之前（顶部）
+    assert dash.index('id="source-status"') < dash.index('id="kpis"'), '状态条应位于 KPI 区之前'
+    css = re.sub(r'\s+', ' ', _read_css(UI_V2))
+    assert '.source-status{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center;margin-bottom:var(--space-4)}' in css
+
+
+def test_t25_p5s7_admin_copy_cleared():
+    """T-25（P5-S7）：admin 成员页静态解释文案出清（用户裁定「解释自己知道就行」）。"""
+    admin = _read(TPL_DIR / 'admin_users.html')
+    for banned in (
+        '管理当前 Workspace 成员、角色和仓库数据范围。',
+        '仓库协作员可直接点击多个仓库，不需要按 Ctrl。',
+        '仓库协作方必须至少选择一个有效仓库；其他角色可稍后授权。',
+        '调整角色、密码和仓库访问范围。',
+        '管理当前商家的仓库，以及需要人工确认的旧仓库绑定。',
+    ):
+        assert banned not in admin, f'admin 解释文案未清：{banned}'
+    # 白名单保留
+    assert 'Workspace / ' in admin, '动态数据 Workspace / 不应被删'
+    assert '暂无已绑定仓库' in admin, '空态文案不应被删'
+
+
+def test_t26_p5s7_section14_hygiene():
+    """T-26（P5-S7）：ui-v2 段 14 卫生——零裸 hex、零 ！important、mask 图标在位。"""
+    raw = _read(UI_V2)
+    marker = '段 14. 数据源状态条与空态图标'
+    marker2 = '14. 数据源状态条与空态图标'
+    idx = raw.find(marker2)
+    assert idx != -1, 'ui-v2.css 缺少段 14 分界注释'
+    tail = raw[idx:]
+    code = re.sub(r'/\*.*?\*/', '', tail, flags=re.S)
+    hexes = re.findall(r'#[0-9a-fA-F]{3,8}\b', code)
+    assert not hexes, f'段 14 出现裸色值: {hexes}'
+    assert '!' not in code.replace('!=', ''), '段 14 不得出现 ！important'
+    assert '.empty::before' in raw and 'mask:url("data:image/svg+xml;utf8,' in raw, \
+        '空态图标（mask + data-URI）未落位'
+    assert 'background-color:var(--color-text-muted)' in code, '图标颜色必须走 token'
