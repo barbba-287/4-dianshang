@@ -487,3 +487,78 @@ def test_f35b_daily_sales_rebuilt_from_merged_order(ctx):
     assert rows["EXT-SKU-A"].net_qty == 2
     assert rows["EXT-SKU-A"].net_amount == Decimal("40.00")
     assert all(row.order_count == 1 for row in rows.values())
+
+
+# ---------------------------------------------------------------------------
+# F-36 ★P7 x P8 边界：合并订单的利润必须 == 三个明细行利润之和（用户指定对拍）
+# ---------------------------------------------------------------------------
+
+
+def _cockpit_profit(ctx, *, days: int = 7, as_of: str = "2026-09-10") -> dict:
+    response = ctx.client.get(f"/api/dashboard/cockpit?days={days}&as_of={as_of}")
+    assert response.status_code == 200, response.text
+    return response.json()["profit"]
+
+
+def _profit_lines(ctx, *, days: int = 7, as_of: str = "2026-09-10") -> dict:
+    response = ctx.client.get(f"/api/finance/profit/lines?days={days}&as_of={as_of}&limit=50")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_f36_merged_order_profit_equals_sum_of_line_profits(ctx):
+    """★用户指定对拍：3 行同名 CSV 合并后，利润引擎按**明细行**算，不得按订单头重复计收入。
+
+    夹具成本 A=10 / B=20 / C=30，费率 5%：
+        A: 40 - 10x2 - 40x5%  =  18.00
+        B: 30 - 20x1 - 30x5%  =   8.50
+        C: 20 - 30x1 - 20x5%  = -11.00   （成本高于售价 → 亏损行，必须进 losers）
+        合计：收入 90.00  成本 70.00  平台费 4.50  利润 15.50
+
+    关键断言是 revenue == 90.00 而不是 270.00：如果引擎读的是订单头 `gross_amount`，
+    合并后的单头 90 会被 3 个明细行各取一次 → 收入三倍、利润虚高（R-67 的形态）。
+    """
+    assert _upload(ctx, THREE_SKU_CSV).status_code == 200
+    order = _orders(ctx)[0]
+    assert order.gross_amount == Decimal("90.00"), "SUM 态：40+30+20"
+    assert len(_lines(ctx)) == 3
+
+    profit = _cockpit_profit(ctx)
+    assert profit["computed_lines"] == 3, "三行都必须成功锚定成本"
+    assert profit["quality"] == "complete"
+    cell = profit["by_currency"][0]
+    assert cell["revenue"] == "90.00", "▲ 收入必须等于明细之和，绝不能是订单头的 3 倍（270.00）"
+    assert cell["revenue"] != "270.00", "R-67 形态：订单头金额被逐行重复计入"
+    assert cell["cost"] == "70.00"
+    assert cell["platform_fee"] == "4.50"
+    assert cell["profit"] == "15.50"
+    assert profit["total_profit"] == "15.50"
+
+    detail = _profit_lines(ctx)
+    assert detail["total"] == 3
+    line_profit_sum = sum((Decimal(item["profit"]) for item in detail["items"]), Decimal("0"))
+    assert line_profit_sum == Decimal("15.50"), "逐行利润之和必须等于 KPI 总额"
+    assert detail["page_profit"] == "15.50"
+    per_line = {item["external_sku"]: item["profit"] for item in detail["items"]}
+    assert per_line == {"EXT-SKU-A": "18.00", "EXT-SKU-B": "8.50", "EXT-SKU-C": "-11.00"}
+
+
+def test_f36b_merged_order_lines_anchor_independent_costs(ctx):
+    """合并不得让三个 SKU 共享同一份成本——每行各自的 unit_cost 必须来自自己的 SKU 快照。"""
+    assert _upload(ctx, THREE_SKU_CSV).status_code == 200
+    anchored = {line.external_sku: line for line in _lines(ctx)}
+    assert anchored["EXT-SKU-A"].unit_cost == Decimal("10.00")
+    assert anchored["EXT-SKU-B"].unit_cost == Decimal("20.00")
+    assert anchored["EXT-SKU-C"].unit_cost == Decimal("30.00")
+    assert all(line.cost_status == "resolved" for line in anchored.values())
+    assert anchored["EXT-SKU-A"].fee_rate == Decimal("0.0500")
+
+
+def test_f36c_merged_order_ranking_splits_winner_and_loser(ctx):
+    """排行必须按明细粒度拆分：赚钱的 A/B 进 winners，亏钱的 C 进 losers。"""
+    assert _upload(ctx, THREE_SKU_CSV).status_code == 200
+    ranking = _cockpit_profit(ctx)["ranking"]
+    winners = {item["sku_code"]: item["profit"] for item in ranking["winners"]}
+    losers = {item["sku_code"]: item["profit"] for item in ranking["losers"]}
+    assert winners == {"SKU-A": "18.00", "SKU-B": "8.50"}
+    assert losers == {"SKU-C": "-11.00"}
