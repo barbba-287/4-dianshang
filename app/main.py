@@ -3846,6 +3846,7 @@ def external_events_ingest(payload: ExternalEventIngestRequest, request: Request
 
 _IMPORT_KINDS = ("inventory", "orders")
 _EXPORT_VIEWS = ("raw", "rejected")
+_EXPORT_FORMATS = ("xlsx", "csv")
 
 
 def _persist_rejections(db: Session, *, workspace_id: int, run_id: str, kind: str, rejected) -> int:
@@ -3939,8 +3940,11 @@ async def external_import_preview(
         column_mapping=column_mapping,
     )
     records = outcome.records or []
+    from app.imports import MAX_REJECTED_ROWS
     return ExternalImportPreviewResponse(
-        platform=platform, kind=kind, total=len(records), detected_encoding=outcome.encoding,
+        # total = 数据行总数（含坏行）；有效记录数 = total - rejected_total。
+        # P6-S3 修复：以前 total 只数有效记录，脏行多时前端显示「共 2 行」而文件有 3 行。
+        platform=platform, kind=kind, total=outcome.rows_total, detected_encoding=outcome.encoding,
         normalized_rows=[vars(record) for record in records[:20]],
         errors=[],
         csv_headers=outcome.csv_headers,
@@ -3948,6 +3952,8 @@ async def external_import_preview(
         unmapped_columns=outcome.unmapped,
         missing_required_fields=outcome.missing,
         # P6-S3：脏行明细（只读，不落库；落库发生在 allow_skipped 的入库批次）。
+        # 仅此处截断到 MAX_REJECTED_ROWS（响应体积）；rejected_total 恒为全量，
+        # 入库落库一律全量写入（见 _persist_rejections）。
         rejected_rows=[
             {
                 "row_number": item.row_number,
@@ -3955,7 +3961,7 @@ async def external_import_preview(
                 "reason_message": item.reason_message,
                 "raw_data": item.raw_data,
             }
-            for item in outcome.rejected
+            for item in outcome.rejected[:MAX_REJECTED_ROWS]
         ],
         rejected_total=outcome.rejected_total,
     )
@@ -4062,18 +4068,22 @@ def export_import_run(
     run_id: str,
     request: Request,
     view: str = Query(default="raw"),
+    format: str = Query(default="xlsx"),
     db: Session = Depends(get_db),
 ):
     """P6-S3 批次导出：view=raw 原始事实层 / view=rejected 异常明细。
 
     只读查询：不写任何业务表（唯一的写是日志）。workspace 隔离照既有范式，
     run 不属于当前 workspace 一律 404（不泄露存在性）。
+    P6-S4：默认 xlsx（openpyxl 美化，Excel 可直接排版/编辑）；format=csv 保留机器可读通道。
     """
     principal = require_principal(request, permission="catalog.read")
     if view not in _EXPORT_VIEWS:
         raise DomainError(code="EXPORT_VIEW_INVALID", message="view 仅支持 raw / rejected", http_status=422)
+    if format not in _EXPORT_FORMATS:
+        raise DomainError(code="EXPORT_FORMAT_INVALID", message="format 仅支持 xlsx / csv", http_status=422)
     from app.db import ExternalImportRejection, ExternalInventorySnapshot, ExternalOrder, ExternalSyncRun
-    from app.import_exports import csv_download, raw_table, rejected_table
+    from app.import_exports import build_download, raw_table, rejected_table
     run = db.scalar(
         select(ExternalSyncRun).where(
             ExternalSyncRun.run_id == run_id,
@@ -4119,10 +4129,13 @@ def export_import_run(
     safe_run_id = re.sub(r"[^A-Za-z0-9_-]", "", run.run_id)[:32] or "run"
     # P6-S3 Q3 裁定：actor 归因走结构化日志，不建审计表。
     logger.info(
-        "报表导出 actor=%s workspace=%s run_id=%s view=%s rows=%s",
-        principal.subject, principal.workspace_id, run.run_id, view, len(rows),
+        "报表导出 actor=%s workspace=%s run_id=%s view=%s format=%s rows=%s",
+        principal.subject, principal.workspace_id, run.run_id, view, format, len(rows),
     )
-    return csv_download(f"wb-export-{safe_run_id}-{view}.csv", headers, rows)
+    return build_download(
+        filename_base=f"wb-export-{safe_run_id}-{view}",
+        view=view, headers=headers, rows=rows, export_format=format,
+    )
 
 
 @app.get("/api/external/reconciliation/{snapshot_id}")

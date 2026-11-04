@@ -1,4 +1,4 @@
-"""P6-S3 通用数据导出与异常追溯测试（E-1..E-13）。
+"""P6-S3/P6-S4 通用数据导出与异常追溯测试（E-1..E-18）。
 
 夹具模式照 tests/test_p6s1_csv_import.py（tmp_path 隔离库 + operations 会话）。
 """
@@ -79,8 +79,10 @@ def _workspace_id(db_mod) -> int:
         return db.query(db_mod.Workspace).filter(db_mod.Workspace.tenant_key == "export-test").one().id
 
 
-def _export(client, run_id: str, view: str):
-    return client.post(f"/api/external/imports/{run_id}/export?view={view}")
+def _export(client, run_id: str, view: str, fmt: str = "csv"):
+    """导出请求；P6-S4 起端点默认 xlsx，故 CSV 相关断言显式带 format=csv。"""
+    suffix = f"&format={fmt}" if fmt else ""
+    return client.post(f"/api/external/imports/{run_id}/export?view={view}{suffix}")
 
 
 def _lines(response) -> list[str]:
@@ -272,7 +274,8 @@ def test_e10_preview_reports_rejected_rows(tmp_path, monkeypatch):
     preview = _upload(client, path="/api/external/imports/preview", content=DIRTY_CSV.encode())
     assert preview.status_code == 200, preview.text
     body = preview.json()
-    assert body["total"] == 2
+    # P6-S4：total 改为「数据行总数（含坏行）」——脏行多时旧口径会显示「共 2 行」而文件有 3 行。
+    assert body["total"] == 3
     assert body["rejected_total"] == 1
     assert body["rejected_rows"][0]["row_number"] == 2
     assert body["rejected_rows"][0]["raw_data"]["external_sku"] == "S-2"
@@ -280,19 +283,21 @@ def test_e10_preview_reports_rejected_rows(tmp_path, monkeypatch):
 
 
 def test_e11_no_heavy_dependencies():
-    """红线：本片新增/改动的导出链路只允许标准库（pandas/openpyxl 禁入）。
+    """P6-S4 口径：openpyxl 由用户明确批准复用（Excel 排版需求）；**pandas 仍禁止**。
 
-    只扫**代码行**（文档字符串里提到模块名不算引入）；存量 app/exports.py 用的是
-    openpyxl（运营 Excel 导出，requirements 既有声明），不属本片改动范围。
+    P6-S3 原红线是「导出链路零重型依赖」，P6-S4 用户裁定改为复用项目既有 openpyxl
+    （app/exports.py 同款，requirements 早已存在），故断言随之调整并登记。
     """
+    exports_code = open("app/import_exports.py", encoding="utf-8").read()
     for path in ("app/imports.py", "app/import_exports.py"):
         code_lines = [line.strip() for line in open(path, encoding="utf-8") if line.strip()]
         for line in code_lines:
-            assert not line.startswith(("import pandas", "from pandas", "import openpyxl", "from openpyxl")), \
-                f"{path} 引入了重型依赖: {line}"
-    assert "import csv" in open("app/import_exports.py", encoding="utf-8").read()
+            assert not line.startswith(("import pandas", "from pandas")), f"{path} 引入了 pandas: {line}"
+    assert "from openpyxl import Workbook" in exports_code, "应复用 openpyxl 生成 xlsx"
+    assert "import csv" in exports_code, "csv 通道需保留（format=csv）"
     requirements = open("requirements.txt", encoding="utf-8").read().lower()
     assert "pandas" not in requirements
+    assert "openpyxl" in requirements
 
 
 def test_e12_migration_and_model_registered():
@@ -315,3 +320,130 @@ def test_e13_frontend_contract(tmp_path, monkeypatch):
     assert "将跳过错误行，错误数据可在批次历史中导出修改" in page
     assert "allow_skipped" in page
     assert "createObjectURL" in page and "export?view=" in page
+    # P6-S4：xlsx 是二进制，前端不再读文本判断空；改用批次行数据里的 rejected_count
+    assert "data-bad=" in page and "badCount" in page
+
+
+# ---------------------------------------------------------------------------
+# P6-S4 追加：xlsx 导出美化 + 静默丢行护栏
+# ---------------------------------------------------------------------------
+
+
+def _load_xlsx(response):
+    import io as _io
+    from openpyxl import load_workbook
+    return load_workbook(_io.BytesIO(response.content))
+
+
+def test_e14_xlsx_default_export_is_beautified(tmp_path, monkeypatch):
+    """默认导出 .xlsx：表头加粗、全表居中、列宽自适应、拦截原因列加宽、首行冻结。"""
+    from app.import_exports import MAX_WIDTH, MIN_WIDTH, WIDE_WIDTH
+    client, _db = _client(tmp_path, monkeypatch)
+    commit = _upload(client, content=DIRTY_CSV.encode(), allow_skipped=True)
+    run_id = commit.json()["sync_run_id"]
+
+    for view in ("raw", "rejected"):
+        response = _export(client, run_id, view, fmt="")  # 不传 format → 默认 xlsx
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert response.headers["content-disposition"].endswith('.xlsx"')
+
+        sheet = _load_xlsx(response).active
+        headers = [cell.value for cell in sheet[1]]
+        assert all(cell.font.bold for cell in sheet[1]), f"{view} 表头未加粗"
+        assert all(cell.alignment.horizontal == "center" for cell in sheet[1]), f"{view} 表头未居中"
+        for row in sheet.iter_rows(min_row=2):
+            assert all(cell.alignment.horizontal == "center" for cell in row), f"{view} 数据未居中"
+        assert sheet.freeze_panes == "A2"
+        for index, header in enumerate(headers, start=1):
+            width = sheet.column_dimensions[sheet.cell(1, index).column_letter].width
+            if header in ("系统拦截原因", "备注"):
+                assert width == WIDE_WIDTH, f"{view} 宽列 {header} 宽度应为 {WIDE_WIDTH}，实为 {width}"
+            else:
+                assert MIN_WIDTH <= width <= MAX_WIDTH, f"{view} 列 {header} 宽度越界: {width}"
+    # 阻塞原因列内容仍在最后一列
+    rejected_sheet = _load_xlsx(_export(client, run_id, "rejected", fmt="")).active
+    header_values = [cell.value for cell in rejected_sheet[1]]
+    assert header_values[-1] == "系统拦截原因"
+    assert "第 2 行" in rejected_sheet.cell(2, len(header_values)).value
+
+
+def test_e15_silent_drop_is_captured(tmp_path, monkeypatch):
+    """护栏：下游「不报错但少给记录」也必须落成异常行，不允许静默吞行。"""
+    import app.imports as imports_mod
+    from app.connectors import load_records
+
+    real = imports_mod._load
+    dropped = {"sku": "S-2"}
+
+    def silently_dropping(kind, text, *, platform, defaults):
+        records = real(kind, text, platform=platform, defaults=defaults)
+        return [record for record in records if getattr(record, "external_sku", None) != dropped["sku"]]
+
+    monkeypatch.setattr(imports_mod, "_load", silently_dropping)
+    outcome = imports_mod.parse_upload(
+        GOOD_CSV.encode(), platform="taobao", kind="inventory", defaults={},
+    )
+    assert [record.external_sku for record in outcome.records] == ["S-1"]
+    assert outcome.rejected_total == 1
+    assert outcome.rejected[0].row_number == 2
+    assert imports_mod.SILENT_DROP_MESSAGE in outcome.rejected[0].reason_message
+    # 不变量：有效记录 + 异常行 == 数据行总数（100% 可对账）
+    assert len(outcome.records) + outcome.rejected_total == outcome.rows_total == 2
+    assert load_records  # 保留真实 load_* 引用，防止 import 被优化掉
+
+
+def test_e16_header_only_file_keeps_headers(tmp_path, monkeypatch):
+    """只有表头的文件不再丢列头（旧实现取首行键，无数据行时列头为空）。"""
+    client, _db = _client(tmp_path, monkeypatch)
+    header_only = b"external_sku,account_ref,store_ref,available_qty,as_of\n"
+    preview = _upload(client, path="/api/external/imports/preview", content=header_only)
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["csv_headers"] == ["external_sku", "account_ref", "store_ref", "available_qty", "as_of"]
+    assert body["missing_required_fields"] == [], "列头齐全时不应报必填未识别"
+    assert body["total"] == 0 and body["rejected_total"] == 0
+
+
+def test_e17_extra_columns_do_not_leak_none_header(tmp_path, monkeypatch):
+    """首行多出的列不再以 None 混进列头（会污染映射区与导出列）。"""
+    client, _db = _client(tmp_path, monkeypatch)
+    content = (
+        "external_sku,account_ref,store_ref,available_qty,as_of\n"
+        "S-1,a,s,7,2026-11-01T10:00:00Z,多余列\n"
+        "S-2,a,s,3,2026-11-01T10:00:00Z\n"
+    ).encode()
+    preview = _upload(client, path="/api/external/imports/preview", content=content)
+    assert preview.status_code == 200, preview.text
+    headers = preview.json()["csv_headers"]
+    assert None not in headers
+    assert headers == ["external_sku", "account_ref", "store_ref", "available_qty", "as_of"]
+
+
+def test_e18_persistence_not_truncated(tmp_path, monkeypatch):
+    """预览响应可截断明细，**落库必须全量**（否则大文件脏行只记前 N 条 = 仍算丢行）。"""
+    import app.imports as imports_mod
+    monkeypatch.setattr(imports_mod, "MAX_REJECTED_ROWS", 2)
+    client, db_mod = _client(tmp_path, monkeypatch)
+    rows = "".join(f"S-{i},a,s,-5,2026-11-01T10:00:00Z\n" for i in range(1, 6))  # 5 行全坏
+    dirty = ("external_sku,account_ref,store_ref,available_qty,as_of\n" + rows).encode()
+
+    preview = _upload(client, path="/api/external/imports/preview", content=dirty)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["rejected_total"] == 5
+    assert len(preview.json()["rejected_rows"]) == 2  # 响应截断
+
+    # 全坏文件：勾选跳过 → 无有效行 → 422 空文件（拒绝整单，不静默成功）
+    empty = _upload(client, content=dirty, allow_skipped=True)
+    assert empty.status_code == 422, empty.text
+
+    # 5 坏 + 1 好：可入库，且 5 条异常全部落库
+    mixed = dirty + b"S-9,a,s,3,2026-11-01T10:00:00Z\n"
+    commit = _upload(client, content=mixed, allow_skipped=True)
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["rejected_count"] == 5
+    with db_mod.SessionLocal() as db:
+        from app.db import ExternalImportRejection
+        assert db.query(ExternalImportRejection).count() == 5

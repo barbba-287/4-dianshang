@@ -1,26 +1,32 @@
-"""P6-S3 报表批次导出规格：列清单 + CSV 生成（UTF-8 BOM）。
+"""P6-S3/P6-S4 报表批次导出规格：列清单 + xlsx/csv 生成。
 
-独立成模块的理由与 column_mappings.py 同源——**展示层标签不散落在路由函数里**：
+展示层标签不散落在路由函数里，故独立成模块（与 column_mappings.py 同源思路）：
 
 - `INVENTORY_EXPORT_COLUMNS` / `ORDER_EXPORT_COLUMNS`：原始事实层的显式列清单
   （不用 `vars()` 全倒，防模型演进导致列漂移）；
 - `rejected_table`：异常明细，列头 = 商家原表列序 + 末尾「系统拦截原因」；
-- `csv_download`：统一 UTF-8 BOM 与附件响应头，写法对齐既有 `app/exports.py`
-  （`utf-8-sig` + CRLF + 公式注入转义），但**不引用该模块**——它依赖 openpyxl，
-  本片红线是导出链路零重型依赖，故公式转义在此本地实现（镜像 app/exports.py:77）。
+- `xlsx_download`：默认格式（用户裁定 P6-S4：异常单要能在 Excel 里排版编辑）——
+  表头加粗+浅底、全表居中、按内容自适应列宽、拦截原因列加宽并自动换行、首行冻结；
+- `csv_download`：保留为 `format=csv` 的机器可读通道（UTF-8 BOM，国内 Excel 直开不乱码）。
 
-零第三方依赖：只用标准库 csv / io。
+P6-S4 口径变更：P6-S3 的红线是「导出链路零重型依赖」，用户已明确改为复用
+项目既有的 openpyxl（app/exports.py 同款依赖，requirements 早已存在）。
+pandas 仍禁止（E-11 断言）。
 """
 from __future__ import annotations
 
 import csv
 import io
 import json
+import unicodedata
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Iterable
 
 from fastapi import Response
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 INVENTORY_EXPORT_COLUMNS = (
     ("平台", "platform"), ("账号", "account_ref"), ("店铺", "store_ref"), ("仓库", "warehouse_ref"),
@@ -36,6 +42,18 @@ ORDER_EXPORT_COLUMNS = (
     ("来源模式", "source_mode"), ("接收时间", "received_at"),
 )
 REASON_COLUMN = "系统拦截原因"
+
+# 列宽策略：按内容自适应，夹在 [MIN_WIDTH, MAX_WIDTH]；宽列单独放宽。
+MIN_WIDTH = 10
+MAX_WIDTH = 40
+WIDE_WIDTH = 60
+WIDE_COLUMNS = frozenset({REASON_COLUMN, "备注"})
+
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+_HEADER_FILL = PatternFill("solid", fgColor="F2F5F9")
+_CENTER = Alignment(horizontal="center", vertical="center")
+_WRAP_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 
 def export_columns(kind: str) -> tuple[tuple[str, str], ...]:
@@ -100,6 +118,59 @@ def rejected_table(rejections: Iterable[Any]) -> tuple[list[str], list[list[str]
     return headers + [REASON_COLUMN], rows
 
 
+def _display_len(value: str) -> int:
+    """显示宽度：中日韩全角字符按 2 计（openpyxl 列宽单位≈半角字符数）。"""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in value)
+
+
+def _column_width(header: str, values: list[str]) -> int:
+    if header in WIDE_COLUMNS:
+        return WIDE_WIDTH
+    longest = max([_display_len(header)] + [_display_len(value) for value in values])
+    return min(max(longest + 4, MIN_WIDTH), MAX_WIDTH)
+
+
+def xlsx_download(
+    filename: str,
+    headers: list[str],
+    rows: list[list[str]],
+    *,
+    sheet_title: str = "导出结果",
+) -> Response:
+    """xlsx 附件响应：表头加粗+浅底、全表居中、自适应列宽、宽列换行、首行冻结。"""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = sheet_title[:31]  # Excel 工作表名上限 31 字符
+
+    sheet.append(headers)
+    for name in sheet[1]:
+        name.font = Font(bold=True)
+        name.fill = _HEADER_FILL
+        name.alignment = _CENTER
+    for row in rows:
+        sheet.append(row)
+
+    # 全表内容居中；宽列（拦截原因/备注）额外自动换行
+    for row_cells in sheet.iter_rows(min_row=2, max_row=max(sheet.max_row, 1)):
+        for name in row_cells:
+            header = sheet.cell(1, name.column).value
+            name.alignment = _WRAP_CENTER if header in WIDE_COLUMNS else _CENTER
+
+    for index, header in enumerate(headers, start=1):
+        values = [str(row[index - 1]) if index - 1 < len(row) else "" for row in rows]
+        sheet.column_dimensions[get_column_letter(index)].width = _column_width(str(header), values)
+
+    sheet.freeze_panes = "A2"
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return Response(
+        content=buffer.getvalue(),
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
+    )
+
+
 def csv_download(filename: str, headers: list[str], rows: list[list[str]]) -> Response:
     """CSV 附件响应：UTF-8 BOM（国内 Excel 直开不乱码）+ no-store。"""
     buf = io.StringIO(newline="")
@@ -111,4 +182,21 @@ def csv_download(filename: str, headers: list[str], rows: list[list[str]]) -> Re
         content=body,
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
+    )
+
+
+def build_download(
+    *,
+    filename_base: str,
+    view: str,
+    headers: list[str],
+    rows: list[list[str]],
+    export_format: str = "xlsx",
+) -> Response:
+    """统一出口：xlsx（默认，Excel 友好）/ csv（机器可读）。"""
+    if export_format == "csv":
+        return csv_download(f"{filename_base}.csv", headers, rows)
+    return xlsx_download(
+        f"{filename_base}.xlsx", headers, rows,
+        sheet_title="异常明细" if view == "rejected" else "批次结果",
     )
