@@ -2207,3 +2207,37 @@ P1-1（`main.py` 拆分）继续冻结。R-59 待立项。
 - 回填无并发保护：两请求同时回填同一批，后者覆盖 `anchored_at`（`unit_cost` 相同，结果一致）。
 - `_parse_fee_overrides` 每次调用重解析 JSON（override 少时可忽略，将来需加缓存）。
 - `nearest` 模式可能引入未来成本，属设计上的激进选项，默认不用。
+
+### R-65 缺陷登记（2026-11-04，P7-S2 复核探针发现，**既有缺陷，非本片引入**）
+
+**现象**：同一批 `records` 内出现重复 `external_order_no` → `IntegrityError`：
+`UNIQUE constraint failed: external_order_lines.(workspace_id, external_order_id, external_line_id)`。
+
+**根因**：`ingest_orders` 更新订单时会 `delete` 订单行再重建，但**未 flush 前的同批重复订单**
+会命中两次 `INSERT`（第一次的对象还在 pending 状态，bulk delete 对它无效），撞唯一约束。
+
+**触发路径**：`POST /api/external/imports`（`kind=orders`）→ `except Exception` →
+`DomainError("EXTERNAL_SYNC_FAILED", 500, "报表导入失败")`。即整批 500，不是行级异常。
+
+**谁会踩到**：P6-S1 的设计假设是「CSV 一行一个订单，多商品放 JSON `lines` 列」。但平台导出的
+订单报表通常是**一行一个 SKU**，同一订单号天然跨多行。用户直接上传平台原始导出 → 500。
+
+**影响面**：P6-S1 起即存在；P7-S2 未加重。但 P7 的锚定以 `ingest_orders` 为唯一咽喉，
+这条路径上 CSV 订单导入实际不可用，「锚定已在 CSV 路径生效」的说法只对**已聚合**的 CSV 成立。
+
+**探针复现**（2026-11-04 实测）：
+
+```
+ingest_orders(db, [rec(gross=100, ver=1), rec(gross=90, ver=2)], workspace_id=ws.id)
+→ FAILED: IntegrityError UNIQUE constraint failed: external_order_lines...
+```
+
+**建议两种修法（待用户裁定，本片未实施）**：
+
+| 方案 | 做法 | 代价 |
+|---|---|---|
+| A（推荐） | 入库前检测批内重复订单号 → 抛 `422` + 明确文案「订单 X 在本批次出现 N 次，请将同一订单的多个商品合并为一行（lines 列）」 | 只改错误信息，零数据语义变化 |
+| B | `ingest_orders` 内按订单号预聚合（把多行的 lines 合并） | 改变语义，需处理行号/金额/状态的冲突规则，风险高 |
+
+**本片处置**：仅登记，不实施——超出 P7-S2 范围，且修法涉及产品口径（B 方案需要「同订单多行
+如何合并金额」的规则），不能由实施方单方面决定。
