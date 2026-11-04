@@ -28,6 +28,11 @@ from app.column_mappings import (
 from app.connectors import PLATFORMS, ConnectorError, load_orders, load_records
 
 IMPORT_KINDS = ("inventory", "orders")
+# P7-S1：成本快照是导入流水线的**第三种 kind**，但**刻意不加入 IMPORT_KINDS**。
+# 原因：`/api/external/imports` 用 IMPORT_KINDS 做白名单，把 costs 加进去会让成本 CSV
+# 从外部导入端点溜进来源批次表（写错表、走错 ingest）。保持原值 = 既有端点零回归。
+COST_KIND = "costs"
+SUPPORTED_KINDS = (*IMPORT_KINDS, COST_KIND)
 ENCODING_CANDIDATES = ("utf-8-sig", "utf-8", "gb18030")
 ENCODING_ERROR_CODE = "EXTERNAL_INPUT_ENCODING"
 MAPPING_CONFLICT_CODE = "MAPPING_CONFLICT"
@@ -106,6 +111,11 @@ def _serialize_csv(rows: list[dict[str, Any]], fieldnames: list[str]) -> str:
 
 
 def _load(kind: str, text: str, *, platform: str, defaults: dict[str, str | None]) -> list[Any]:
+    if kind == COST_KIND:
+        # 延迟导入：app.costs 依赖 app.db，避免导入期循环。
+        from app.costs import load_cost_rows
+
+        return load_cost_rows(text)
     if kind == "orders":
         return load_orders(text, platform=platform, source_mode="csv", defaults=defaults)
     return load_records(text, platform=platform, source_mode="csv", defaults=defaults)
@@ -176,16 +186,17 @@ def parse_upload(
     defaults: dict[str, str | None],
     column_mapping: dict[str, str] | None = None,
 ) -> ImportOutcome:
-    """解码 + 列头映射 + 标准化；kind 仅支持 inventory / orders（P6-S1 Q4 裁定）。
+    """解码 + 列头映射 + 标准化；kind 支持 inventory / orders / costs（P7-S1 追加）。
 
     column_mapping：用户回传的 {真实CSV列名: 系统字段名}（v1.1 钦定方向）；
     None 时走自动建议。列头级错误（缺必填列/编码不可识别）照旧抛 ConnectorError；
     行级错误（值非法）不再整单失败——好行产出记录，坏行进 rejected（P6-S3）。
+    costs 是内部成本事实、没有平台维度，故不校验 platform（调用方可传空串）。
     """
-    if platform not in PLATFORMS:
-        raise ConnectorError(f"不支持的平台: {platform}")
-    if kind not in IMPORT_KINDS:
+    if kind not in SUPPORTED_KINDS:
         raise ConnectorError(f"不支持的导入类型: {kind}")
+    if kind != COST_KIND and platform not in PLATFORMS:
+        raise ConnectorError(f"不支持的平台: {platform}")
     text, encoding = decode_upload(raw)
     headers, rows = _csv_rows(text)
     if column_mapping is None:

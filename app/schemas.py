@@ -702,6 +702,9 @@ class InboundReceiveLine(BaseModel):
     sku_id: int = Field(gt=0)
     received_qty: int = Field(ge=0)
     damaged_qty: int = Field(default=0, ge=0)
+    # P7-S1：实收时申报的入库成本单价。可空 —— 存量入库单与「暂不填价」场景必须照常收货，
+    # 不能因为缺成本就把仓库的作业卡住。空值语义是「未知」，不是 0（0 = 免费成本）。
+    unit_cost: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
 
 
 class InboundReceive(BaseModel):
@@ -717,6 +720,8 @@ class InboundLineResponse(BaseModel):
     damaged_qty: int
     accepted_qty: int | None = None
     difference: int | None = None
+    # P7-S1：末尾追加（既有 7 键逐字节不变），前端据此回显单价与算预估总成本。
+    unit_cost: Decimal | None = None
 
 
 class InboundResponse(BaseModel):
@@ -1515,3 +1520,66 @@ class ContentExportResponse(BaseModel):
     simulated: bool
     created_at: datetime
     finished_at: datetime | None
+
+
+# ---------- P7-S1 成本快照（append-only 成本事实层） ----------
+
+
+class CostSnapshotCreate(BaseModel):
+    """单条手工录入成本。`sku_code` 支持内部编码，未命中会回落外部编码映射。"""
+
+    model_config = ConfigDict(extra="forbid")
+    sku_code: str = Field(min_length=1, max_length=128)
+    unit_cost: Decimal = Field(ge=0, max_digits=12, decimal_places=2)
+    # 可空 = 现在生效（由服务层补 datetime.utcnow()）；补录历史成本时填真实生效时间。
+    effective_time: datetime | None = None
+    currency: str = Field(default="CNY", max_length=8)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class CostSnapshotItem(BaseModel):
+    id: int
+    sku_id: int
+    sku_code: str
+    unit_cost: str          # 两位小数字符串（金额不落 float）
+    currency: str
+    effective_time: str
+    source: str             # inbound_confirm | manual
+    source_ref: str
+    note: str | None = None
+    created_at: str | None = None
+    created_by: str | None = None
+
+
+class CostSnapshotListResponse(BaseModel):
+    items: list[CostSnapshotItem] = Field(default_factory=list)
+    total: int = 0
+
+
+class CostImportPreviewResponse(BaseModel):
+    """成本 CSV 预览：只解析不写库，与 P6 报表预览同一套语义（缺列 200 + missing 列表）。"""
+
+    platform: str | None = None
+    kind: str = "costs"
+    total: int = 0
+    detected_encoding: str = ""
+    csv_headers: list[str] = Field(default_factory=list)
+    mapping_suggestion: dict[str, str] = Field(default_factory=dict)
+    unmapped_columns: list[str] = Field(default_factory=list)
+    missing_required_fields: list[str] = Field(default_factory=list)
+    rejected_rows: list[dict] = Field(default_factory=list)
+    rejected_total: int = 0
+    # 预览用前 20 条（金额已转两位小数字符串，避免 Decimal 无法 JSON 序列化）
+    normalized_rows: list[dict] = Field(default_factory=list)
+
+
+class CostImportCommitResponse(BaseModel):
+    """成本 CSV 入库结果：imported + skipped + rejected_total == total（计数不变量）。"""
+
+    kind: str = "costs"
+    total: int = 0
+    imported: int = 0
+    skipped: int = 0
+    rejected_total: int = 0
+    detected_encoding: str = ""
+    rejected_rows: list[dict] = Field(default_factory=list)

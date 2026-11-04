@@ -2088,3 +2088,67 @@ P1-1（`main.py` 拆分）继续冻结。R-59 待立项。
 
 - 预览明细 500 条截断（体积保护）；全量以 rejected_total 与导出为准。
 - 全坏文件 + 勾选跳过 → 仍 422（不建空批次），该情形异常明细不落库；如需"全坏留证"另开切片。
+
+## §33 P7-S1 成本录入与成本快照（2026-11-04，WorkBuddy 实施）
+
+### 侦查前置结论（P7 立项依据）
+
+**本仓库此前不存在任何成本数据**——全仓 `grep unit_price|cost_price|unit_cost|purchase_price|成本`
+零命中。逐表核实：`inbound_lines` 只有 expected/received/damaged_qty；`inventory_transactions`
+只有 quantity_delta；`purchase_request_lines` 只有 requested_qty；`products.current_price` 是爬虫
+抓的**售价**。故「实收确认入库时记录成本单价」缺的是**输入源**，P7 必须先自建成本入口。
+
+### 用户裁定（Q1–Q7，全部采纳推荐值）
+
+| # | 裁定 | 落地 |
+|---|---|---|
+| Q1 | 入库报单价 + 手工 CSV 双入口 | `InboundLine.unit_cost` + `POST /api/finance/cost-snapshots/import` |
+| Q2 | 按需查询计算，同步路径只锚定 | S3 的利润引擎按需算；S1 只落事实 |
+| Q3 | 费率锚定 | `external_order_lines.fee_rate`（S2 启用） |
+| Q4 | 回填显式触发 + dry_run + 只补 missing | S2 |
+| Q5 | `Settings` 全局 + platform override | S3 |
+| Q6 | unmapped 不计入黄色成本提示 | S3 |
+| Q7 | S1 成本入口 → S2 锚定回填 → S3 引擎看板 | 本片 S1 |
+
+追加硬要求两条：① 前端必须有直观的「预估总成本」计算展示；② 成本 CSV 必须完全复用 P6 的
+「静默丢行」护栏，绝不允许脏数据污染成本库。
+
+### 实现要点
+
+- **`CostSnapshot` append-only**：只 INSERT，不 UPDATE/DELETE。成本修正 = 追加新快照，历史事实
+  在存储层不可篡改。字段 `(workspace_id, sku_id, unit_cost, currency, effective_time, source,
+  source_ref, note, created_by, created_at)`。
+- **确认入库即固化**：快照写入点放在 `confirm_inbound` 的 `if transaction is None:` 幂等分支**内部**
+  → 重放天然不重复写；另有 `_snapshot_exists` 四元组判重兜底。
+- **无单价不阻塞收货**：`line.unit_cost is not None` 才写快照。存量入库单无单价，确认照旧成功，
+  避免补丁上线把在途单据卡死。
+- **预估总成本口径锁死** `Σ(实收 − 破损) × 单价`，与 `accepted_qty`、库存台账同源（破损不进库存）。
+- **空单价必须提交 `null`**：前端 `=== ''?null:Number(...)`。若传 0 等于声明「这批货免费」，
+  成本库被 0 污染后利润虚高且难回溯（F-9 断言此契约）。
+- **成本 CSV 复用护栏靠「接入」不靠「复制」**：`COST_KIND="costs"` 进 `parse_upload` 全链路
+  （编码探测 → 中文列头映射 → `_isolate` 计数判定 → `记录+异常==数据行` 收尾不变量），
+  唯一分叉是 `_load()` 指向 `load_cost_rows`。`load_cost_rows` 契约：一行必须产出记录或抛
+  `ConnectorError`，**禁止 `continue`**——否则计数判定会误把合法行当脏行二分。
+- **`COST_KIND` 刻意不入 `IMPORT_KINDS`**：`/api/external/imports` 用 `IMPORT_KINDS` 做白名单，
+  放进去成本 CSV 就会从外部导入端点进入、走错 ingest 写错表。独立 `SUPPORTED_KINDS` 仅供 parse 层。
+- **双编码解析** `resolve_sku_ids`：先 `product_skus.sku_code`，未命中回落
+  `external_product_mappings.external_sku`（限 `mapped`）；两条查询零 N+1。
+
+### 修掉的真缺陷（F-4 暴露）
+
+`app/main.py` 全局校验异常处理器 `JSONResponse(content={"detail": exc.errors()})` 无法序列化
+`Decimal`（Pydantic 会把用户原始输入值放进 `errors()`）→ 校验失败时响应本身抛 500。
+改为 `jsonable_encoder(exc.errors())`。属全局影响面，故单独登记。
+
+### 测试
+
+- 新基线 **586 passed / 0 failed**（327.97s；基线 574 + 12 用例）。
+- F-1..F-10 全绿，其中拆分两条：F-3b（二次上报不清空已有单价）、F-7b（预览缺列 200 + missing）。
+- 连带唯一已知改动：`tests/test_alembic.py` head 断言 `0024` → `0025`。
+
+### 残留
+
+- 成本导入响应 `rejected_rows` 只回前 500 条明细，`rejected_total` 为全量（与 P6 同语义）。
+- 成本 CSV 无「导出异常明细」入口；如需把成本拦截行也落表，S2 评估。
+- 单条录入端点未设幂等键，重复提交会新增两条（`source_ref` 含时间戳）。手工场景可接受。
+- `external_order_lines` 五列本片只建列不落数据，锚定逻辑全部属 S2。

@@ -41,12 +41,23 @@ FIELD_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
         "refund_amount": ("退款金额", "退款", "refund_amount", "已退款"),
         "currency": ("币种", "货币", "currency", "币别"),
     },
+    # P7-S1：成本快照导入（第三种 kind）。刻意与 inventory/orders 隔离，
+    # 别名独立成表——成本表列少、语义唯一，避免与库存快照的「单价」类词汇互相污染。
+    "costs": {
+        "sku_code": ("商品编码", "sku", "商家编码", "规格代码", "货号", "商品编号", "商品代码", "内部编码"),
+        "unit_cost": ("成本单价", "成本价", "进货单价", "采购单价", "单位成本", "入库成本", "单价", "unit_cost", "cost"),
+        "effective_time": ("生效时间", "成本时间", "入库时间", "生效日期", "统计时间", "effective_time"),
+        "currency": ("币种", "货币", "currency", "币别"),
+        "note": ("备注", "说明", "note"),
+    },
 }
 
 # 必填（列头层判定）。account_ref 可由表单兜底（P6-S1 defaults 机制），不在此列。
 REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "inventory": ("external_sku", "as_of"),
     "orders": ("external_order_no", "external_created_at"),
+    # effective_time 可空：缺省视为导入时刻（由 ingest 补），避免强迫财务填生效时间。
+    "costs": ("sku_code", "unit_cost"),
 }
 
 

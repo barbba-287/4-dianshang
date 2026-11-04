@@ -366,6 +366,9 @@ class InboundLine(Base):
     received_qty: Mapped[int] = mapped_column(Integer, default=0)
     damaged_qty: Mapped[int] = mapped_column(Integer, default=0)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # P7-S1：实收时申报的入库成本单价（可为空——存量入库单与"暂不填价"场景）。
+    # 追加在末尾，与 migration 0025 的物理列顺序一致（沿 P3-S1 purchase_request_id 做法）。
+    unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
 
 class InventoryTransaction(Base):
@@ -470,6 +473,41 @@ class ExternalImportRejection(Base):
     error_code: Mapped[str] = mapped_column(String(64), default="EXTERNAL_INPUT_INVALID")
     error_reason: Mapped[str] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class CostSnapshot(Base):
+    """P7-S1 成本快照表：SKU 在某个**生效时刻**的入库成本单价（append-only）。
+
+    红线（dev_task.p7-profit-center.md §2.2 / R-1）：
+    - **只 INSERT，永不 UPDATE / DELETE**。成本修正 = 追加一条新快照，
+      旧快照原样保留——历史成本事实在存储层不可篡改，利润才可审计。
+    - `effective_time` 是业务生效时刻（确认入库的 confirmed_at / 手工指定的生效时间），
+      与 `created_at`（写入时刻）刻意分开：补录昨天生效的成本，是合法的数据修正。
+    - 唯一约束四分量缺一不可：同一 SKU 同一时刻允许「入库」与「手工」两种来源并存
+      （手工修正不能顶掉入库事实）；`source_ref` 让重复确认入库不产生第二行。
+    - `sku_id` 指向内部 SKU（product_skus），外部编码须先在导入层解析为内部 SKU。
+    """
+
+    __tablename__ = "cost_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "sku_id", "effective_time", "source", "source_ref",
+            name="uq_cost_snapshot_identity",
+        ),
+        Index("ix_cost_snapshot_lookup", "workspace_id", "sku_id", "effective_time"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id"), nullable=False, index=True)
+    sku_id: Mapped[int] = mapped_column(ForeignKey("product_skus.id"), nullable=False, index=True)
+    unit_cost: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(8), default="CNY")
+    effective_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    source: Mapped[str] = mapped_column(String(24), default="manual", index=True)
+    source_ref: Mapped[str] = mapped_column(String(128))
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 class ExternalSyncDeadLetter(Base):
@@ -806,6 +844,17 @@ class ExternalOrderLine(Base):
     mapping_status: Mapped[str] = mapped_column(String(16), default="unmapped", index=True)
     data_completeness: Mapped[str] = mapped_column(String(16), default="complete")
     payload_hash: Mapped[str] = mapped_column(String(72))
+    # ---- P7-S1/S2 成本锚定五件套（append-only 快照的物化锚点）----
+    # 红线（dev_task.p7-profit-center.md §5.3）：已锚定（resolved/backfilled）的行在订单
+    # 更新重建时必须原样继承，永不重新 as-of —— 否则「今天的进货」会改写历史利润。
+    # cost_snapshot_id 只做软引用（快照归档不阻塞订单），unit_cost 冗余固化当时的结论，
+    # 两者不一致即代表有人绕过了 append-only，属可巡检的信号。
+    cost_snapshot_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    unit_cost: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    # fee_rate 同时锚定：费率变更若影响历史订单，等于篡改历史利润（用户 2026-11-04 裁定 Q3）。
+    fee_rate: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    cost_status: Mapped[str] = mapped_column(String(16), default="missing", index=True)
+    anchored_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class DailySkuSale(Base):

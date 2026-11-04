@@ -107,8 +107,9 @@ def test_alembic_current_shows_head(tmp_path):
     # P2-3 新增 0021_external_sync_quality 后再次更新；
     # P2-4 新增 0022_external_sync_dead_letters 后再次更新；
     # P3-S1 新增 0023_purchase_approval 后再次更新；
-    # P6-S3 新增 0024_external_import_rejections 后再次更新）。
-    assert "0024_external_import_rejections" in current.stdout
+    # P6-S3 新增 0024_external_import_rejections 后再次更新；
+    # P7-S1 新增 0025_cost_snapshots 后再次更新）。
+    assert "0025_cost_snapshots" in current.stdout
     assert "head" in current.stdout
 
 

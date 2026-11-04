@@ -23,6 +23,7 @@ import uuid
 from urllib.parse import quote
 
 from fastapi import Body, Depends, File, Form, FastAPI, Query, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -109,6 +110,11 @@ from app.schemas import (
     InboundReceive,
     InboundResponse,
     ReceiptProgressResponse,
+    # P7-S1 成本快照
+    CostSnapshotCreate,
+    CostSnapshotListResponse,
+    CostImportPreviewResponse,
+    CostImportCommitResponse,
     InventoryPage,
     InboundListPage,
     InboundListItem,
@@ -440,7 +446,10 @@ async def request_context_middleware(request: Request, call_next):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_request: Request, exc: RequestValidationError):
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    # jsonable_encoder 不可省：pydantic v2 的 errors() 会把原始输入放进 `input` 字段，
+    # 遇到 Decimal / datetime 之类不可 JSON 序列化的对象时，直接塞进 JSONResponse 会抛
+    # TypeError → 中间件兜成 500（P7-S1 实测：负数单价的 422 变成 500，R-69）。
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
 
 
 @app.exception_handler(DomainError)
@@ -1525,6 +1534,235 @@ def confirm_inbound(inbound_id: int, request: Request, db: Session = Depends(get
         return _inbound_response_data(*result, db=db)
     except ValueError as exc:
         raise _warehouse_error(exc) from exc
+
+
+# ---------- P7-S1 成本快照（append-only 成本事实层） ----------
+
+_COST_KIND = "costs"
+_COST_IMPORT_MAX_ROWS = 500
+
+
+def _cost_parse(raw: bytes, column_mapping: str | None):
+    """成本 CSV 解析：复用 P6 全链路（编码探测 + 中文列头映射 + 二分隔离护栏）。
+
+    唯一分叉点是 kind —— 解析器仍由 `imports.parse_upload` 统一调度，
+    所以「记录数 == 行数」的计数判定与 `记录 + 异常 == 数据行` 收尾不变量原样生效。
+    """
+    import json as _json
+
+    from app.imports import parse_upload
+
+    user_mapping: dict[str, str] | None = None
+    if column_mapping:
+        try:
+            parsed = _json.loads(column_mapping)
+        except _json.JSONDecodeError as exc:
+            raise DomainError(code="MAPPING_INVALID", message="column_mapping 必须是 JSON 对象", http_status=422) from exc
+        if not isinstance(parsed, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()):
+            raise DomainError(code="MAPPING_INVALID", message="column_mapping 必须是字符串到字符串的对象", http_status=422) from exc
+        user_mapping = parsed
+    try:
+        return parse_upload(
+            raw, platform="", kind=_COST_KIND, defaults={}, column_mapping=user_mapping,
+        )
+    except ValueError as exc:
+        raise DomainError(code=str(exc) or "COST_IMPORT_INVALID", message=str(exc) or "成本文件无法解析", http_status=422) from exc
+
+
+@app.post("/api/finance/cost-snapshots/preview", response_model=CostImportPreviewResponse)
+async def cost_snapshot_preview(
+    request: Request,
+    file: UploadFile = File(...),
+    column_mapping: str | None = Form(default=None),
+):
+    """成本 CSV 预览：只解析不写库（与 P6 报表预览同语义，缺列 200 + missing 列表）。"""
+    require_principal(request, permission="catalog.write")
+    raw = await file.read()
+    outcome = _cost_parse(raw, column_mapping)
+    preview_rows = [
+        {
+            "sku_code": record.sku_code,
+            "unit_cost": f"{record.unit_cost:.2f}",
+            "effective_time": record.effective_time.isoformat() if record.effective_time else None,
+            "currency": record.currency,
+        }
+        for record in (outcome.records or [])[:20]
+    ]
+    return CostImportPreviewResponse(
+        platform=None,
+        kind=_COST_KIND,
+        total=outcome.rows_total,
+        detected_encoding=outcome.encoding,
+        csv_headers=outcome.csv_headers,
+        mapping_suggestion=outcome.mapping,
+        unmapped_columns=outcome.unmapped,
+        missing_required_fields=outcome.missing,
+        normalized_rows=preview_rows,
+        rejected_rows=[
+            {
+                "row_number": item.row_number,
+                "reason_code": item.reason_code,
+                "reason_message": item.reason_message,
+                "raw_data": item.raw_data,
+            }
+            for item in outcome.rejected[:_COST_IMPORT_MAX_ROWS]
+        ],
+        rejected_total=outcome.rejected_total,
+    )
+
+
+@app.post("/api/finance/cost-snapshots/import", response_model=CostImportCommitResponse)
+async def cost_snapshot_import(
+    request: Request,
+    db: Session = Depends(get_db),
+    file: UploadFile = File(...),
+    column_mapping: str | None = Form(default=None),
+):
+    """成本 CSV 入库。格式坏行在解析层拦截，SKU 解析失败在服务层拦截，两者都进 rejected。"""
+    principal = require_principal(request, permission="catalog.write")
+    raw = await file.read()
+    outcome = _cost_parse(raw, column_mapping)
+    if outcome.records is None:
+        # 列头层缺必填：与 P6 一致，入库阶段直接 422（预览阶段才返回 200 + missing）
+        raise DomainError(
+            code="COST_MISSING_FIELDS",
+            message=f"缺少必填列：{'、'.join(outcome.missing)}",
+            http_status=422,
+        )
+    from app.costs import ingest_cost_records
+
+    stats = ingest_cost_records(
+        db,
+        list(outcome.records),
+        workspace_id=principal.workspace_id,
+        created_by=principal.subject,
+        batch_id=sha256(raw).hexdigest()[:16],
+    )
+    rejected_rows = [
+        {
+            "row_number": item.row_number,
+            "reason_code": item.reason_code,
+            "reason_message": item.reason_message,
+            "raw_data": item.raw_data,
+        }
+        for item in outcome.rejected
+    ] + stats.rejected
+    logger.info(
+        "成本快照导入 actor=%s imported=%d skipped=%d rejected=%d total=%d",
+        principal.subject, stats.imported, stats.skipped, len(rejected_rows), outcome.rows_total,
+    )
+    return CostImportCommitResponse(
+        kind=_COST_KIND,
+        total=outcome.rows_total,
+        imported=stats.imported,
+        skipped=stats.skipped,
+        rejected_total=len(rejected_rows),
+        detected_encoding=outcome.encoding,
+        rejected_rows=rejected_rows[:_COST_IMPORT_MAX_ROWS],
+    )
+
+
+@app.post("/api/finance/cost-snapshots", response_model=CostSnapshotListResponse)
+def create_cost_snapshot_endpoint(
+    payload: CostSnapshotCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """单条手工录入成本。`source='manual'`，重复提交同值幂等（唯一约束兜底）。"""
+    principal = require_principal(request, permission="catalog.write")
+    from app.costs import SOURCE_MANUAL, resolve_sku_ids
+    from app.costs import create_cost_snapshot as create_snapshot
+
+    from datetime import datetime as _dt
+
+    resolved = resolve_sku_ids(db, workspace_id=principal.workspace_id, sku_codes=[payload.sku_code])
+    sku_id = resolved.get(payload.sku_code)
+    if sku_id is None:
+        raise DomainError(code="SKU_NOT_FOUND", message=f"找不到 SKU：{payload.sku_code}", http_status=404)
+    effective_time = payload.effective_time or _dt.utcnow()
+    batch = sha256(f"{payload.sku_code}:{effective_time.isoformat()}:{payload.unit_cost}".encode()).hexdigest()[:16]
+    create_snapshot(
+        db,
+        workspace_id=principal.workspace_id,
+        sku_id=sku_id,
+        unit_cost=payload.unit_cost,
+        effective_time=effective_time,
+        source=SOURCE_MANUAL,
+        source_ref=f"manual:{batch}",
+        currency=payload.currency,
+        note=payload.note,
+        created_by=principal.subject,
+    )
+    logger.info(
+        "成本快照录入 actor=%s sku_id=%d unit_cost=%s effective_time=%s",
+        principal.subject, sku_id, payload.unit_cost, effective_time.isoformat(),
+    )
+    items, total = _cost_list_rows(
+        db, workspace_id=principal.workspace_id, sku_code=payload.sku_code, limit=200, offset=0
+    )
+    return CostSnapshotListResponse(items=items, total=total)
+
+
+@app.get("/api/finance/cost-snapshots", response_model=CostSnapshotListResponse)
+def list_cost_snapshot_endpoint(
+    request: Request,
+    sku_code: str | None = Query(default=None),
+    sku_id: int | None = Query(default=None, gt=0),
+    start: str | None = Query(default=None),
+    end: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """成本快照查询（只读，按生效时间倒序分页）。"""
+    principal = require_principal(request, permission="catalog.read")
+    items, total = _cost_list_rows(
+        db,
+        workspace_id=principal.workspace_id,
+        sku_code=sku_code,
+        sku_id=sku_id,
+        start=start,
+        end=end,
+        limit=limit,
+        offset=offset,
+    )
+    return CostSnapshotListResponse(items=items, total=total)
+
+
+def _cost_list_rows(
+    db: Session,
+    *,
+    workspace_id: int,
+    sku_code: str | None = None,
+    sku_id: int | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """列表查询的薄封装：把字符串时间参数解析成 datetime（非法 → 422）。"""
+    from datetime import datetime as _dt
+
+    from app.costs import list_cost_snapshots
+
+    def _parse(value: str | None, field: str) -> _dt | None:
+        if not value:
+            return None
+        try:
+            return _dt.fromisoformat(value)
+        except ValueError as exc:
+            raise DomainError(code="TIME_INVALID", message=f"{field} 需为 ISO 时间", http_status=422) from exc
+
+    return list_cost_snapshots(
+        db,
+        workspace_id=workspace_id,
+        sku_code=sku_code,
+        sku_id=sku_id,
+        start=_parse(start, "start"),
+        end=_parse(end, "end"),
+        limit=limit,
+        offset=offset,
+    )
 
 
 @app.get("/api/inventory", response_model=InventoryPage)

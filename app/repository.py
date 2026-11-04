@@ -559,6 +559,7 @@ def _inbound_response_data(
                 "damaged_qty": line.damaged_qty,
                 "accepted_qty": (line.received_qty - line.damaged_qty) if order.status == "confirmed" else None,
                 "difference": (line.received_qty - line.expected_qty) if order.status != "expected" else None,
+                "unit_cost": line.unit_cost,
             }
             for line in lines
         ],
@@ -710,6 +711,9 @@ def receive_inbound(
             line = by_sku[int(item["sku_id"])]
             line.received_qty = item["received_qty"]
             line.damaged_qty = item["damaged_qty"]
+            # P7-S1：单价只在本次明确给出时才覆盖——重复上报不填价，不能把上次填的价清空。
+            if item.get("unit_cost") is not None:
+                line.unit_cost = item["unit_cost"]
         order.status = "received"
         order.received_at = _now()
         order.receive_idempotency_key = idempotency_key
@@ -739,8 +743,12 @@ def confirm_inbound(
         raise ValueError("INVALID_INBOUND_STATE")
 
     try:
+        # P7-S1：确认时刻先取一次——库存流水、入库单、成本快照三处必须共用同一时间锚点，
+        # 否则「快照生效时间」与「确认入库时间」会差几毫秒，as-of 抓取在边界上会抖。
+        confirmed_at = _now()
         order.confirm_idempotency_key = idempotency_key
         order.confirm_payload_hash = hashlib.sha256((idempotency_key or "confirm").encode()).hexdigest()
+        order.confirmed_at = confirmed_at
         for line in lines:
             accepted = line.received_qty - line.damaged_qty
             key = f"inbound:{order.id}:line:{line.id}:confirm"
@@ -761,8 +769,25 @@ def confirm_inbound(
                     balance = InventoryBalance(workspace_id=workspace_id, warehouse_id=order.warehouse_id, sku_id=line.sku_id, on_hand_qty=0)
                     db.add(balance)
                 balance.on_hand_qty += accepted
+                # P7-S1：确认入库即固化成本事实（append-only）。
+                # 与库存流水同一个 `transaction is None` 分支 → 幂等重放不会重复写快照；
+                # 无单价的存量入库单静默跳过，绝不阻塞收货。
+                snapshot_workspace = workspace_id if workspace_id is not None else order.workspace_id
+                if line.unit_cost is not None and snapshot_workspace is not None:
+                    from app.costs import SOURCE_INBOUND, create_cost_snapshot
+
+                    create_cost_snapshot(
+                        db,
+                        workspace_id=snapshot_workspace,
+                        sku_id=line.sku_id,
+                        unit_cost=line.unit_cost,
+                        effective_time=confirmed_at,
+                        source=SOURCE_INBOUND,
+                        source_ref=f"inbound:{order.id}:line:{line.id}",
+                        created_by=confirmed_by,
+                        commit=False,
+                    )
         order.status = "confirmed"
-        order.confirmed_at = _now()
         db.commit()
     except Exception:
         db.rollback()
