@@ -5,8 +5,11 @@
 """
 
 from functools import lru_cache
+from decimal import Decimal
+import json
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -84,6 +87,15 @@ class Settings(BaseSettings):
     api_tenant_id: str = "default"
     api_user_id: str = "api-user"
 
+    # P7 利润核算：平台费率。
+    # 为什么费率必须能锚定（dev_task.p7-profit-center.md §4.3）：若计算时读"当前配置"，
+    # 改一次 5%→8% 会让所有历史订单利润集体变化——这与「历史不因今天的变化而变」相悖。
+    # 故锚定时把取到的费率写进 external_order_lines.fee_rate，此后配置变更不影响已锚定行。
+    profit_platform_fee_rate: float = 0.05
+    # JSON: {"shopify": 0.06}；空串=只用全局默认。解析失败或费率越界在**启动期**抛错（fail-fast，
+    # 绝不静默降级成 0 —— 静默 0 会让利润虚高且无痕迹）。
+    profit_platform_fee_overrides: str = ""
+
     # 员工登录与角色工作台（启用后使用数据库 session，不把 API key 放进浏览器）
     employee_auth_enabled: bool = True
     demo_mode_enabled: bool = False
@@ -110,6 +122,57 @@ class Settings(BaseSettings):
     def resolve_path(self, value: str) -> Path:
         path = Path(value)
         return path if path.is_absolute() else self.project_root / path
+
+    @model_validator(mode="after")
+    def _validate_profit_fee(self) -> "Settings":
+        """费率合法性在**启动期**校验。
+
+        非法配置（负数、>1、JSON 坏）必须立刻炸掉进程，而不是静默降级成 0——
+        静默 0 会让所有利润虚高，且没有任何痕迹可追。
+        """
+        _check_fee_rate(Decimal(str(self.profit_platform_fee_rate)), "profit_platform_fee_rate")
+        for platform, rate in _parse_fee_overrides(self.profit_platform_fee_overrides).items():
+            _check_fee_rate(rate, f"profit_platform_fee_overrides[{platform}]")
+        return self
+
+
+def _check_fee_rate(rate: Decimal, label: str) -> None:
+    if rate < 0 or rate > 1:
+        raise ValueError(f"{label} 必须在 0~1 之间（当前 {rate}）")
+
+
+def _parse_fee_overrides(raw: str) -> dict[str, Decimal]:
+    """解析平台费率覆盖配置。空串 = 无覆盖。"""
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"profit_platform_fee_overrides 必须是合法 JSON 对象：{exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("profit_platform_fee_overrides 必须是 JSON 对象，例如 {\"shopify\": 0.06}")
+    overrides: dict[str, Decimal] = {}
+    for platform, value in parsed.items():
+        key = str(platform).strip().lower()
+        if not key:
+            raise ValueError("profit_platform_fee_overrides 含空平台名")
+        overrides[key] = Decimal(str(value))
+    return overrides
+
+
+def resolve_fee_rate(platform: str | None, settings: "Settings | None" = None) -> Decimal:
+    """取某平台的费率（Decimal，4 位小数）。
+
+    平台覆盖优先，无则全局默认。**锚定时调用一次并把结果写进订单行**，
+    此后配置怎么改都不影响已锚定的历史行。
+    """
+    active = settings or get_settings()
+    key = (platform or "").strip().lower()
+    rate = _parse_fee_overrides(active.profit_platform_fee_overrides).get(key) if key else None
+    if rate is None:
+        rate = Decimal(str(active.profit_platform_fee_rate))
+    return rate.quantize(Decimal("0.0001"))
 
 
 @lru_cache

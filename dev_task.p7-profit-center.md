@@ -1,9 +1,31 @@
 # dev_task.p7-profit-center — P7 利润核算与对账中心（Profit Center）
 
-- 版本：**v1.1（定稿，2026-11-04 09:20 裁定）**
-- 基线：`feat/warehouse-mvp@91ee44c`，全量 **574 passed / 0 failed**
-- alembic head：`0024_external_import_rejections`（本切片顺延 `0025`）
-- 状态：**Q1–Q7 全部采纳推荐值，定稿开工。首刀 P7-S1 见 §13。**
+- 版本：**v1.2（S1 已交付，S2 施工规格见 §14）**
+- 基线：`feat/warehouse-mvp@d25ebbf`，全量 **586 passed / 0 failed**（S1 交付后）
+- alembic head：`0025_cost_snapshots`（S2 无需新迁移，锚定五列已在 0025 内建好）
+- 状态：**S1 完成；S2 进行中；S3 未开工。**
+
+## 0.2 S2 裁定记录（2026-11-04 09:48）
+
+用户四条红线（原话要点，已逐条落入代码注释与测试）：
+
+1. `ingest_orders` 对新订单行执行 as-of 抓取（`effective_time <= T_sale` 最近一条），
+   锚定 `cost_snapshot_id` / `unit_cost` / `fee_rate`；
+2. **严防「删除重建导致锚定丢失」**：已锚定行必须**直接继承**，绝不能重新查成本表；
+3. 回填端点必须支持 `dry_run`、只补 `missing`，并验证历史 `resolved` 行利润不变；
+4. **F-11 / F-12 一字不差跑通**：F-11 = 锚定后插入新快照利润绝对不变；
+   F-12 = 订单二次 ingest 锚定五件套不丢。
+
+**编号重排（本版生效，覆盖 v1.1 的 S2 编号）**：
+
+| 新编号 | 含义 | v1.1 旧编号 |
+|---|---|---|
+| F-11 | 锚定固化（★核心红线） | 原 F-12 |
+| F-12 | 重建继承（★必踩坑） | 原 F-13 |
+| F-13 | as-of 时间对齐 | 原 F-11 |
+| F-14 | 回填（dry_run / 只补 missing / 幂等 / 日志） | 原 F-14 |
+| F-15 | unmapped 与 missing 归因分离 | 原 F-15 |
+| F-16 | 同步路径查询预算 ≤1 | 原 F-16 |
 
 ## 0.1 裁定记录（2026-11-04 09:17，七项全采纳推荐值）
 
@@ -750,3 +772,69 @@ downgrade():
 ---
 
 **Q1–Q7 已裁定，v1.1 定稿。首刀 P7-S1 规格见 §13，可按其直接实施。**
+
+---
+
+## 14. P7-S2 施工规格（锚定 + 继承 + 回填）——已实施，留档
+
+### 14.1 改动清单（6 文件，零新迁移）
+
+| 文件 | 改动 |
+|---|---|
+| `app/config.py` | 新增 `profit_platform_fee_rate` / `profit_platform_fee_overrides`；`model_validator` 启动期校验（0~1 与 JSON 合法性，非法直接炸进程）；`resolve_fee_rate(platform, settings=None) -> Decimal` |
+| `app/external_orders.py` | `_anchor_pending_lines()` 批量 as-of（**1 条查询**）；`ingest_orders` 增待锚定收集 + 旧行继承 |
+| `app/costs.py` | `backfill_missing_costs()`（只补 missing、dry_run 零写库、置 `backfilled`） |
+| `app/schemas.py` | `CostBackfillRequest` / `CostBackfillSample` / `CostBackfillResponse` |
+| `app/main.py` | `POST /api/finance/cost-backfill`（`catalog.write`，结构化日志） |
+| `tests/test_p7s2_cost_anchoring.py` | F-11..F-16 + **F-12b**（missing 也继承）+ **F-14b/c**（权限、无候选）+ 费率漂移附带 |
+
+**无需 0026**：`external_order_lines` 的锚定五列在 `0025` 内已建好（S1 一并建列不落数据）。
+
+### 14.2 锚定的执行顺序（顺序本身就是正确性）
+
+```
+循环内：每行只做「判定」——unmapped / 继承 / 加入 pending
+循环后：_anchor_pending_lines() 一次 SELECT 取全部候选快照 → 内存二分 → 回填
+        db.flush()
+```
+
+**为什么不在循环内锚定**：循环内逐行查成本表 = N+1，直接违反红线 R-2（新增查询 ≤1）。
+把「判定」与「抓取」拆开，是同时满足「1 条查询」与「每行独立 as-of」的唯一办法。
+
+### 14.3 继承判定的三个分支
+
+| 情形 | 行为 | 理由 |
+|---|---|---|
+| `internal_sku_id is None` | `cost_status='unmapped'`，只写 `fee_rate` + `anchored_at` | 没有内部 SKU 谈不上「缺成本」（Q6 归因分离） |
+| 已锚定（`resolved`/`backfilled`）且 `external_sku` 未变 | **原样继承五件套** | 红线 R-3，绝不重抓 |
+| 已锚定但 `external_sku` 变了 | 重新 as-of | 旧锚定锚的是**别的 SKU** 的成本，沿用等于用错成本 |
+| 其余（新行 / `missing` / `unmapped→mapped`） | 进 pending 走 as-of | — |
+
+**注意 `missing` 也在「继承」范围内**：首次没成本，事后补了成本再遇平台更新，
+仍然保持 `missing`。自动变 `resolved` 等于静默改写历史利润——要补只能走回填（F-12b 锁死）。
+
+### 14.4 费率与成本分开锚定
+
+即使成本未命中（`missing`），`fee_rate` 与 `anchored_at` **照样写入**。理由：
+费率是配置事实，当时就能确定；先落住，回填时就不必再读「当时的配置」——那时配置早变了。
+若费率也留空，回填那天读到的 8% 会污染一笔 5% 时代的历史订单。
+
+### 14.5 回填的安全边界
+
+- `dry_run` 默认 **True**。财务动作先预演；调用方必须显式 `dry_run=false`。
+- `mode=next_after_sale`（默认）：取销售**之后**最早一条；`mode=nearest`：绝对时间差最小，
+  并列取更早一条（不引入未来成本）。
+- 只扫 `cost_status='missing' AND internal_sku_id IS NOT NULL`；`resolved`/`backfilled` 永不覆盖。
+- 回填后置 `backfilled`（与 `resolved` 区分），看板可说明「其中 N 笔为回填成本」。
+- 幂等：补过的行不再是 `missing`，第二次 `scanned=0`。
+- 日志：`利润成本回填 actor=%s mode=%s scanned=%d updated=%d skipped=%d dry_run=%s`，
+  dry_run 也记（要能审计「谁预演过什么」）。
+
+### 14.6 验收标准（实测全部满足）
+
+- F-11 锚定后插入 99 元新快照 → 订单行 `unit_cost` / `cost_snapshot_id` / `fee_rate` /
+  `anchored_at` 四项零变化。
+- F-12 二次 ingest（改价 + `event_version=2`）→ 行数仍为 1、五件套与首次完全一致、
+  `cost_status` 不退回 `missing`。
+- F-16 一批 3 行（跨 2 个 SKU）只发 **1 条** `cost_snapshots` 查询；
+  已锚定行重建时该查询数为 **0**。

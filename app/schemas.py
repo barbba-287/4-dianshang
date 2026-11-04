@@ -1583,3 +1583,48 @@ class CostImportCommitResponse(BaseModel):
     rejected_total: int = 0
     detected_encoding: str = ""
     rejected_rows: list[dict] = Field(default_factory=list)
+
+
+# ---------- P7-S2 成本回填（唯一允许改写历史成本的通道） ----------
+
+
+class CostBackfillRequest(BaseModel):
+    """成本回填请求。
+
+    `dry_run` 默认 **True**：这是财务动作，先预演再落库是纪律不是可选。
+    调用方必须显式传 `dry_run=false` 才真正写库。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    # next_after_sale：取销售时刻**之后**最早的一条快照（视作当次销售的实际补货成本，推荐）
+    # nearest：绝对时间差最小的一条（会引入未来成本，更激进）
+    mode: Literal["next_after_sale", "nearest"] = "next_after_sale"
+    sku_ids: list[int] | None = None
+    dry_run: bool = True
+    limit: int = Field(default=1000, ge=1, le=5000)
+
+
+class CostBackfillSample(BaseModel):
+    order_line_id: int
+    external_sku: str
+    internal_sku_id: int
+    sale_time: str
+    cost_snapshot_id: int
+    unit_cost: str
+    fee_rate: str | None = None
+
+
+class CostBackfillResponse(BaseModel):
+    """回填结果。
+
+    `scanned` = 扫到的 missing 行数；`updated` = 能补上成本的行数；
+    `skipped` = 扫到但找不到候选快照（保持 missing，不动）。
+    不变式：`updated + skipped == scanned`。
+    """
+
+    mode: str
+    dry_run: bool
+    scanned: int = 0
+    updated: int = 0
+    skipped: int = 0
+    samples: list[CostBackfillSample] = Field(default_factory=list)

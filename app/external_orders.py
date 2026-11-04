@@ -14,7 +14,9 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.connectors import ExternalOrderRecord
+from app.config import resolve_fee_rate
 from app.db import (
+    CostSnapshot,
     DailySkuSale,
     ExternalAccount,
     ExternalOrder,
@@ -22,6 +24,13 @@ from app.db import (
     ExternalProductMapping,
     ProductSku,
 )
+
+# P7-S2：已锚定状态。这两个状态的行在订单更新重建时**原样继承**，永不重新 as-of。
+# 红线 R-3：否则「今天补录的成本」会改写一笔三天前更新过的订单的历史利润。
+ANCHORED_COST_STATUSES = ("resolved", "backfilled")
+COST_STATUS_RESOLVED = "resolved"
+COST_STATUS_MISSING = "missing"
+COST_STATUS_UNMAPPED = "unmapped"
 
 
 @dataclass
@@ -209,6 +218,59 @@ def rebuild_daily_sales(
     db.commit()
 
 
+def _anchor_pending_lines(
+    db: Session,
+    pending: list[tuple[ExternalOrderLine, int, datetime, str]],
+    *,
+    workspace_id: int,
+) -> None:
+    """对本次批次里「需要新建锚定」的订单行做一次批量 as-of 抓取。
+
+    查询预算（红线 R-2）：本函数只发 **1 条** SELECT，绝不在循环里查库。
+    已锚定行的继承由调用方完成，根本不进本函数——它们不该碰成本表。
+    """
+    if not pending:
+        return
+    sku_ids = {item[1] for item in pending}
+    upper_bound = max(item[2] for item in pending)
+    snapshots = db.scalars(
+        select(CostSnapshot)
+        .where(
+            CostSnapshot.workspace_id == workspace_id,
+            CostSnapshot.sku_id.in_(sku_ids),
+            CostSnapshot.effective_time <= upper_bound,
+        )
+        .order_by(
+            CostSnapshot.sku_id.asc(),
+            CostSnapshot.effective_time.asc(),
+            CostSnapshot.id.asc(),
+        )
+    ).all()
+    by_sku: dict[int, list[CostSnapshot]] = defaultdict(list)
+    for snapshot in snapshots:
+        by_sku[snapshot.sku_id].append(snapshot)
+
+    anchored_at = datetime.utcnow()
+    for line, sku_id, sale_time, platform in pending:
+        # 费率与成本分开锚定：成本未命中时费率仍可确定（费率是配置事实）。
+        # 先落 fee_rate，将来回填就不必再读"当时的配置"——那时的配置早已可能变了。
+        line.fee_rate = resolve_fee_rate(platform)
+        line.anchored_at = anchored_at
+        hit: CostSnapshot | None = None
+        for snapshot in reversed(by_sku.get(sku_id, ())):
+            if snapshot.effective_time <= sale_time:
+                hit = snapshot
+                break
+        if hit is None:
+            line.cost_snapshot_id = None
+            line.unit_cost = None
+            line.cost_status = COST_STATUS_MISSING
+        else:
+            line.cost_snapshot_id = hit.id
+            line.unit_cost = hit.unit_cost
+            line.cost_status = COST_STATUS_RESOLVED
+
+
 def ingest_orders(
     db: Session,
     records: list[ExternalOrderRecord],
@@ -220,6 +282,8 @@ def ingest_orders(
         raise ValueError("WORKSPACE_CONTEXT_REQUIRED")
     stats = SalesImportStats(total=len(records), sync_run_id=sync_run_id, affected_dates=[])
     touched: set[tuple[int, str]] = set()
+    # P7-S2：待锚定行先攒着，循环外一次性预取快照（红线 R-2：新增查询 ≤1）。
+    pending: list[tuple[ExternalOrderLine, int, datetime, str]] = []
     try:
         for record in records:
             account = ensure_external_account(
@@ -232,6 +296,8 @@ def ingest_orders(
                 ExternalOrder.external_account_id == account.id,
                 ExternalOrder.external_order_no == record.external_order_no,
             ))
+            # (external_sku, cost_status, cost_snapshot_id, unit_cost, fee_rate, anchored_at)
+            inherited: dict[str, tuple[str, str, int | None, Decimal | None, Decimal | None, datetime | None]] = {}
             if existing is not None:
                 newer = (record.event_version is not None and (existing.event_version is None or record.event_version > existing.event_version)) or (
                     record.event_version is None and _utc_naive(record.external_updated_at) > _utc_naive(existing.external_updated_at)
@@ -242,9 +308,23 @@ def ingest_orders(
                 if not newer:
                     stats.stale += 1
                     continue
-                old_day = existing.external_created_at.date()
-                for old_line in db.scalars(select(ExternalOrderLine).where(ExternalOrderLine.external_order_id == existing.id)).all():
-                    touched.add((account.id, old_line.external_sku))
+                old_lines = db.scalars(
+                    select(ExternalOrderLine).where(ExternalOrderLine.external_order_id == existing.id)
+                ).all()
+                # 先把锚定五件套抄成普通元组再删行——挂着的 ORM 对象随 DELETE 失效，
+                # 直接引用会在重建时读到脏状态（这正是「成本神秘丢失」的经典成因）。
+                inherited = {
+                    line.external_line_id: (
+                        line.external_sku,
+                        line.cost_status or COST_STATUS_MISSING,
+                        line.cost_snapshot_id,
+                        line.unit_cost,
+                        line.fee_rate,
+                        line.anchored_at,
+                    )
+                    for line in old_lines
+                }
+                touched.update((account.id, line.external_sku) for line in old_lines)
                 db.execute(delete(ExternalOrderLine).where(ExternalOrderLine.external_order_id == existing.id))
                 order = existing
                 stats.updated += 1
@@ -278,6 +358,7 @@ def ingest_orders(
             order.sync_run_id = sync_run_id
             order.data_completeness = record.data_completeness
             order.status_reason = record.status_reason
+            sale_time = _utc_naive(record.external_created_at)
             for line in record.lines:
                 mapping = db.scalar(select(ExternalProductMapping).where(
                     ExternalProductMapping.workspace_id == workspace_id,
@@ -285,7 +366,7 @@ def ingest_orders(
                     ExternalProductMapping.external_sku == line.external_sku,
                 ))
                 internal_id = mapping.internal_sku_id if mapping and mapping.mapping_status == "mapped" else None
-                db.add(ExternalOrderLine(
+                row = ExternalOrderLine(
                     workspace_id=workspace_id, external_order_id=order.id,
                     external_line_id=line.external_line_id, external_sku=line.external_sku,
                     internal_sku_id=internal_id, ordered_qty=line.ordered_qty,
@@ -293,9 +374,37 @@ def ingest_orders(
                     gross_amount=line.gross_amount, refund_amount=line.refund_amount,
                     currency=line.currency, mapping_status="mapped" if internal_id else "unmapped",
                     data_completeness=record.data_completeness, payload_hash=line.payload_hash,
-                ))
+                )
+                db.add(row)
+                previous = inherited.get(line.external_line_id)
+                if internal_id is None:
+                    # 没有内部 SKU → 成本无从谈起，也不能算"缺失成本"（归因分离，Q6 裁定）。
+                    row.cost_status = COST_STATUS_UNMAPPED
+                    row.fee_rate = resolve_fee_rate(record.platform)
+                    row.anchored_at = datetime.utcnow()
+                elif (
+                    previous
+                    and previous[1] in ANCHORED_COST_STATUSES
+                    and previous[0] == line.external_sku
+                ):
+                    # ★ 红线 R-3：已锚定 → 原样继承五件套，绝不重新 as-of。
+                    # 若在这里重查成本表，「今天补录的成本」就会改写一笔三天前更新过的订单的
+                    # 历史利润——这是本切片唯一不可救的架构级错误，宁可保留旧结论。
+                    # 附带比对 external_sku：外部行标识若换了商品，旧锚定锚的是别的 SKU 的成本，
+                    # 沿用等于用错成本，那种情况落到下面的重新抓取分支。
+                    row.cost_snapshot_id = previous[2]
+                    row.unit_cost = previous[3]
+                    row.fee_rate = previous[4]
+                    row.cost_status = previous[1]
+                    row.anchored_at = previous[5]
+                else:
+                    # 新行 / 上次未命中（missing）/ 从 unmapped 升级为 mapped → 走 as-of。
+                    pending.append((row, internal_id, sale_time, record.platform))
                 touched.add((account.id, line.external_sku))
             stats.affected_dates.append(record.external_created_at.date().isoformat())
+        # 成本锚定必须在 flush 之前：此时行对象仍处于 pending 状态、字段可直接赋值，
+        # 且整批只发 1 条快照查询（红线 R-2）。
+        _anchor_pending_lines(db, pending, workspace_id=workspace_id)
         db.flush()
         for account_id, external_sku in touched:
             _rebuild_key(db, workspace_id=workspace_id, external_account_id=account_id, external_sku=external_sku)

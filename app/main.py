@@ -115,6 +115,8 @@ from app.schemas import (
     CostSnapshotListResponse,
     CostImportPreviewResponse,
     CostImportCommitResponse,
+    CostBackfillRequest,
+    CostBackfillResponse,
     InventoryPage,
     InboundListPage,
     InboundListItem,
@@ -1763,6 +1765,38 @@ def _cost_list_rows(
         limit=limit,
         offset=offset,
     )
+
+
+@app.post("/api/finance/cost-backfill", response_model=CostBackfillResponse)
+def cost_backfill(
+    payload: CostBackfillRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """P7-S2 成本回填：唯一允许改写历史成本的通道。
+
+    - `dry_run` 默认 **true**：财务动作先预演，调用方必须显式传 false 才落库。
+    - 只补 `cost_status='missing'`，`resolved` / `backfilled` 永不覆盖（红线 R-3）。
+    - 回填后状态置 `backfilled`，与 `resolved` 区分，看板可说明「其中 N 笔为回填成本」。
+    """
+    principal = require_principal(request, permission="catalog.write")
+    from app.costs import backfill_missing_costs
+
+    result = backfill_missing_costs(
+        db,
+        workspace_id=principal.workspace_id,
+        mode=payload.mode,
+        sku_ids=payload.sku_ids,
+        dry_run=payload.dry_run,
+        limit=payload.limit,
+        actor=principal.subject,
+    )
+    logger.info(
+        "利润成本回填 actor=%s mode=%s scanned=%d updated=%d skipped=%d dry_run=%s",
+        principal.subject, result["mode"], result["scanned"], result["updated"],
+        result["skipped"], result["dry_run"],
+    )
+    return CostBackfillResponse(**result)
 
 
 @app.get("/api/inventory", response_model=InventoryPage)

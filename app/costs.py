@@ -363,3 +363,121 @@ def list_cost_snapshots(
         for snapshot, sku_code_value in rows
     ]
     return items, total
+
+
+# ---------------------------------------------------------------------------
+# P7-S2 成本回填：唯一允许改写历史成本的通道（显式触发 + dry_run + 只补 missing）
+# ---------------------------------------------------------------------------
+
+BACKFILL_NEXT_AFTER_SALE = "next_after_sale"
+BACKFILL_NEAREST = "nearest"
+BACKFILL_MODES = (BACKFILL_NEXT_AFTER_SALE, BACKFILL_NEAREST)
+_SAMPLE_LIMIT = 20
+
+
+def backfill_missing_costs(
+    db: Session,
+    *,
+    workspace_id: int,
+    mode: str = BACKFILL_NEXT_AFTER_SALE,
+    sku_ids: list[int] | None = None,
+    dry_run: bool = True,
+    limit: int = 1000,
+    actor: str | None = None,
+) -> dict:
+    """给「当初没有成本」的订单行补成本。
+
+    红线（dev_task.p7-profit-center.md §2.3 / §8 R-3）：
+
+    - **只处理 `cost_status='missing'`**。`resolved` / `backfilled` 的行永不覆盖——
+      否则回填就成了「批量改写历史利润」的漏洞。
+    - `dry_run=True` 时**零写库**（连 flush 都不发），只回报将被改写的行数与样例。
+    - 回填后置 `cost_status='backfilled'`，与 `resolved` 区分，看板可说明「其中 N 笔为回填成本」。
+    - 重复调用幂等：补过的行不再是 `missing`，第二次扫不到。
+    """
+    if mode not in BACKFILL_MODES:
+        raise ValueError(f"不支持的回填模式: {mode}")
+
+    from app.db import ExternalOrder, ExternalOrderLine
+
+    filters = [
+        ExternalOrderLine.workspace_id == workspace_id,
+        ExternalOrderLine.cost_status == "missing",
+        ExternalOrderLine.internal_sku_id.is_not(None),
+    ]
+    if sku_ids:
+        filters.append(ExternalOrderLine.internal_sku_id.in_(list(sku_ids)))
+
+    rows = db.execute(
+        select(ExternalOrderLine, ExternalOrder)
+        .join(ExternalOrder, ExternalOrder.id == ExternalOrderLine.external_order_id)
+        .where(*filters)
+        .order_by(ExternalOrderLine.id.asc())
+        .limit(max(1, min(limit, 5000)))
+    ).all()
+
+    scanned = len(rows)
+    result: dict = {
+        "mode": mode, "dry_run": dry_run,
+        "scanned": scanned, "updated": 0, "skipped": 0, "samples": [],
+    }
+    if not rows:
+        return result
+
+    needed = {int(line.internal_sku_id) for line, _order in rows if line.internal_sku_id is not None}
+    snapshots = db.scalars(
+        select(CostSnapshot)
+        .where(CostSnapshot.workspace_id == workspace_id, CostSnapshot.sku_id.in_(needed))
+        .order_by(CostSnapshot.sku_id.asc(), CostSnapshot.effective_time.asc(), CostSnapshot.id.asc())
+    ).all()
+    by_sku: dict[int, list[CostSnapshot]] = {}
+    for snapshot in snapshots:
+        by_sku.setdefault(snapshot.sku_id, []).append(snapshot)
+
+    now = datetime.utcnow()
+    for line, order in rows:
+        candidates = by_sku.get(int(line.internal_sku_id), []) if line.internal_sku_id is not None else []
+        sale_time = order.external_created_at
+        hit: CostSnapshot | None = None
+        if mode == BACKFILL_NEAREST:
+            if candidates:
+                # 绝对时间差最小；并列时取更早的一条（同差取历史侧，不引入未来成本）
+                hit = min(
+                    candidates,
+                    key=lambda snap: (abs((snap.effective_time - sale_time).total_seconds()), snap.effective_time),
+                )
+        else:
+            for snapshot in candidates:
+                if snapshot.effective_time > sale_time:
+                    hit = snapshot
+                    break
+        if hit is None:
+            result["skipped"] += 1
+            continue
+
+        result["updated"] += 1
+        if len(result["samples"]) < _SAMPLE_LIMIT:
+            result["samples"].append({
+                "order_line_id": line.id,
+                "external_sku": line.external_sku,
+                "internal_sku_id": int(line.internal_sku_id or 0),
+                "sale_time": sale_time.isoformat(),
+                "cost_snapshot_id": hit.id,
+                "unit_cost": f"{Decimal(hit.unit_cost):.2f}",
+                "fee_rate": f"{Decimal(line.fee_rate):.4f}" if line.fee_rate is not None else None,
+            })
+        if dry_run:
+            continue
+        line.cost_snapshot_id = hit.id
+        line.unit_cost = hit.unit_cost
+        line.cost_status = "backfilled"
+        line.anchored_at = now
+        if line.fee_rate is None:
+            # 首次锚定理论上已经写过费率；这里只兜底历史脏数据。
+            from app.config import resolve_fee_rate
+
+            line.fee_rate = resolve_fee_rate(order.platform)
+
+    if not dry_run:
+        db.commit()
+    return result
