@@ -1,9 +1,25 @@
 # dev_task.p7-profit-center — P7 利润核算与对账中心（Profit Center）
 
-- 版本：v1.0（草案，2026-11-04）
+- 版本：**v1.1（定稿，2026-11-04 09:20 裁定）**
 - 基线：`feat/warehouse-mvp@91ee44c`，全量 **574 passed / 0 failed**
 - alembic head：`0024_external_import_rejections`（本切片顺延 `0025`）
-- 状态：**Q1–Q7 待裁定**，裁定后升 v1.1 定稿开工
+- 状态：**Q1–Q7 全部采纳推荐值，定稿开工。首刀 P7-S1 见 §13。**
+
+## 0.1 裁定记录（2026-11-04 09:17，七项全采纳推荐值）
+
+| # | 裁定 | 备注 |
+|---|---|---|
+| Q1 | 入库报单价（主）+ 手工 CSV（兜底）双入口 | — |
+| Q2 | 按需查询计算，同步路径只锚定不聚合 | 不引 background 任务 |
+| Q3 | **费率锚定进快照** | 用户原话：「费率变更是财务大忌，必须写入快照」 |
+| Q4 | 允许回填，但显式触发 + `dry_run` + 只补 missing | — |
+| Q5 | `Settings` 全局 5% + `platform` override | — |
+| Q6 | `unmapped` **不计入**黄色成本提示 | 单独小字说明 |
+| Q7 | 三刀：S1 成本入口 → S2 锚定+回填 → S3 引擎+看板 | — |
+
+S1 开工时用户追加两条硬要求（已落入 §13.2 / §13.3）：
+1. `InboundReceiveLine` 加 `unit_cost` 的同时，**前端必须有「预估总成本」实时计算展示**；
+2. 手工 CSV **必须完全复用 P6 刚修好的「静默丢行」护栏**（计数判定 + 二分隔离），绝不允许脏数据污染成本库。
 
 ---
 
@@ -430,8 +446,8 @@ KPI 形态（**严格照 `gmv` 的范式，别自创**）：
 
 | 切片 | 内容 | 预估改动 | 验收 |
 |---|---|---|---|
-| **P7-S1** | `0025` migration + `CostSnapshot` 模型 + `inbound_lines.unit_cost` + `InboundReceiveLine` + `confirm_inbound` 落快照 + 手工录入/导入/查询三端点 | 5 文件 | 快照幂等、入库不异常、零回归 |
-| **P7-S2** | `ingest_orders` 锚定 + 旧行继承 + 回填端点 + `external_order_lines` 五列落地 | 3 文件 | **锚定固化测试**（F-4/F-5 是验收闸） |
+| **P7-S1** | `0025` 全部结构 + `CostSnapshot` 模型 + `app/costs.py` + `inbound_lines.unit_cost` + `InboundReceiveLine` + `confirm_inbound` 落快照 + 手工录入/CSV 导入/查询三端点 + `warehouse.html` 单价与预估总成本 + `sources.html` 成本导入入口 | 10 文件 | 见 §13.6 |
+| **P7-S2** | `ingest_orders` 锚定 + 旧行继承 + 回填端点 | 3 文件 | **锚定固化测试**（F-11/F-12 是验收闸） |
 | **P7-S3** | `app/finance.py` 利润引擎 + cockpit KPI/黄条/排行 + 前端面板 + 锚点注册 | 6 文件 | 口径对拍 + 前端渲染 + 全量绿 |
 
 每刀 < 1.5h。若 S1 与 S2 合并超时，按 `p7s1a` / `p7s1b` 再拆（沿用 P6-S1 做法）。
@@ -457,32 +473,52 @@ KPI 形态（**严格照 `gmv` 的范式，别自创**）：
 
 ---
 
-## 9. 测试计划（F-1..F-16，基线 574 → 预期 ~590）
+## 9. 测试计划（F-1..F-24，按切片归属；基线 574 → 预期 ~595）
+
+### S1 成本入口（F-1..F-10，预期 +10 → ~584）
 
 | 编号 | 断言 | 说明 |
 |---|---|---|
-| F-1 | 确认入库 → `cost_snapshots` 落 1 行，`effective_time == confirmed_at`，`source='inbound_confirm'` | 主入口 |
-| F-2 | 重复确认入库（幂等重放）→ 快照仍 1 行 | 幂等 |
-| F-3 | as-of 抓取：有 T-10天/T-2天/未来 三条快照，T_sale=T-5天 → 命中 T-10天那条 | 时间对齐 |
-| F-4 | **锚定固化**：锚定后再插一条新快照 → 订单行 `unit_cost` 与利润**完全不变** | ★核心红线 |
-| F-5 | **重建继承**：同一订单二次 ingest（改价）→ 锚定五件套原样保留，`cost_status` 不退回 missing | ★必踩坑 |
-| F-6 | 无快照 → `cost_status='missing'`，利润 Unknown，计入 `missing_cost_order_count`（**按订单去重**） | 黄条口径 |
-| F-7 | 无内部 SKU 映射 → `cost_status='unmapped'`，**不计入**黄条的 X | 归因分离 |
-| F-8 | 回填：`dry_run=true` 零写库；`mode=next_after_sale` 只补 missing、不覆盖 resolved；重复回填幂等 | 回填 |
-| F-9 | 回填写结构化日志（自带 handler 捕获，照 E-6 范式） | 可审计 |
-| F-10 | 利润公式对拍：手算 = 接口值（含退款/取消净数量、平台费扣除） | 口径 |
-| F-11 | 改 `profit_platform_fee_rate` 后，已锚定行利润不变；新订单用新费率 | 费率锚定 |
-| F-12 | 多币种：KPI `value=null`、`multi_currency=true`、排行按币种分组 | 不折算 |
-| F-13 | 排行：`winners` 降序 Top10、`losers` 仅负利润升序 Top10、空态返回空数组不报错 | 排行 |
-| F-14 | 权限：`analytics.read` 可读利润，无权限 403；`catalog.write` 才能录入/回填 | 权限 |
-| F-15 | 只读纪律：`grep` 守 `cockpit.py` 无写操作；`ingest_orders` 新增查询 ≤1（SQL 计数断言） | 红线 |
-| F-16 | 存量兼容：零 `cost_snapshots` 数据时 `/api/dashboard/cockpit` 不 500，KPI `quality=insufficient` | 上线安全 |
+| F-1 | 确认入库（带单价）→ `cost_snapshots` 落 1 行，`effective_time == confirmed_at`，`source='inbound_confirm'`，`source_ref` 格式正确 | 主入口 |
+| F-2 | 重复确认入库（幂等重放）→ 快照仍 1 行；并发重复确认靠唯一约束兜住 | 幂等 |
+| F-3 | 存量入库单无 `unit_cost` → 确认入库**不报错、不写快照**，`received/confirmed` 流转照旧 | 上线安全 |
+| F-4 | 手工单条录入：负数/非法 SKU/超长备注被拒（422），合法落库 `source='manual'` | 校验 |
+| F-5 | 成本 CSV 正常路径：中文列头（商品编码/成本单价/生效时间）自动映射，3 行全进，`encoding` 正确 | 复用 P6-S2 |
+| F-6 | **静默丢行护栏**：`unit_cost=abc` 行进 `rejected` 且 `reason_code` 有值；断言 `imported + rejected == rows_total`（计数不变量） | ★用户硬要求 |
+| F-7 | 成本 CSV 重传幂等：同文件二次导入不产生第二组快照（`source_ref` 唯一） | 幂等 |
+| F-8 | 查询分页 + 权限：`catalog.read` 可读、无权限 403、`catalog.write` 才能写入 | 权限 |
+| F-9 | 页面契约：`warehouse.html` 含 `data-unit-cost` 输入与预估总成本节点；`sources.html` 含成本导入入口 | 前端 |
+| F-10 | 全量回归 574 → ~584，0 failed | 收口 |
+
+### S2 锚定与回填（F-11..F-16 → ~590）
+
+| 编号 | 断言 | 说明 |
+|---|---|---|
+| F-11 | as-of 抓取：有 T-10天/T-2天/未来 三条快照，T_sale=T-5天 → 命中 T-10天那条 | 时间对齐 |
+| F-12 | **锚定固化**：锚定后再插新快照 → 订单行 `unit_cost` 与利润**完全不变** | ★核心红线 |
+| F-13 | **重建继承**：同一订单二次 ingest（改价）→ 锚定五件套原样保留，`cost_status` 不退回 missing | ★必踩坑 |
+| F-14 | 回填：`dry_run=true` 零写库；`next_after_sale` 只补 missing、不覆盖 resolved；重复回填幂等；结构化日志可捕获 | 回填 |
+| F-15 | `unmapped` 与 `missing` 归因分离：前者不计入黄条 X | Q6 |
+| F-16 | 同步路径查询预算：`ingest_orders` 新增查询 ≤1（SQL 计数断言） | 红线 R-2 |
+
+### S3 引擎与看板（F-17..F-24 → ~595）
+
+| 编号 | 断言 | 说明 |
+|---|---|---|
+| F-17 | 利润公式对拍：手算 = 接口值（净数量、退款、平台费扣除） | 口径 |
+| F-18 | 费率锚定：改 `profit_platform_fee_rate` 后已锚定行利润不变，新订单用新费率 | 财务红线 |
+| F-19 | 多币种：KPI `value=null`、`multi_currency=true`、排行按币种分组 | 不折算 |
+| F-20 | 排行：`winners` 降序 Top10、`losers` 仅负利润升序 Top10、空态返回空数组不报错 | 排行 |
+| F-21 | 黄条：`missing>0` 才出现，文案严格「有 X 笔订单因缺失入库成本未能计算利润」，X 按订单去重 | 文案 |
+| F-22 | 只读纪律：`grep` 守 `cockpit.py` 无 `db.add/commit/delete/flush` | 红线 R-4 |
+| F-23 | 存量兼容：零快照时 `/api/dashboard/cockpit` 不 500，KPI `quality=insufficient` | 上线安全 |
+| F-24 | 前端渲染：KPI 卡片插在 GMV 之后、排行双列渲染、空态有文案 | 前端 |
 
 **连带修改（已知，实施时一并登记台账）**：
 1. alembic head 断言 `0024` → `0025`
-2. `cockpit.html` `renderKpis` 数组（若有测试断言顺序则连带）
-3. `_PAGE_ANCHORS` 新增锚点（若有锚点自检测试则连带）
-4. cockpit 查询条数上限 6→7（`LIMITATIONS` 文案 + 模块 docstring 同步）
+2. `cockpit.html` `renderKpis` 数组追加 `'estimated_profit'`（S3）
+3. `_PAGE_ANCHORS` 新增锚点（S3）
+4. cockpit 查询条数上限 6→7（S3，`LIMITATIONS` 文案 + 模块 docstring 同步）
 
 ---
 
@@ -541,4 +577,176 @@ KPI 形态（**严格照 `gmv` 的范式，别自创**）：
 
 ---
 
-**请审核 §11 的 Q1–Q7。全部采纳推荐值则直接回复「按推荐值开工」，我升 v1.1 并给交接命令。**
+---
+
+## 13. P7-S1 施工规格（成本入口）——定稿，可直接实施
+
+### 13.1 改动清单（10 文件）
+
+| # | 文件 | 位置 | 动作 |
+|---|---|---|---|
+| 1 | `app/db.py` | `InboundLine`(351) 尾 | 加 `unit_cost: Mapped[Decimal \| None] = mapped_column(Numeric(12, 2), nullable=True)` |
+| 1 | `app/db.py` | 新类 | 加 `CostSnapshot`（§3.1 全字段） |
+| 1 | `app/db.py` | `ExternalOrderLine`(788) 尾 | 加锚定五列（S1 只建列，不写逻辑；S2 启用） |
+| 2 | `migrations/versions/0025_cost_snapshots.py` | 新建 | 建表 + 两处 `add_column`（幂等，照 0024 写法） |
+| 3 | `app/costs.py` | 新建 | `CostRecord` / `load_cost_rows` / `create_cost_snapshot` / `ingest_cost_records` / `list_cost_snapshots` |
+| 4 | `app/column_mappings.py` | `FIELD_ALIASES`(20) 尾、`REQUIRED_FIELDS`(47) | 加 `costs` kind |
+| 5 | `app/imports.py` | `IMPORT_KINDS`(30)、`_load`(108)、`parse_upload`(171) | 加 `COST_KIND` 与分派；平台校验放宽 |
+| 6 | `app/schemas.py` | `InboundReceiveLine`(701)、`InboundLineResponse`(712) | 加 `unit_cost`；新增成本快照四个模型 |
+| 7 | `app/repository.py` | `receive_inbound`(657)、`confirm_inbound`(724)、`_inbound_response_data`(525) | 落单价 / 落快照 / 回显单价 |
+| 8 | `app/main.py` | `receive_inbound` 路由(1485) | `model_dump()` 已自动带 `unit_cost`，仅确认透传 |
+| 8 | `app/main.py` | 新端点区（建议紧邻入库路由） | 三个成本端点（§13.4） |
+| 9 | `app/templates/warehouse.html` | 渲染行（POS 5773）、提交（POS 6673） | 单价输入 + 预估总成本（§13.2） |
+| 10 | `app/templates/sources.html` | 导入区 kind 下拉与提交分派 | 「成本快照」导入项（§13.3） |
+
+### 13.2 前端「预估总成本」实时展示（用户硬要求 1）
+
+**渲染行改造**（当前模板为单物理行，改后仍需保持行内联写法）：
+
+```js
+`<div class="row" data-receive-line="${line.sku_id}">
+   <strong>SKU #${escapeHtml(line.sku_id)}</strong>
+   <label>实收<input data-received type="number" min="0" value="..."></label>
+   <label>破损<input data-damaged type="number" min="0" value="..."></label>
+   <label>单价<input data-unit-cost type="number" min="0" step="0.01" placeholder="选填" value="${line.unit_cost ?? ''}"></label>
+   <span class="num" data-line-cost>—</span>
+ </div>`
+```
+
+**汇总节点**：`#receive-lines` 之后加
+
+```html
+<p id="receive-total-cost" class="status-line">预估总成本：—</p>
+```
+
+**计算规则（口径必须写死，别自创）**：
+
+- 行小计 = `(实收 − 破损) × 单价`，保留 2 位，无单价或单价非法显示 `—`
+- 汇总 = Σ行小计；全部为空 → `预估总成本：—`
+- **口径：按合格数量（实收 − 破损）**，与 `accepted_qty` / 库存台账同源；不得用 `实收` 直接乘
+  （破损不进库存，若按实收算会高估库存资产）
+- 标签加 `title="按实收减破损计算；破损商品不进库存"`，避免财务口径争议
+- 事件：`#receive-lines` 上做 `input` 委托（模板现有代码是内联赋值风格，不允许引框架）
+- **提交易错点**：`unit_cost` 为空必须提交 `null`，不能提交 `0`
+  （`0` 是"免费成本"，会污染成本库并让利润虚高）
+
+**提交语句改造**（当前 POS 6673）：
+
+```js
+.map(row=>({sku_id:Number(...), received_qty:Number(...), damaged_qty:Number(...),
+            unit_cost: row.querySelector('[data-unit-cost]').value === ''
+                       ? null : Number(row.querySelector('[data-unit-cost]').value)}))
+```
+
+### 13.3 成本 CSV：完全复用 P6「静默丢行」护栏（用户硬要求 2）
+
+**做法：不新写解析器，把 `costs` 接成 import 流水线的第三种 kind。**
+这样 P6 刚修好的护栏是**结构性继承**，不是"照着抄一遍"。
+
+| 复用点 | 来源 | 代价 |
+|---|---|---|
+| 编码探测 BOM→utf-8→gb18030 | `imports.decode_upload`(41) | 0 |
+| 中文列头自动映射 / 全角空格归一 | `column_mappings.suggest_mapping`(76) | 0 |
+| 必填列缺失检测 | `missing_required`(93) | 0 |
+| **计数判定 + 二分隔离** | `imports._isolate`(123) | 0 |
+| **`记录数 + 异常数 == 数据行数` 收尾不变量** | `parse_upload` 尾部 | 0 |
+| 脏行 100% 收集（不截断） | `parse_upload` `bad` 全量 | 0 |
+
+**改法（三处，极小）**：
+
+1. `column_mappings.py`
+
+```python
+FIELD_ALIASES["costs"] = {
+    "sku_code":       ("商品编码","sku","商家编码","规格代码","货号","商品编号","商品代码","内部编码"),
+    "unit_cost":      ("成本单价","成本价","进货单价","采购单价","单位成本","入库成本","单价","unit_cost","cost"),
+    "effective_time": ("生效时间","成本时间","入库时间","生效日期","统计时间","effective_time"),
+    "currency":       ("币种","货币","currency"),
+    "note":           ("备注","说明","note"),
+}
+REQUIRED_FIELDS["costs"] = ("sku_code", "unit_cost")   # effective_time 可空 → 导入时刻
+```
+> 加载期别名冲突自检会自动覆盖新 kind（`_build_reverse_index`），无需额外代码。
+
+2. `imports.py`
+
+```python
+COST_KIND = "costs"          # 刻意不加入 IMPORT_KINDS → 外部导入端点继续拒绝 costs
+# _load():
+if kind == COST_KIND:
+    return load_cost_rows(text)
+# parse_upload 首行校验改为：
+if kind != COST_KIND and platform not in PLATFORMS:
+```
+> **为什么不动 `IMPORT_KINDS`**：`/api/external/imports` 用它做白名单，
+> 加进去会让成本 CSV 从外部导入端点溜进来（走错 ingest、写错表）。保持原值 = 零回归。
+
+3. `app/costs.py::load_cost_rows(text) -> list[CostRecord]`
+
+**契约（护栏成立的前提，必须遵守）**：
+> **一条数据行 → 必须产出一条 `CostRecord`，或抛 `ConnectorError`。绝不允许 `continue` 静默跳过。**
+
+违反契约不会造成数据污染（`_isolate` 的计数判定会把它抓出来进 `rejected`），
+但会导致合法行被误判，故测试 F-6 必须实证。
+
+字段校验：
+
+| 字段 | 规则 | 失败 |
+|---|---|---|
+| `sku_code` | 非空；先匹配 `ProductSku.sku_code`；未命中回落 `ExternalProductMapping.external_sku`（**一次批量查询，禁 N+1**） | `ConnectorError("SKU_NOT_FOUND: {code}")` |
+| `unit_cost` | 可转 `Decimal`；`0 <= v <= 1e9`；最多 2 位小数（多余位四舍五入到 2 位，不报错） | `ConnectorError("成本单价非法: {raw}")` |
+| `effective_time` | 空 → `None`（由 ingest 补 `datetime.utcnow()`）；非空支持 `YYYY-MM-DD` / `YYYY-MM-DD HH:MM:SS` / ISO8601 | `ConnectorError("生效时间非法: {raw}")` |
+| `currency` | 空 → `CNY`；长度 ≤8 | `ConnectorError("币种非法: {raw}")` |
+
+### 13.4 端点（三个）
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| `POST` | `/api/finance/cost-snapshots` | `catalog.write` | 单条录入。`source="manual"`，`source_ref=f"manual:{uuid}"`。返回 201 + 快照对象 |
+| `POST` | `/api/finance/cost-snapshots/import` | `catalog.write` | multipart CSV。`parse_upload(kind="costs")` → `ingest_cost_records`。返回 `{imported, rejected_total, rows_total, encoding, mapping, rejected:[…≤500]}` |
+| `GET` | `/api/finance/cost-snapshots` | `catalog.read` | 按 `sku_code`/`sku_id`/`from`/`to` 过滤，`limit`(≤200)+`offset`，返回 `{items, total}` |
+
+**导入幂等**：`source_ref = f"manual:{sha256(raw_bytes)[:16]}:{row_number}"`，
+同文件重传命中唯一约束 → 跳过（`imported=0, skipped=n`），不报错、不膨胀。
+
+**错误码**：
+- `SKU_NOT_FOUND` → 行级（进 rejected，不整体失败）
+- 文件级：非 CSV / 空文件 / 缺必填列 → 422 `COST_IMPORT_INVALID`（带 `missing` 列表）
+- 全部行被拒 → 仍 200 + `imported=0`（与 P6 容错语义一致，不整单 422）
+
+### 13.5 migration `0025`
+
+```
+upgrade():
+  - create_table cost_snapshots（含 UniqueConstraint uq_cost_snapshot_identity + Index ix_cost_snapshot_lookup）
+  - inbound_lines: batch_alter_table add_column unit_cost NUMERIC(12,2) NULL
+  - external_order_lines: add cost_snapshot_id INT NULL / unit_cost NUMERIC(12,2) NULL
+                          / fee_rate NUMERIC(6,4) NULL / cost_status VARCHAR(16) DEFAULT 'missing'
+                          / anchored_at DATETIME NULL
+downgrade():
+  - 逆序 drop
+```
+- 全量幂等：`inspect(bind).get_table_names()` / `get_columns()` 判存在后再建（照 0024）
+- **禁止**手写 `CREATE TABLE` 绕过 Alembic
+- 测试连带：alembic head 断言 `0024` → `0025`（唯一已知的既有测试改动，登记台账）
+
+### 13.6 S1 验收标准
+
+1. §9 的 **F-1..F-10 全绿**，全量 `574 → ~584` 且 0 failed（有 flaky 按「重跑一次全绿 + 登记」判）
+2. `confirm_inbound` 带单价 → 快照落库；不带单价 → 静默跳过，入库流程零影响
+3. 成本 CSV 里 `unit_cost=abc` 的行 100% 进 `rejected` 且 `imported + rejected == rows_total`
+4. `warehouse.html` 实收页输入单价后，「预估总成本」实时变化（F-9 页面契约断言）
+5. `connectors.py` / `imports.py` 既有 inventory/orders 分支**逐字节不变**
+6. `/api/external/imports` 传 `kind=costs` 仍被拒（证明白名单没被污染）
+
+### 13.7 S1 明确不做（防止范围蔓延）
+
+- ✗ 不写 `ingest_orders` 的任何锚定逻辑（S2）
+- ✗ 不写利润计算、不碰 `cockpit.py` / `cockpit.html`（S3）
+- ✗ 不改 `connectors.py`，不改 inventory/orders 的别名与必填（只**新增** costs kind）
+- ✗ 不引入新第三方依赖（openpyxl 已有，本片也用不到）
+- ✗ 不做成本快照的删除/修改端点（append-only，R-1）
+
+---
+
+**Q1–Q7 已裁定，v1.1 定稿。首刀 P7-S1 规格见 §13，可按其直接实施。**
