@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.connectors import ExternalOrderRecord
 from app.config import resolve_fee_rate
+from app.order_aggregation import aggregate_order_records, log_merge_reports
 from app.db import (
     CostSnapshot,
     DailySkuSale,
@@ -102,6 +103,10 @@ class SalesImportStats:
     stale: int = 0
     affected_dates: list[str] | None = None
     sync_run_id: str | None = None
+    # R-66：聚合口径的两个可观测计数（不进任何响应 schema，避免打挂键集断言）。
+    # total 仍是**聚合前的记录数**（= 文件数据行数），与 P6 的 rows_total 语义一致。
+    merged_orders: int = 0
+    merged_rows: int = 0
 
 
 def ensure_external_account(
@@ -339,13 +344,27 @@ def ingest_orders(
 ) -> SalesImportStats:
     if not workspace_id:
         raise ValueError("WORKSPACE_CONTEXT_REQUIRED")
+    # R-66：展平报表预聚合。必须发生在 R-65 判重**之前**——否则「一行一个 SKU」的合法
+    # CSV（同一订单号跨多行）会在判重处就被 422 拦死，永远走不到合并。
+    # 聚合是纯内存变换：只对 source_mode == "csv" 生效，无 DB 访问，失败即原样返回。
+    original_total = len(records)
+    records, merge_reports = aggregate_order_records(records)
+    if merge_reports:
+        log_merge_reports(merge_reports)
     # R-65：判重必须在任何写入之前。整批要么全部进入，要么一条都不动——
     # 半批入库 + 500 会让「订单事实」与批次历史对不上，人工排查成本远高于直接拒绝。
+    # 输入是**聚合后**的记录：可合并的已经合并，剩下的才是真冲突。
     duplicates = find_duplicate_order_numbers(records)
     if duplicates:
         order_no, count = duplicates[0]
         raise BatchDuplicateOrderError(order_no, count, duplicate_count=len(duplicates))
-    stats = SalesImportStats(total=len(records), sync_run_id=sync_run_id, affected_dates=[])
+    stats = SalesImportStats(
+        total=original_total,
+        sync_run_id=sync_run_id,
+        affected_dates=[],
+        merged_orders=len(merge_reports),
+        merged_rows=sum(report.row_count for report in merge_reports),
+    )
     touched: set[tuple[int, str]] = set()
     # P7-S2：待锚定行先攒着，循环外一次性预取快照（红线 R-2：新增查询 ≤1）。
     pending: list[tuple[ExternalOrderLine, int, datetime, str]] = []

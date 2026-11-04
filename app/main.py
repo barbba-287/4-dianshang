@@ -3364,10 +3364,15 @@ def external_orders_preview(payload: ExternalOrderPreviewRequest, request: Reque
             message=getattr(exc, "user_message", None) or str(exc),
             http_status=422,
         ) from exc
+    # R-66：预览与入库同口径。total 保持「聚合前的记录数」= 文件里的订单行数，
+    # 合并结果由 normalized_rows 的长度体现；非 csv 模式此函数原样返回。
+    from app.order_aggregation import aggregate_order_records
+    original_total = len(records)
+    records, _merge_reports = aggregate_order_records(records)
     return ExternalOrderPreviewResponse(
         platform=payload.platform, source_mode=payload.source_mode, simulated=True,
         live_enabled=False, normalized_rows=[record.as_dict() for record in records],
-        total=len(records), errors=[], writes=[],
+        total=original_total, errors=[], writes=[],
     )
 
 
@@ -3386,7 +3391,7 @@ def external_orders_ingest(payload: ExternalOrderIngestRequest, request: Request
             raise ValueError("MIXED_EXTERNAL_ACCOUNT")
         run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=payload.platform, sync_type="orders", account_ref=account_ref, store_ref=store_ref, source_mode=payload.source_mode)
         result = ingest_orders(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
-        sync_stats = ImportStats(total=result.total, inserted=result.inserted, no_op=result.no_op, conflict=result.conflict)
+        sync_stats = ImportStats(total=result.total, inserted=result.inserted, updated=result.updated, no_op=result.no_op, conflict=result.conflict, stale=result.stale)
         complete_sync_run(db, run, sync_stats)
     except ValueError as exc:
         if run is not None:
@@ -4296,6 +4301,11 @@ async def external_import_preview(
         column_mapping=column_mapping,
     )
     records = outcome.records or []
+    # R-66：预览必须与入库口径一致——否则「预览看到 3 条、入库变成 1 单」会吓到商家。
+    # total 仍是数据行总数（含坏行），合并结果由 len(normalized_rows) 体现。
+    if kind == "orders" and records:
+        from app.order_aggregation import aggregate_order_records
+        records, _merge_reports = aggregate_order_records(records)
     from app.imports import MAX_REJECTED_ROWS
     return ExternalImportPreviewResponse(
         # total = 数据行总数（含坏行）；有效记录数 = total - rejected_total。
@@ -4394,7 +4404,7 @@ async def external_import_commit(
                 raise ValueError("MIXED_EXTERNAL_ACCOUNT")
             run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=platform, sync_type="orders", account_ref=batch_account_ref, store_ref=batch_store_ref, source_mode="csv")
             result = ingest_orders(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
-            stats = ImportStats(total=result.total, inserted=result.inserted, no_op=result.no_op, conflict=result.conflict)
+            stats = ImportStats(total=result.total, inserted=result.inserted, updated=result.updated, no_op=result.no_op, conflict=result.conflict, stale=result.stale)
         complete_sync_run(db, run, stats)
     except ValueError as exc:
         if run is not None:
