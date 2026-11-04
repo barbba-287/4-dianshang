@@ -8,7 +8,7 @@
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 from hashlib import sha256
@@ -284,6 +284,7 @@ _PAGE_ANCHORS = {
     "/cockpit": (
         ("cockpit-sales-panel", "销售趋势"),
         ("cockpit-inventory-panel", "库存分布"),
+        ("cockpit-profit-panel", "单品利润排行"),
         ("cockpit-shortage-panel", "缺货与补货待办"),
         ("cockpit-overstock-panel", "积压与滞销待办"),
         ("cockpit-purchase-panel", "采购待审批"),
@@ -1799,6 +1800,58 @@ def cost_backfill(
     return CostBackfillResponse(**result)
 
 
+# ---------- P7-S3 利润明细下钻（只读，按需计算） ----------
+
+_PROFIT_ERROR_MESSAGES = {
+    "INVALID_PAGINATION": "分页参数无效：limit 需在 1~200、offset 需 ≥ 0",
+    "INVALID_PROFIT_STATUS": "利润明细状态无效：仅支持 all / computed / missing / unmapped",
+    "WORKSPACE_CONTEXT_REQUIRED": "缺少 Workspace 上下文",
+}
+
+
+@app.get("/api/finance/profit/lines")
+def profit_detail_lines(
+    request: Request,
+    days: int = Query(default=7, ge=1, le=90),
+    as_of: date | None = Query(default=None),
+    currency: str | None = Query(default=None, max_length=8),
+    status: str = Query(default="all", max_length=16),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """驾驶舱利润卡片的明细下钻（订单行粒度）。
+
+    窗口口径与 `/api/dashboard/cockpit` 完全一致（同一 as_of、同一销售状态谓词），
+    所以「卡片上的总额」与「这里每行利润之和」永远对得上——对不上就是 bug，
+    而不是「口径不同」。缺省 `status=all`：下钻的意义是解释总额，藏起不可计算的行
+    会让读者误以为总额覆盖了全部订单。
+    """
+    principal = require_principal(request, permission="analytics.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    from app.business_dates import resolve_sales_as_of
+    from app.finance import list_profit_lines
+
+    as_of = resolve_sales_as_of(db, workspace_id=principal.workspace_id, explicit_as_of=as_of)
+    try:
+        return list_profit_lines(
+            db,
+            workspace_id=principal.workspace_id,
+            window_from=as_of - timedelta(days=days - 1),
+            window_to=as_of,
+            currency=currency,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        raise DomainError(
+            code=code,
+            message=_PROFIT_ERROR_MESSAGES.get(code, "利润明细查询参数无效"),
+            http_status=422,
+        ) from exc
+
+
 @app.get("/api/inventory", response_model=InventoryPage)
 def inventory_page(page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100), warehouse_id: int | None = Query(default=None, gt=0), sku_id: int | None = Query(default=None, gt=0), request: Request = None, db: Session = Depends(get_db)):
     principal = require_principal(request, permission="inventory.read")
@@ -2069,6 +2122,7 @@ def list_external_orders(
     order_status: str | None = Query(default=None, max_length=32),
     fulfillment_view: str | None = Query(default=None, max_length=32),
     keyword: str | None = Query(default=None, max_length=255),
+    sku_code: str | None = Query(default=None, max_length=128),
     date_from: date | None = None,
     date_to: date | None = None,
     db: Session = Depends(get_db),
@@ -2076,7 +2130,7 @@ def list_external_orders(
     principal = require_principal(request, permission="inventory.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     from app.order_workbench import list_orders
     try:
-        return list_orders(db, workspace_id=principal.workspace_id, page=page, page_size=page_size, platform=platform, account_ref=account_ref, store_ref=store_ref, order_status=order_status, fulfillment_view=fulfillment_view, keyword=keyword, date_from=date_from, date_to=date_to)
+        return list_orders(db, workspace_id=principal.workspace_id, page=page, page_size=page_size, platform=platform, account_ref=account_ref, store_ref=store_ref, order_status=order_status, fulfillment_view=fulfillment_view, keyword=keyword, date_from=date_from, date_to=date_to, sku_code=sku_code)
     except ValueError as exc:
         code = str(exc)
         raise DomainError(code=code, message="订单查询参数无效", http_status=422) from exc
@@ -3303,7 +3357,13 @@ def external_orders_preview(payload: ExternalOrderPreviewRequest, request: Reque
     try:
         records = load_orders(payload.content, platform=payload.platform, source_mode=payload.source_mode)
     except ValueError as exc:
-        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
+        # R-65：异常若自带稳定错误码（如 DUPLICATE_ORDER_NO_IN_BATCH），优先用它；
+        # 否则保持历史行为（code == message == str(exc)），不改变既有调用方的可观测性。
+        raise DomainError(
+            code=getattr(exc, "code", None) or (str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID"),
+            message=getattr(exc, "user_message", None) or str(exc),
+            http_status=422,
+        ) from exc
     return ExternalOrderPreviewResponse(
         platform=payload.platform, source_mode=payload.source_mode, simulated=True,
         live_enabled=False, normalized_rows=[record.as_dict() for record in records],
@@ -3331,7 +3391,13 @@ def external_orders_ingest(payload: ExternalOrderIngestRequest, request: Request
     except ValueError as exc:
         if run is not None:
             fail_sync_run(db, run, exc)
-        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
+        # R-65：异常若自带稳定错误码（如 DUPLICATE_ORDER_NO_IN_BATCH），优先用它；
+        # 否则保持历史行为（code == message == str(exc)），不改变既有调用方的可观测性。
+        raise DomainError(
+            code=getattr(exc, "code", None) or (str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID"),
+            message=getattr(exc, "user_message", None) or str(exc),
+            http_status=422,
+        ) from exc
     except Exception as exc:
         if run is not None:
             fail_sync_run(db, run, exc)
@@ -4060,7 +4126,13 @@ def external_inventory_preview(payload: ExternalInventoryPreviewRequest, request
     try:
         records = load_records(payload.content, platform=payload.platform, source_mode=payload.source_mode)
     except ValueError as exc:
-        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
+        # R-65：异常若自带稳定错误码（如 DUPLICATE_ORDER_NO_IN_BATCH），优先用它；
+        # 否则保持历史行为（code == message == str(exc)），不改变既有调用方的可观测性。
+        raise DomainError(
+            code=getattr(exc, "code", None) or (str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID"),
+            message=getattr(exc, "user_message", None) or str(exc),
+            http_status=422,
+        ) from exc
     return ExternalInventoryPreviewResponse(
         platform=payload.platform,
         source_mode=payload.source_mode,
@@ -4106,7 +4178,13 @@ def external_events_ingest(payload: ExternalEventIngestRequest, request: Request
     except ValueError as exc:
         if 'run' in locals() and run is not None:
             fail_sync_run(db, run, exc)
-        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
+        # R-65：异常若自带稳定错误码（如 DUPLICATE_ORDER_NO_IN_BATCH），优先用它；
+        # 否则保持历史行为（code == message == str(exc)），不改变既有调用方的可观测性。
+        raise DomainError(
+            code=getattr(exc, "code", None) or (str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID"),
+            message=getattr(exc, "user_message", None) or str(exc),
+            http_status=422,
+        ) from exc
     except Exception as exc:
         if 'run' in locals() and run is not None:
             fail_sync_run(db, run, exc)
@@ -4185,7 +4263,13 @@ async def _import_parse(
             column_mapping=user_mapping,
         )
     except ValueError as exc:
-        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
+        # R-65：异常若自带稳定错误码（如 DUPLICATE_ORDER_NO_IN_BATCH），优先用它；
+        # 否则保持历史行为（code == message == str(exc)），不改变既有调用方的可观测性。
+        raise DomainError(
+            code=getattr(exc, "code", None) or (str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID"),
+            message=getattr(exc, "user_message", None) or str(exc),
+            http_status=422,
+        ) from exc
     return outcome
 
 
@@ -4315,7 +4399,13 @@ async def external_import_commit(
     except ValueError as exc:
         if run is not None:
             fail_sync_run(db, run, exc)
-        raise DomainError(code=str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID", message=str(exc), http_status=422) from exc
+        # R-65：异常若自带稳定错误码（如 DUPLICATE_ORDER_NO_IN_BATCH），优先用它；
+        # 否则保持历史行为（code == message == str(exc)），不改变既有调用方的可观测性。
+        raise DomainError(
+            code=getattr(exc, "code", None) or (str(exc) if str(exc) else "EXTERNAL_INPUT_INVALID"),
+            message=getattr(exc, "user_message", None) or str(exc),
+            http_status=422,
+        ) from exc
     except Exception as exc:
         if run is not None:
             fail_sync_run(db, run, exc)

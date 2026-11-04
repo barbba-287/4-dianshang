@@ -9,8 +9,8 @@
   ``db.delete``，不读写任何配置开关，不 import fastapi。
 - **零 N+1**：每个指标用一条 SQL 聚合完成；趋势与环比基准用 ``GROUP BY 日``
   一次出「当期 + 上期」全窗口；缺货/积压明细用一条 JOIN + UNION 批量捞取后
-  内存组装。``build_cockpit`` 自有查询固定 6 条，加 ``resolve_sales_as_of``
-  的 0~2 条 as_of 解析，全程查询条数上限 8 条。
+  内存组装。``build_cockpit`` 自有查询固定 8 条（P7-S3 新增 2 条利润聚合），
+  加 ``resolve_sales_as_of`` 的 0~2 条 as_of 解析，全程查询条数上限 10 条。
 - **口径诚实**：多币种分组返回、绝不折算（``fx_todo`` 保留原文）；0 值与
   「没有事实」通过 ``quality`` / ``missing_days`` 区分。
 """
@@ -35,11 +35,12 @@ from app.db import (
     ProductSku,
     PurchaseRequest,
 )
+from app.finance import SALE_ORDER_STATUSES, summarize_profit
 
-# 与 app/external_orders.py 的 ``_is_sale`` 保持同一语义。
-# 这里刻意不复用私有函数（import 私有名会造成跨模块耦合），
-# 口径漂移由 tests/test_p4_cockpit.py 的对拍断言守住。
-SALE_ORDER_STATUSES = frozenset({"paid", "fulfilled", "completed"})
+# 销售状态谓词的真源已上移到 app/finance.py（P7-S3）：利润与 GMV 必须用同一组谓词，
+# 否则会出现「GMV 有数、利润无数」这种对不上的账。这里只做 re-export，
+# tests/test_p4_cockpit.py 对 ``cockpit.SALE_ORDER_STATUSES`` 与 ``_is_sale`` 的对拍断言不变。
+__all__ = ["SALE_ORDER_STATUSES", "build_cockpit"]
 
 # 积压（Q-P4-1 口径 A）阈值。
 OVERSTOCK_DAYS_THRESHOLD = 90
@@ -65,6 +66,9 @@ LIMITATIONS = (
     "多币种按币种分组返回，绝不折算、不显示跨币种合计（fx_todo 为财务模块预留锚点）。",
     "积压与待办明细最多返回 50 条，卡片计数为全量计数。",
     "积压速度只认已映射到内部 SKU 的销量（daily_sku_sales.internal_sku_id），未映射 SKU 的销量不参与日均。",
+    "预估利润按需实时计算、不落库；口径见 profit.formula（净数量 / 实付净额 / 成本 / 平台费）。",
+    "成本状态 missing（无入库成本）或 unmapped（外部 SKU 未映射）的订单行不参与利润汇总，只计数。",
+    "多币种时利润 KPI 主值为 null，按 profit.by_currency 分组展示，绝不折算。",
 )
 
 
@@ -452,6 +456,16 @@ def build_cockpit(
         )
     orders_change = _change(order_total, prev_orders_total)
 
+    # ------------------------------------------------------------------
+    # 查询 7 / 8：预估利润（P7-S3）
+    #   窗口与 GMV 完全一致（同一组销售状态谓词、同一个右开日期区间），
+    #   否则「GMV 100 万、利润算的是另一批订单」这种口径错位极难被发现。
+    #   利润只算可计算行（成本已锚定），missing/unmapped 单独计数进黄色提示。
+    # ------------------------------------------------------------------
+    profit = summarize_profit(db, workspace_id=workspace_id, window_from=window_from, window_to=window_to)
+    profit_currencies = [item["currency"] for item in profit["by_currency"]]
+
+
     # ---------------- 库存分类 + 积压明细 ----------------
     # 缺货/补货判定按 (仓库, SKU) 逐对进行（inventory_policies 的唯一键就是
     # (workspace, warehouse, sku)），再上卷成 SKU 级计数；
@@ -727,6 +741,21 @@ def build_cockpit(
             "note": "已发布版本下的切片数；发布到向量索引存在最终一致窗口",
             "multi_currency": False,
         },
+        "estimated_profit": {
+            "key": "estimated_profit",
+            "label": "预估总利润",
+            # 多币种时主值必须留 null：把不同币种的利润加在一起得出的数字没有经济意义，
+            # 而「显示一个错的总额」比「显示 —」危险得多。
+            "value": profit["total_profit"],
+            "unit": profit_currencies[0] if len(profit_currencies) == 1 else None,
+            "change_ratio": None,
+            "change_basis": None,
+            "quality": profit["quality"],
+            "reason": profit["reason"],
+            "source": "external_order_lines 锚定成本 × 锚定费率（只读、按需计算，不落库）",
+            "note": "利润 = 实付净额 − 成本 − 平台费；平台费按实付扣除，退款部分不抽佣",
+            "multi_currency": profit["multi_currency"],
+        },
     }
 
     return {
@@ -756,6 +785,7 @@ def build_cockpit(
             "prev_to": prev_to.isoformat(),
         },
         "kpis": kpis,
+        "profit": profit,
         "by_currency": by_currency,
         "fx_todo": FX_TODO,
         "sales_trend": {

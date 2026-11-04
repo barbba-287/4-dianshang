@@ -32,6 +32,65 @@ COST_STATUS_RESOLVED = "resolved"
 COST_STATUS_MISSING = "missing"
 COST_STATUS_UNMAPPED = "unmapped"
 
+# 批内重复订单号示例上限（错误文案只举前 N 个，避免几十行订单号糊满屏）。
+_DUPLICATE_SAMPLE_LIMIT = 3
+
+
+class BatchDuplicateOrderError(ValueError):
+    """批内出现重复订单号（R-65，用户 2026-11-04 裁定方案 A）。
+
+    背景：`ingest_orders` 更新订单时先 DELETE 订单行再重建，未 flush 前的同批重复
+    订单号会命中两次 INSERT，撞 `uq_external_order_line_identity` 唯一约束 →
+    IntegrityError → 调用方 `except Exception` 转成 500「报表导入失败」，前端只能
+    看到一句无信息量的话。
+
+    触发场景很现实：P6-S1 的契约是「CSV 一行一个订单，多商品放 JSON lines 列」，
+    而平台导出的订单报表通常**一行一个 SKU**，同一订单号天然跨多行。
+
+    方案 A（不再 500）：在入口处拒绝，返回 422 + 可操作文案，不猜测合并规则。
+    方案 B（系统按订单号自动预聚合）登记为 R-66，属后续优化项，本片不实施——
+    合并规则一旦猜错（金额按行求和还是取首行？行项目 ID 怎么造？）会安静地写错账。
+
+    **只拦「内容不一致」的重复**：完全相同的重复行是幂等重放，既有逻辑按 `no_op` 处理，
+    拦下来只会让正常的分页同步失败（见 `find_duplicate_order_numbers`）。
+    """
+
+    code = "DUPLICATE_ORDER_NO_IN_BATCH"
+
+    def __init__(self, order_no: str, count: int, *, duplicate_count: int = 1) -> None:
+        self.order_no = order_no
+        self.count = count
+        self.duplicate_count = duplicate_count
+        self.user_message = (
+            f"订单号 {order_no} 在本批次出现 {count} 次且内容不一致，无法确定以哪一行为准。"
+            "当前版本要求「一行一个订单」：请把同一订单的多个商品合并为一行"
+            "（多个商品放进 lines 列），或按订单号拆分文件后分批导入。"
+        )
+        super().__init__(self.user_message)
+
+
+def find_duplicate_order_numbers(records: list[ExternalOrderRecord]) -> list[tuple[str, int]]:
+    """返回批内「内容不一致的重复订单号」（按出现次数降序）。
+
+    判重键与数据库唯一约束同构：`(platform, account_ref, store_ref, external_order_no)`。
+
+    **只报内容冲突的重复**：同一订单号在本批次出现多次且 `payload_hash` 全相同，属
+    幂等重放（Shopify 游标翻页跨页重复、用户把同一行粘贴两次），既有逻辑会把它算成
+    `no_op`，不需要也不应该拒绝——把它当错误会让正常同步挂掉。真正危险的是**内容不同**
+    的重复：调用方无法知道该保留哪一版金额/状态，且重建订单行时会撞唯一约束。
+    """
+    groups: dict[tuple[str, str, str, str], list[str]] = {}
+    for record in records:
+        key = (record.platform, record.account_ref, record.store_ref, record.external_order_no)
+        groups.setdefault(key, []).append(record.payload_hash)
+    duplicates = [
+        (key[3], len(hashes))
+        for key, hashes in groups.items()
+        if len(hashes) > 1 and len(set(hashes)) > 1
+    ]
+    duplicates.sort(key=lambda item: (-item[1], item[0]))
+    return duplicates
+
 
 @dataclass
 class SalesImportStats:
@@ -280,6 +339,12 @@ def ingest_orders(
 ) -> SalesImportStats:
     if not workspace_id:
         raise ValueError("WORKSPACE_CONTEXT_REQUIRED")
+    # R-65：判重必须在任何写入之前。整批要么全部进入，要么一条都不动——
+    # 半批入库 + 500 会让「订单事实」与批次历史对不上，人工排查成本远高于直接拒绝。
+    duplicates = find_duplicate_order_numbers(records)
+    if duplicates:
+        order_no, count = duplicates[0]
+        raise BatchDuplicateOrderError(order_no, count, duplicate_count=len(duplicates))
     stats = SalesImportStats(total=len(records), sync_run_id=sync_run_id, affected_dates=[])
     touched: set[tuple[int, str]] = set()
     # P7-S2：待锚定行先攒着，循环外一次性预取快照（红线 R-2：新增查询 ≤1）。

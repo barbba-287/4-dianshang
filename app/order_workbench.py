@@ -14,7 +14,7 @@ from app.db import ExternalOrder, ExternalOrderLine, Product, ProductSku
 FULFILLMENT_VIEWS = {"needs_attention", "to_fulfill", "fulfilled", "cancelled"}
 
 
-def _filters(*, workspace_id: int, platform: str | None, account_ref: str | None, store_ref: str | None, order_status: str | None, fulfillment_view: str | None, keyword: str | None, date_from: date | None, date_to: date | None) -> list:
+def _filters(*, workspace_id: int, platform: str | None, account_ref: str | None, store_ref: str | None, order_status: str | None, fulfillment_view: str | None, keyword: str | None, date_from: date | None, date_to: date | None, sku_code: str | None = None) -> list:
     filters = [ExternalOrder.workspace_id == workspace_id]
     if platform:
         filters.append(ExternalOrder.platform == platform)
@@ -39,6 +39,22 @@ def _filters(*, workspace_id: int, platform: str | None, account_ref: str | None
         filters.append(ExternalOrder.external_created_at >= datetime.combine(date_from, time.min))
     if date_to:
         filters.append(ExternalOrder.external_created_at < datetime.combine(date_to, time.max))
+    if sku_code:
+        # P7-S3 利润排行下钻：按「内部 SKU 编码 或 外部 SKU 编码」命中订单。
+        # 用 EXISTS 子查询而不是 JOIN：JOIN 会让同一订单因多行而重复出现在列表里，
+        # 分页 total 与前端计数会一起错。
+        matched = (
+            select(ExternalOrderLine.external_order_id)
+            .outerjoin(ProductSku, ProductSku.id == ExternalOrderLine.internal_sku_id)
+            .where(
+                ExternalOrderLine.workspace_id == workspace_id,
+                or_(
+                    ProductSku.sku_code == sku_code,
+                    ExternalOrderLine.external_sku == sku_code,
+                ),
+            )
+        )
+        filters.append(ExternalOrder.id.in_(matched))
     return filters
 
 
@@ -76,14 +92,14 @@ def _line_summary(db: Session, *, workspace_id: int, order_ids: list[int]) -> di
     return {int(order_id): (int(count), int(qty or 0)) for order_id, count, qty in rows}
 
 
-def list_orders(db: Session, *, workspace_id: int, page: int = 1, page_size: int = 20, platform: str | None = None, account_ref: str | None = None, store_ref: str | None = None, order_status: str | None = None, fulfillment_view: str | None = None, keyword: str | None = None, date_from: date | None = None, date_to: date | None = None) -> dict:
+def list_orders(db: Session, *, workspace_id: int, page: int = 1, page_size: int = 20, platform: str | None = None, account_ref: str | None = None, store_ref: str | None = None, order_status: str | None = None, fulfillment_view: str | None = None, keyword: str | None = None, date_from: date | None = None, date_to: date | None = None, sku_code: str | None = None) -> dict:
     if page < 1 or page_size < 1 or page_size > 100:
         raise ValueError("INVALID_PAGINATION")
     if date_from and date_to and date_from > date_to:
         raise ValueError("INVALID_DATE_RANGE")
     if fulfillment_view and fulfillment_view not in FULFILLMENT_VIEWS:
         raise ValueError("INVALID_FULFILLMENT_VIEW")
-    filters = _filters(workspace_id=workspace_id, platform=platform, account_ref=account_ref, store_ref=store_ref, order_status=order_status, fulfillment_view=fulfillment_view, keyword=keyword, date_from=date_from, date_to=date_to)
+    filters = _filters(workspace_id=workspace_id, platform=platform, account_ref=account_ref, store_ref=store_ref, order_status=order_status, fulfillment_view=fulfillment_view, keyword=keyword, date_from=date_from, date_to=date_to, sku_code=sku_code)
     total = int(db.scalar(select(func.count(ExternalOrder.id)).where(*filters)) or 0)
     orders = db.scalars(select(ExternalOrder).where(*filters).order_by(ExternalOrder.external_created_at.desc(), ExternalOrder.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     summaries = _line_summary(db, workspace_id=workspace_id, order_ids=[order.id for order in orders])

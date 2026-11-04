@@ -1,9 +1,26 @@
 # dev_task.p7-profit-center — P7 利润核算与对账中心（Profit Center）
 
-- 版本：**v1.2（S1 已交付，S2 施工规格见 §14）**
-- 基线：`feat/warehouse-mvp@d25ebbf`，全量 **586 passed / 0 failed**（S1 交付后）
-- alembic head：`0025_cost_snapshots`（S2 无需新迁移，锚定五列已在 0025 内建好）
-- 状态：**S1 完成；S2 进行中；S3 未开工。**
+- 版本：**v1.3（S1/S2 已交付，S3 施工规格与口径见 §15）**
+- 基线：`feat/warehouse-mvp@7cf2f09`，全量 **596 passed / 0 failed**（S2 交付后）
+- alembic head：`0025_cost_snapshots`（S2/S3 均无需新迁移）
+- 状态：**S1 完成；S2 完成；S3 实施中。**
+
+## 0.3 S3 裁定记录（2026-11-04 10:19）
+
+用户四条核心口径（原话要点，全部写死在 §15.2 并从代码常量 `app/finance.py :: FORMULA` 对外暴露）：
+
+1. **净数量**：直接用 `ExternalOrderLine` 的有效数量（净数），即
+   `ordered_qty − cancelled_qty − refunded_qty`，下限 0；
+2. **平台费**：按**实付金额**扣除（不按商品原价），公式写进任务书并在前端加 `title` 悬浮说明；
+3. **前端**：利润卡片可点击下钻到明细列表；排行表可点击跳转到该 SKU 的销售记录；
+4. **验收闸**：F-17（手算对拍）与 F-18（改费率后历史不变）。
+
+R-65 / R-66 裁定（同日）：
+
+| 编号 | 内容 | 裁定 |
+|---|---|---|
+| R-65 | 批内重复订单号撞唯一约束 → 500「报表导入失败」 | 采纳**方案 A**：入口检测，422 + 明确文案，零数据语义变化 |
+| R-66 | 系统按订单号自动预聚合（把「一行一个 SKU」的展平 CSV 合成带 `lines` 的数字订单） | 登记为后续优化项（P8+）。理由：真实电商 CSV 全是一行一个 SKU，让商家手工合并反人类；但合并规则（金额求和 or 取首行、行项目 ID 怎么造）猜错会安静写错账，必须单独设计 |
 
 ## 0.2 S2 裁定记录（2026-11-04 09:48）
 
@@ -838,3 +855,104 @@ downgrade():
   `cost_status` 不退回 `missing`。
 - F-16 一批 3 行（跨 2 个 SKU）只发 **1 条** `cost_snapshots` 查询；
   已锚定行重建时该查询数为 **0**。
+
+---
+
+## 15. P7-S3 施工规格（利润引擎 + 看板）——已实施，留档
+
+### 15.1 改动清单（9 文件，零新迁移）
+
+| 文件 | 改动 |
+|---|---|
+| `app/finance.py`（新建） | 口径常量 `FORMULA`、`net_qty`、`line_amounts`、`summarize_profit`（2 条查询）、`list_profit_lines`（2 条查询） |
+| `app/cockpit.py` | import `SALE_ORDER_STATUSES`/`summarize_profit`；新增 `estimated_profit` KPI + 顶层 `profit` 段；查询预算 6→8 |
+| `app/schemas.py` | `CockpitResponse.profit: dict`（宽松结构，避免每加一个财务字段就动响应模型） |
+| `app/main.py` | `GET /api/finance/profit/lines`（`analytics.read` + admin/operations）；`/api/orders` 增 `sku_code`；`_PAGE_ANCHORS` 增 `cockpit-profit-panel` |
+| `app/order_workbench.py` | `_filters` / `list_orders` 增 `sku_code`（EXISTS 子查询，避免 JOIN 导致订单重复） |
+| `app/external_orders.py` | R-65：`BatchDuplicateOrderError` + `find_duplicate_order_numbers`，`ingest_orders` 入口判重 |
+| `app/templates/cockpit.html` | 利润卡片可点击下钻、`title` 口径说明、利润排行面板、黄色提示条、明细表 |
+| `app/templates/orders.html` | `SKU` 过滤框 + `?sku=` 预填（排行跳转落点） |
+| `tests/test_p7s3_profit_engine.py`（新建） | F-17..F-25 + R-65，18 用例 |
+
+**无需 0026**：利润按需计算、不落库；`external_order_lines` 的锚定五列已在 `0025` 建好。
+
+### 15.2 口径（本片最核心的一节，改这里等于改历史利润）
+
+```
+净数量   = max(0, ordered_qty − cancelled_qty − refunded_qty)
+实付净额 = max(0, gross_amount − refund_amount)
+成本     = 锚定 unit_cost × 净数量
+平台费   = 实付净额 × 锚定 fee_rate        ← 按实付扣，退款部分不抽佣
+利润     = 实付净额 − 成本 − 平台费
+```
+
+三条必须理解的取舍：
+
+- **平台费按实付而非原价**：平台按结算金额抽佣，退款部分不抽。若按原价扣，退款订单会被
+  双重惩罚（收入冲减了、佣金还在），利润被系统性低估。前端卡片 `title` 原文：
+  「利润 = 实付净额 − 成本 − 平台费；平台费按实付扣除，退款部分不抽佣」。
+- **成本按净数量**：退款/取消件视为退货回仓，成本同步冲减。局限已写进
+  `PROFIT_LIMITATIONS`：若实际未回仓，真实成本会高于本口径。
+- **不可计算 ≠ 0 利润**：`cost_status ∈ {missing, unmapped}` 或单价/费率缺失时，
+  该行**不进任何金额汇总**，只计数。把 unknown 当 0 是利润类报表最典型的失真来源。
+
+### 15.3 返回结构（`/api/dashboard/cockpit` 的 `profit` 段）
+
+```
+profit.by_currency[]   currency / revenue / cost / platform_fee / profit / profit_margin
+                       / net_qty / computed_lines / missing_lines / unmapped_lines / sku_count
+profit.total_profit    单币种且有可算行时给值，否则 null（多币种或零可算行）
+profit.multi_currency  bool
+profit.quality         complete / partial（有 missing/unmapped）/ insufficient（无可算行）
+profit.reason          NO_ORDERS / NO_COST_SNAPSHOTS / MISSING_COST_SNAPSHOTS
+profit.warning         {show, level:"warning", message:"有 X 笔订单因缺失入库成本未能计算利润",
+                        missing_cost_order_count}
+profit.ranking         {winners[], losers[], currencies[], limit:10}
+profit.formula         口径原文（前端 tooltip 与审计共用一份文案）
+```
+
+`by_currency` 的 `revenue/cost/platform_fee/profit` 只统计**可计算行**——这是
+「收入也可能未知」的直接后果，必须在字段语义上明确，否则读者会以为漏算。
+
+### 15.4 查询预算
+
+| 位置 | 条数 | 说明 |
+|---|---|---|
+| `summarize_profit` | 2 | 1 条 `GROUP BY (currency, sku, sku_code, cost_status)` + 1 条 missing 订单去重计数 |
+| `list_profit_lines` | 2 | 明细 1 条 + 总数 1 条（独立请求，不计入驾驶舱预算） |
+| 驾驶舱合计 | 6 → 8 | 加 `resolve_sales_as_of` 的 0~2 条 as_of，上限 8 → 10 |
+
+缺成本订单数**必须单独一条查询**：分组聚合里做不了跨组去重，用 SUM 会把一笔订单
+按 SKU 数重复计数（「3 个 SKU 都缺成本」会被显示成 3 笔）。
+
+### 15.5 测试（18 用例，实测全绿）
+
+| 编号 | 断言 |
+|---|---|
+| F-17 | 两笔订单（含取消 1 / 退款 1）逐项对拍到分：100−20−5=75；60−10−3=47；合计 122.00 |
+| F-17b | 退款额 > 商品额 → 实付净额夹到 0，利润 −10.00，不产生负收入 |
+| F-18 | 费率 5%→8%：历史订单利润仍 75.00；新订单按 8% 扣；合计 147.00 |
+| F-19 | missing 按订单去重（B、C 两 SKU 同单 → 1 笔）；unmapped 不计入 X；黄条文案逐字一致 |
+| F-19b | 无缺成本时 `warning.show=false`、quality=complete |
+| F-20 | winners 仅正利润、losers 仅负利润、利润 0 两边都不进 |
+| F-20b | 无可排行时返回空数组而非报错 |
+| F-21 | 多币种 KPI `value=null`、`multi_currency=true`、按币种分组各算各的 |
+| F-22 | admin/operations 200；readonly 403（沿用驾驶舱角色闸，不另开口子） |
+| F-23 | 零成本快照时 cockpit 200、KPI `insufficient`/`NO_COST_SNAPSHOTS`、value=null |
+| F-23b | 空工作区 `NO_ORDERS`，`by_currency=[]` |
+| F-24 | `finance.py` 零写操作（grep 守 `db.add/commit/delete/flush/merge/bulk_`） |
+| F-24b | `summarize_profit` 实测恰 2 条 SELECT（事件监听计数） |
+| F-25 | 下钻 status/currency 过滤、逐行之和 == KPI 总额 |
+| F-25b | 非法 status / limit 越界 → 422 |
+| F-25c | `/api/orders?sku_code=` 内部/外部编码都能命中（排行跳转的接口支撑） |
+| R-65a | 批内重复 → `BatchDuplicateOrderError`，且**一行都不落库** |
+| R-65b | HTTP 层 422 + `code=DUPLICATE_ORDER_NO_IN_BATCH` + 可操作文案 |
+
+### 15.6 明确不做（防范围蔓延）
+
+- 不做利润落库/物化表：落库就要面对「哪天回填了成本、哪天改了费率」的重算问题，
+  而这已由 P7-S2 的锚定解决，重算只会引入新的不一致。
+- 不做跨币种折算（`fx_todo` 仍归财务模块）。
+- 不做环比（上一窗口利润）：需要另一组权重与可比性定义，留 P8。
+- 不在同步路径算利润（Q2 裁定：同步只锚定）。
+- R-66 自动预聚合不在本片实施（见 §0.3）。

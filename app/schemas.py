@@ -145,6 +145,10 @@ class CockpitResponse(BaseModel):
     prev_to: str
     window: dict = Field(default_factory=dict)
     kpis: dict[str, CockpitKpi] = Field(default_factory=dict)
+    # P7-S3 预估利润：by_currency / ranking / warning / formula。
+    # 结构刻意用 dict 而非嵌套模型：口径字段会随财务模块演进（P8 加佣金阶梯等），
+    # 用宽松结构避免每加一个字段就动一次响应模型。
+    profit: dict = Field(default_factory=dict)
     by_currency: list[CockpitCurrencyAmount] = Field(default_factory=list)
     fx_todo: str
     sales_trend: CockpitSalesTrend
