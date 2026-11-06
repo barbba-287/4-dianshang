@@ -670,3 +670,126 @@ def test_f37f_allocation_is_deterministic_across_reupload(ctx):
     assert again.json()["no_op"] == 1, "重传必须命中 no_op，分摊结果不得漂移"
     second = sorted(str(line.gross_amount) for line in _lines(ctx))
     assert first == second == ["22.50", "22.50", "45.00"]
+
+
+# ---------------------------------------------------------------------------
+# F-38 ★R-71：退款金额也被复制到每行 → 同样按数量分摊（用户 2026-11-06 裁定）
+# ---------------------------------------------------------------------------
+
+REFUND_HEADER = HEADER.replace("gross_amount", "gross_amount,refund_amount")
+
+
+def _csv_refund(*rows: tuple[str, str, int, str, str]) -> bytes:
+    """rows: (订单号, 外部SKU, 数量, 商品金额, 退款金额)。"""
+    body = "".join(
+        f"{order_no},account-a,store-a,paid,{SALE_TIME},{UPDATED},{sku},{qty},{gross},{refund}\n"
+        for order_no, sku, qty, gross, refund in rows
+    )
+    return (REFUND_HEADER + "\n" + body).encode()
+
+
+# 订单总额 200、退款总额 90，但商家把两个总额都复制到了每一行（双脏形态）
+DIRTY_REFUND_CSV = _csv_refund(
+    ("ORD-R71", "EXT-SKU-A", 1, "200.00", "90.00"),
+    ("ORD-R71", "EXT-SKU-B", 1, "200.00", "90.00"),
+    ("ORD-R71", "EXT-SKU-C", 1, "200.00", "90.00"),
+)
+
+
+def test_f38_refund_copied_to_every_row_is_allocated(ctx):
+    """★用户指定：退款也是每行 90 的脏报表 → 分摊后利润完全正确（不退化成负数）。
+
+    分摊结果：
+        商品 200 → 66.67 / 66.67 / 66.66（和 200）
+        退款  90 → 30.00 / 30.00 / 30.00（和 90）
+        实付净额 → 36.67 / 36.67 / 36.66（和 110 = 200 − 90）
+
+    若不摊退款：三行各扣 90，逐行 66.67 − 90 < 0 被下限截成 0，收入归 0、利润 −60 ——
+    正是「退款被扣 N 次」的财务灾难。夹具成本 A=10 / B=20 / C=30，费率 5%：
+        合计 收入 110.00  成本 60.00  平台费 5.49  利润 44.51
+    """
+    record, report = _merge(ctx, DIRTY_REFUND_CSV)
+    assert [line.gross_amount for line in record.lines] == [
+        Decimal("66.67"), Decimal("66.67"), Decimal("66.66"),
+    ]
+    assert [line.refund_amount for line in record.lines] == [
+        Decimal("30.00"), Decimal("30.00"), Decimal("30.00"),
+    ]
+    assert sum(line.refund_amount for line in record.lines) == Decimal("90.00")
+
+    assert _upload(ctx, DIRTY_REFUND_CSV).status_code == 200
+    profit = _cockpit_profit(ctx)
+    cell = profit["by_currency"][0]
+    assert cell["revenue"] == "110.00", "实付净额必须是 200 − 90，不是 200 − 270"
+    assert cell["revenue"] != "0.00", "未摊退款时收入会被下限截成 0 —— 这正是 R-71 的后果"
+    assert cell["cost"] == "60.00"
+    assert cell["platform_fee"] == "5.49"
+    assert cell["profit"] == "44.51"
+    assert profit["total_profit"] == "44.51"
+
+    detail = _profit_lines(ctx)
+    per_line = {item["external_sku"]: item["profit"] for item in detail["items"]}
+    assert per_line == {"EXT-SKU-A": "24.84", "EXT-SKU-B": "14.84", "EXT-SKU-C": "4.83"}
+    assert sum(Decimal(value) for value in per_line.values()) == Decimal("44.51")
+
+
+def test_f38b_both_rules_reported_allocated_and_deltas_zero(ctx):
+    """gross 与 refund 各自独立判定，但双脏形态下两条都应记为 same_allocated 且 delta 归零。"""
+    record, report = _merge(ctx, DIRTY_REFUND_CSV)
+    assert report.gross_rule == ctx.merge_mod.MERGE_RULE_ALLOCATED
+    assert report.refund_rule == ctx.merge_mod.MERGE_RULE_ALLOCATED
+    assert record.gross_amount == Decimal("200.00"), "单头金额不变"
+    assert record.refund_amount == Decimal("90.00")
+    assert report.delta == Decimal("0.00")
+    assert report.refund_delta == Decimal("0.00"), "分摊后退款也必须对齐，M6 才通过"
+    assert report.lines_refund_sum == Decimal("90.00")
+
+
+def test_f38c_correct_per_line_refund_is_never_allocated(ctx):
+    """退款本来就逐行填对的（SUM 态）一律不动 —— 复用判据不等于滥用判据。"""
+    csv_bytes = _csv_refund(
+        ("ORD-RSUM", "EXT-SKU-A", 1, "100.00", "20.00"),
+        ("ORD-RSUM", "EXT-SKU-B", 1, "60.00", "5.00"),
+        ("ORD-RSUM", "EXT-SKU-C", 1, "40.00", "5.00"),
+    )
+    record, report = _merge(ctx, csv_bytes)
+    assert report.gross_rule == ctx.merge_mod.MERGE_RULE_SUM
+    assert report.refund_rule == ctx.merge_mod.MERGE_RULE_SUM
+    assert [line.refund_amount for line in record.lines] == [
+        Decimal("20.00"), Decimal("5.00"), Decimal("5.00"),
+    ]
+    assert report.refund_delta == Decimal("0.00")
+
+
+def test_f38d_refund_allocation_does_not_touch_gross(ctx):
+    """独立性：只有退款脏（商品逐行正确）时只摊退款，商品金额一个字节都不许改。"""
+    csv_bytes = _csv_refund(
+        ("ORD-RONLY", "EXT-SKU-A", 1, "100.00", "30.00"),
+        ("ORD-RONLY", "EXT-SKU-B", 1, "60.00", "30.00"),
+        ("ORD-RONLY", "EXT-SKU-C", 1, "40.00", "30.00"),
+    )
+    record, report = _merge(ctx, csv_bytes)
+    assert report.gross_rule == ctx.merge_mod.MERGE_RULE_SUM, "商品是 SUM 态，不该被摊"
+    assert [line.gross_amount for line in record.lines] == [
+        Decimal("100.00"), Decimal("60.00"), Decimal("40.00"),
+    ]
+    assert report.refund_rule == ctx.merge_mod.MERGE_RULE_ALLOCATED
+    assert [line.refund_amount for line in record.lines] == [
+        Decimal("10.00"), Decimal("10.00"), Decimal("10.00"),
+    ]
+    assert record.refund_amount == Decimal("30.00")
+
+
+def test_f38e_refund_allocation_follows_quantity(ctx):
+    """退款分摊同样按数量加权：qty 2/1/1 摊 90 → 45.00 / 22.50 / 22.50。"""
+    csv_bytes = _csv_refund(
+        ("ORD-RQTY", "EXT-SKU-A", 2, "200.00", "90.00"),
+        ("ORD-RQTY", "EXT-SKU-B", 1, "200.00", "90.00"),
+        ("ORD-RQTY", "EXT-SKU-C", 1, "200.00", "90.00"),
+    )
+    record, report = _merge(ctx, csv_bytes)
+    assert [line.refund_amount for line in record.lines] == [
+        Decimal("45.00"), Decimal("22.50"), Decimal("22.50"),
+    ]
+    assert sum(line.refund_amount for line in record.lines) == Decimal("90.00")
+    assert report.refund_delta == Decimal("0.00")

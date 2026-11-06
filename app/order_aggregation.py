@@ -24,6 +24,13 @@
 且 `parse_upload` 末尾有 `len(records) + len(rejected) == len(mapped_rows)` 的不变量。
 在 `load_orders` 里聚合会让 3 行 → 1 记录，被 `_isolate` 判成 3 行全坏、整单失败。
 所以聚合只能发生在**行级隔离完成之后**，即 `ingest_orders` 入口。
+
+金额分摊（R-67 / R-71，用户 2026-11-06 裁定）
+-------------------------------------------
+商家最常见的脏写法是把**订单总额复制到每一行**。`gross_amount` 如此会让利润按行重复计收入
+（R-67）；`refund_amount` 如此会让退款被扣 N 次、利润严重偏低甚至转负（R-71）。
+两者都按数量分摊到各行、末行补齐，判据严格限定为「每行都等于单头」的指纹，
+其他形态一律不动。两者**独立判定**：gross 触发不代表 refund 也触发。
 """
 from __future__ import annotations
 
@@ -43,7 +50,8 @@ MERGE_SOURCE_MODE = "csv"
 MERGE_RULE_SAME = "same"
 MERGE_RULE_SINGLE_NONZERO = "single_nonzero"
 MERGE_RULE_SUM = "sum"
-# R-67 分摊（用户 2026-11-06 裁定方案②）：SAME 态且各行金额 == 单头金额时按数量分摊。
+# R-67 / R-71 分摊（用户 2026-11-06 裁定方案②）：SAME 态且各行金额 == 单头金额时按数量分摊。
+# 该值同时用于 `gross_rule` 与 `refund_rule`，两者各自独立判定。
 MERGE_RULE_ALLOCATED = "same_allocated"
 
 # M2：「订单级事实」字段。组内不一致 → 放弃合并（不猜、不抛错），交给 R-65 的 422。
@@ -134,11 +142,12 @@ def _line_qty(line: ExternalOrderLineRecord) -> int:
 
 
 def should_allocate(
-    gross_rule: str,
-    gross_amount: Decimal,
+    rule: str,
+    amount: Decimal,
     lines: list[ExternalOrderLineRecord],
+    field: str = "gross_amount",
 ) -> bool:
-    """R-67 分摊触发判据（用户 2026-11-06 裁定方案②，四条全部写死在这里）。
+    """R-67 / R-71 分摊触发判据（用户 2026-11-06 裁定方案②，四条全部写死在这里）。
 
     四个条件**同时**成立才触发，任一不成立一律返回 False（"其他地方一律不走分摊"）：
 
@@ -149,21 +158,25 @@ def should_allocate(
 
     特别注意条件 2 与 3 是**并列**的：只判 `delta != 0` 会把
     "首行填总额、其余填 0"（`SINGLE_NONZERO`）也吞进来，那种形态本来就是对的。
+
+    `field` 让同一套判据同时服务 `gross_amount`（R-67）与 `refund_amount`（R-71）：
+    两者是**独立判定**的，gross 触发不代表 refund 也触发（反之亦然）。
     """
-    if gross_rule != MERGE_RULE_SAME:
+    if rule != MERGE_RULE_SAME:
         return False
     if len(lines) < 2:
         return False
-    if any(line.gross_amount != gross_amount for line in lines):
+    if any(getattr(line, field) != amount for line in lines):
         return False
-    return sum((line.gross_amount for line in lines), _ZERO) != gross_amount
+    return sum((getattr(line, field) for line in lines), _ZERO) != amount
 
 
-def allocate_gross(
-    gross_amount: Decimal,
+def allocate_amount(
+    amount: Decimal,
     lines: list[ExternalOrderLineRecord],
+    field: str,
 ) -> list[ExternalOrderLineRecord] | None:
-    """把单头金额按数量分摊到各行：`单行 = 单头 × 单行数量 / 总数量`。
+    """把单头金额按数量分摊到各行的指定字段：`单行 = 单头 × 单行数量 / 总数量`。
 
     **末行用 `单头 − 前面各行之和` 补齐**，保证分摊后逐行之和分毫不差（不留四舍五入残差）。
     总数量为 0（全部行数量都是 0）时无法分摊 → 返回 None，调用方保持原样、
@@ -179,12 +192,32 @@ def allocate_gross(
     for index, (line, quantity) in enumerate(zip(lines, quantities)):
         if index == last:
             # 末行补齐：差额可能是正也可能是负（极端小额多行时），但总和一定等于单头。
-            share = gross_amount - running
+            share = amount - running
         else:
-            share = (gross_amount * quantity / total_qty).quantize(_CENT, rounding=ROUND_HALF_UP)
+            share = (amount * quantity / total_qty).quantize(_CENT, rounding=ROUND_HALF_UP)
             running += share
-        allocated.append(replace(line, gross_amount=share))
+        allocated.append(replace(line, **{field: share}))
     return allocated
+
+
+def allocate_gross(
+    gross_amount: Decimal,
+    lines: list[ExternalOrderLineRecord],
+) -> list[ExternalOrderLineRecord] | None:
+    """R-67：分摊商品金额（`gross_amount`）。"""
+    return allocate_amount(gross_amount, lines, "gross_amount")
+
+
+def allocate_refund(
+    refund_amount: Decimal,
+    lines: list[ExternalOrderLineRecord],
+) -> list[ExternalOrderLineRecord] | None:
+    """R-71：分摊退款金额（`refund_amount`）。
+
+    不做这一步的后果比 R-67 更严重：利润引擎的实付净额 = `gross − refund`，
+    商家把退款总额复制到每行时退款会被扣 N 次（N = 明细行数），利润严重偏低甚至转负。
+    """
+    return allocate_amount(refund_amount, lines, "refund_amount")
 
 
 def _first_non_null(group: list[ExternalOrderRecord], field: str) -> Any:
@@ -261,6 +294,22 @@ def merge_group(
             )
             lines = allocated
             gross_rule = MERGE_RULE_ALLOCATED
+    # R-71（用户 2026-11-06 裁定）：退款金额复用同一套判据。**独立判定** ——
+    # gross 该摊不代表 refund 也该摊。不摊的后果比 gross 更疼：实付净额 = gross − refund，
+    # 退款被扣 N 次会让利润严重偏低甚至转负。
+    if should_allocate(refund_rule, refund_amount, lines, field="refund_amount"):
+        allocated_refund = allocate_refund(refund_amount, lines)
+        if allocated_refund is not None:
+            logger.info(
+                "R-71 退款金额分摊 order=%s rows=%d main_refund=%s total_qty=%d allocated=%s",
+                group[0].external_order_no,
+                len(group),
+                refund_amount,
+                sum(_line_qty(line) for line in lines),
+                ",".join(str(line.refund_amount) for line in allocated_refund),
+            )
+            lines = allocated_refund
+            refund_rule = MERGE_RULE_ALLOCATED
     merged = replace(
         group[0],
         gross_amount=gross_amount,
@@ -346,8 +395,9 @@ def log_merge_reports(reports: Iterable[MergeReport]) -> None:
     - 全部行数量为 0（无法按数量分摊）；
     - 形态不满足分摊判据（`should_allocate` 为 False），例如 `SUM` 态却因精度问题对不上。
 
-    `refund_delta != 0` 是**同构的退款风险**：商家若把订单退款总额复制到每一行，利润引擎
-    按行的退款冲减会重复扣。本轮只做观测不自动分摊（登记 R-71，待裁定），绝不"安静地"发生。
+    `refund_delta != 0` 是同构的退款风险。R-71（用户 2026-11-06 裁定）已让退款复用同一套
+    分摊判据，因此**分摊成功后 refund_delta 恒为 0**；仍非零只剩「全部行数量为 0 无法分摊」
+    或「形态不满足判据」两种——两种都必须留信号，不能"安静地"发生。
     """
     for report in reports:
         fields = report.as_log_fields()
@@ -371,7 +421,7 @@ def log_merge_reports(reports: Iterable[MergeReport]) -> None:
             )
         if report.refund_delta != _ZERO:
             logger.warning(
-                "R-71 退款金额可能被复制到每行（未自动分摊）order=%(order_no)s "
+                "R-71 退款金额分摊未生效（退款之和 != 主表）order=%(order_no)s "
                 "gross_rule=%(gross_rule)s refund_rule=%(refund_rule)s "
                 "main_refund=%(main_refund)s lines_refund_sum=%(lines_refund_sum)s "
                 "refund_delta=%(refund_delta)s",
