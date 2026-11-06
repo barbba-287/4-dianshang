@@ -28,7 +28,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 import logging
 from typing import Any, Iterable
 
@@ -43,6 +43,8 @@ MERGE_SOURCE_MODE = "csv"
 MERGE_RULE_SAME = "same"
 MERGE_RULE_SINGLE_NONZERO = "single_nonzero"
 MERGE_RULE_SUM = "sum"
+# R-67 分摊（用户 2026-11-06 裁定方案②）：SAME 态且各行金额 == 单头金额时按数量分摊。
+MERGE_RULE_ALLOCATED = "same_allocated"
 
 # M2：「订单级事实」字段。组内不一致 → 放弃合并（不猜、不抛错），交给 R-65 的 422。
 # 这四个字段一旦猜错，影响的是钱：status 决定这单算不算销售、currency 决定能不能求和、
@@ -64,6 +66,7 @@ FIRST_NON_NULL_FIELDS: tuple[str, ...] = (
 )
 
 _ZERO = Decimal("0")
+_CENT = Decimal("0.01")
 
 
 @dataclass(frozen=True)
@@ -78,7 +81,9 @@ class MergeReport:
     main_gross: Decimal
     main_refund: Decimal
     lines_gross_sum: Decimal
+    lines_refund_sum: Decimal
     delta: Decimal
+    refund_delta: Decimal
 
     def as_log_fields(self) -> dict[str, Any]:
         return {
@@ -90,6 +95,9 @@ class MergeReport:
             "main_gross": str(self.main_gross),
             "lines_sum": str(self.lines_gross_sum),
             "delta": str(self.delta),
+            "main_refund": str(self.main_refund),
+            "lines_refund_sum": str(self.lines_refund_sum),
+            "refund_delta": str(self.refund_delta),
         }
 
 
@@ -118,6 +126,65 @@ def resolve_amount(values: list[Decimal]) -> tuple[Decimal, str] | None:
     # 去重后多于 1 个取值但全为 0 —— 只可能是 Decimal 的 +0/-0 之类，
     # 统一收敛为 0，不让它把整组打成"不可合并"。
     return _ZERO, MERGE_RULE_SAME
+
+
+def _line_qty(line: ExternalOrderLineRecord) -> int:
+    """分摊权重用的数量：订购数，负数按 0 处理（脏数据不该把分摊算成负数比例）。"""
+    return max(0, int(getattr(line, "ordered_qty", 0) or 0))
+
+
+def should_allocate(
+    gross_rule: str,
+    gross_amount: Decimal,
+    lines: list[ExternalOrderLineRecord],
+) -> bool:
+    """R-67 分摊触发判据（用户 2026-11-06 裁定方案②，四条全部写死在这里）。
+
+    四个条件**同时**成立才触发，任一不成立一律返回 False（"其他地方一律不走分摊"）：
+
+    1. M3 判成 `SAME` —— 组内各行取值唯一（不是求和、不是单行非零形态）；
+    2. 每行金额都等于单头金额 —— 这正是"商家把订单总额复制到每一行"的指纹；
+    3. 明细逐行之和 != 单头金额 —— 真的对不上才需要动，对得上就别碰；
+    4. 至少两行 —— 单行订单没有"分摊"概念（也碰不到合并分支）。
+
+    特别注意条件 2 与 3 是**并列**的：只判 `delta != 0` 会把
+    "首行填总额、其余填 0"（`SINGLE_NONZERO`）也吞进来，那种形态本来就是对的。
+    """
+    if gross_rule != MERGE_RULE_SAME:
+        return False
+    if len(lines) < 2:
+        return False
+    if any(line.gross_amount != gross_amount for line in lines):
+        return False
+    return sum((line.gross_amount for line in lines), _ZERO) != gross_amount
+
+
+def allocate_gross(
+    gross_amount: Decimal,
+    lines: list[ExternalOrderLineRecord],
+) -> list[ExternalOrderLineRecord] | None:
+    """把单头金额按数量分摊到各行：`单行 = 单头 × 单行数量 / 总数量`。
+
+    **末行用 `单头 − 前面各行之和` 补齐**，保证分摊后逐行之和分毫不差（不留四舍五入残差）。
+    总数量为 0（全部行数量都是 0）时无法分摊 → 返回 None，调用方保持原样、
+    交给 M6 打 warning，绝不猜。
+    """
+    quantities = [_line_qty(line) for line in lines]
+    total_qty = sum(quantities)
+    if total_qty <= 0:
+        return None
+    allocated: list[ExternalOrderLineRecord] = []
+    running = _ZERO
+    last = len(lines) - 1
+    for index, (line, quantity) in enumerate(zip(lines, quantities)):
+        if index == last:
+            # 末行补齐：差额可能是正也可能是负（极端小额多行时），但总和一定等于单头。
+            share = gross_amount - running
+        else:
+            share = (gross_amount * quantity / total_qty).quantize(_CENT, rounding=ROUND_HALF_UP)
+            running += share
+        allocated.append(replace(line, gross_amount=share))
+    return allocated
 
 
 def _first_non_null(group: list[ExternalOrderRecord], field: str) -> Any:
@@ -178,6 +245,22 @@ def merge_group(
     gross_amount, gross_rule = resolve_amount([record.gross_amount for record in group])
     refund_amount, refund_rule = resolve_amount([record.refund_amount for record in group])
     lines = merge_lines(group)
+    # R-67 方案②（用户 2026-11-06 裁定）：只有「商家把订单总额复制到每一行」这一种形态
+    # 才按数量分摊。分摊后逐行之和 == 单头，M6 的 delta 校验才允许通过、利润引擎才按对的口径算。
+    # 其余形态（SUM / SINGLE_NONZERO / 本来就填对）一律不动，维持现状。
+    if should_allocate(gross_rule, gross_amount, lines):
+        allocated = allocate_gross(gross_amount, lines)
+        if allocated is not None:
+            logger.info(
+                "R-67 金额分摊 order=%s rows=%d main_gross=%s total_qty=%d allocated=%s",
+                group[0].external_order_no,
+                len(group),
+                gross_amount,
+                sum(_line_qty(line) for line in lines),
+                ",".join(str(line.gross_amount) for line in allocated),
+            )
+            lines = allocated
+            gross_rule = MERGE_RULE_ALLOCATED
     merged = replace(
         group[0],
         gross_amount=gross_amount,
@@ -203,6 +286,7 @@ def merge_group(
     # 能用它——单行记录一律原样保留，否则会打挂既有幂等测试。
     merged = replace(merged, payload_hash=_payload_hash(merged.as_dict()))
     lines_gross_sum = sum((line.gross_amount for line in lines), _ZERO)
+    lines_refund_sum = sum((line.refund_amount for line in lines), _ZERO)
     report = MergeReport(
         order_no=merged.external_order_no,
         row_count=len(group),
@@ -212,7 +296,9 @@ def merge_group(
         main_gross=gross_amount,
         main_refund=refund_amount,
         lines_gross_sum=lines_gross_sum,
+        lines_refund_sum=lines_refund_sum,
         delta=gross_amount - lines_gross_sum,
+        refund_delta=refund_amount - lines_refund_sum,
     )
     return merged, report
 
@@ -251,12 +337,17 @@ def aggregate_order_records(
 
 
 def log_merge_reports(reports: Iterable[MergeReport]) -> None:
-    """M6 安全底线：合并结果**无条件**打点，`delta != 0` 升级为 warning。
+    """M6 安全底线：合并结果**无条件**打点，金额不平升级为 warning。
 
-    `delta != 0` 意味着「主表金额」与「明细逐行之和」对不上，最典型的是商家把
-    **订单总额复制到了每一行**（M3 的 `SAME` 态）——那样利润引擎按行计算会重复计入收入
-    （登记为 R-67，待用户裁定 `gross_amount` 列的语义）。这里不阻止入库，
-    但必须留下可追溯的信号，不能"安静地"发生。
+    `delta != 0` 意味着「主表金额」与「明细逐行之和」对不上。R-67 分摊（用户 2026-11-06
+    裁定方案②）会把「订单总额复制到每一行」的形态按数量摊平，所以**正常路径下
+    分摊成功后 delta 恒为 0**；仍出现 `delta != 0` 只剩两种可能，都值得警惕：
+
+    - 全部行数量为 0（无法按数量分摊）；
+    - 形态不满足分摊判据（`should_allocate` 为 False），例如 `SUM` 态却因精度问题对不上。
+
+    `refund_delta != 0` 是**同构的退款风险**：商家若把订单退款总额复制到每一行，利润引擎
+    按行的退款冲减会重复扣。本轮只做观测不自动分摊（登记 R-71，待裁定），绝不"安静地"发生。
     """
     for report in reports:
         fields = report.as_log_fields()
@@ -264,13 +355,25 @@ def log_merge_reports(reports: Iterable[MergeReport]) -> None:
             logger.info(
                 "R-66 预聚合 order=%(order_no)s rows=%(rows)d lines=%(lines)d "
                 "gross_rule=%(gross_rule)s refund_rule=%(refund_rule)s "
-                "main_gross=%(main_gross)s lines_sum=%(lines_sum)s delta=%(delta)s",
+                "main_gross=%(main_gross)s lines_sum=%(lines_sum)s delta=%(delta)s "
+                "main_refund=%(main_refund)s lines_refund_sum=%(lines_refund_sum)s "
+                "refund_delta=%(refund_delta)s",
                 fields,
             )
         else:
             logger.warning(
                 "R-66 预聚合金额不平（明细之和 != 主表）order=%(order_no)s rows=%(rows)d lines=%(lines)d "
                 "gross_rule=%(gross_rule)s refund_rule=%(refund_rule)s "
-                "main_gross=%(main_gross)s lines_sum=%(lines_sum)s delta=%(delta)s",
+                "main_gross=%(main_gross)s lines_sum=%(lines_sum)s delta=%(delta)s "
+                "main_refund=%(main_refund)s lines_refund_sum=%(lines_refund_sum)s "
+                "refund_delta=%(refund_delta)s",
+                fields,
+            )
+        if report.refund_delta != _ZERO:
+            logger.warning(
+                "R-71 退款金额可能被复制到每行（未自动分摊）order=%(order_no)s "
+                "gross_rule=%(gross_rule)s refund_rule=%(refund_rule)s "
+                "main_refund=%(main_refund)s lines_refund_sum=%(lines_refund_sum)s "
+                "refund_delta=%(refund_delta)s",
                 fields,
             )

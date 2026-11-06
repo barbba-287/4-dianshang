@@ -255,17 +255,20 @@ def _merge(ctx, content: bytes):
 
 
 def test_f29a_amount_rule_same(ctx):
-    """多行取值唯一（含"订单总额复制到每行"）→ 取该值，delta != 0 必须留 warning。"""
+    """多行取值唯一（"订单总额复制到每行"）→ 取该值，然后按数量分摊（R-67 方案②）。"""
     csv_bytes = _csv(
         ("ORD-SAME", "EXT-SKU-A", 1, "100.00"),
         ("ORD-SAME", "EXT-SKU-B", 1, "100.00"),
         ("ORD-SAME", "EXT-SKU-C", 1, "100.00"),
     )
     record, report = _merge(ctx, csv_bytes)
-    assert report.gross_rule == ctx.merge_mod.MERGE_RULE_SAME
-    assert record.gross_amount == Decimal("100.00")
-    assert report.lines_gross_sum == Decimal("300.00")
-    assert report.delta == Decimal("-200.00"), "R-67 的可观测信号：明细之和 != 主表"
+    assert report.gross_rule == ctx.merge_mod.MERGE_RULE_ALLOCATED, "SAME 态且每行都等于单头 → 触发分摊"
+    assert record.gross_amount == Decimal("100.00"), "单头金额不变，始终是商家给的订单总额"
+    assert [line.gross_amount for line in record.lines] == [
+        Decimal("33.33"), Decimal("33.33"), Decimal("33.34"),
+    ], "三等分：前两行 33.33，末行补齐 33.34"
+    assert report.lines_gross_sum == Decimal("100.00")
+    assert report.delta == Decimal("0.00"), "分摊后逐行之和必须与单头一致，M6 校验才通过"
 
 
 def test_f29b_amount_rule_single_nonzero(ctx):
@@ -562,3 +565,108 @@ def test_f36c_merged_order_ranking_splits_winner_and_loser(ctx):
     losers = {item["sku_code"]: item["profit"] for item in ranking["losers"]}
     assert winners == {"SKU-A": "18.00", "SKU-B": "8.50"}
     assert losers == {"SKU-C": "-11.00"}
+
+
+# ---------------------------------------------------------------------------
+# F-37 ★R-67 方案②：单头金额复制到每行 → 按数量分摊（用户 2026-11-06 裁定）
+# ---------------------------------------------------------------------------
+
+
+def _same_amount_csv(order_no: str, rows: tuple[tuple[str, int], ...], amount: str) -> bytes:
+    """每一行都填同一个金额（商家把订单总额复制到每行的脏形态）。"""
+    return _csv(*[(order_no, sku, qty, amount) for sku, qty in rows])
+
+
+def test_f37_allocates_order_total_across_lines_by_quantity(ctx):
+    """★用户指定：每行都是 90 的报表 → 分摊后各行金额合理（45 / 22.50 / 22.50）且能正常入库。"""
+    csv_bytes = _same_amount_csv(
+        "ORD-ALLOC", (("EXT-SKU-A", 2), ("EXT-SKU-B", 1), ("EXT-SKU-C", 1)), "90.00",
+    )
+    record, report = _merge(ctx, csv_bytes)
+    assert report.gross_rule == ctx.merge_mod.MERGE_RULE_ALLOCATED
+    assert record.gross_amount == Decimal("90.00")
+    # 摊法：90 × 2/4 = 45.00；90 × 1/4 = 22.50；末行补齐 90 − 67.50 = 22.50
+    assert [line.gross_amount for line in record.lines] == [
+        Decimal("45.00"), Decimal("22.50"), Decimal("22.50"),
+    ]
+    assert sum(line.gross_amount for line in record.lines) == Decimal("90.00")
+    assert report.delta == Decimal("0.00")
+
+    # 端到端：入库 → 利润引擎按分摊后的行金额算，总额就是订单总额 90
+    assert _upload(ctx, csv_bytes).status_code == 200
+    order = _orders(ctx)[0]
+    assert order.gross_amount == Decimal("90.00")
+    profit = _cockpit_profit(ctx)
+    cell = profit["by_currency"][0]
+    assert cell["revenue"] == "90.00", "分摊后收入必须等于订单总额，不是 3×90=270"
+    assert cell["cost"] == "70.00"
+    assert cell["platform_fee"] == "4.51", "2.25 + 1.13 + 1.13（逐行四舍五入后求和）"
+    assert cell["profit"] == "15.49"
+    assert profit["total_profit"] == "15.49"
+    assert profit["quality"] == "complete"
+
+    detail = _profit_lines(ctx)
+    per_line = {item["external_sku"]: item["profit"] for item in detail["items"]}
+    assert per_line == {"EXT-SKU-A": "22.75", "EXT-SKU-B": "1.37", "EXT-SKU-C": "-8.63"}
+    assert sum(Decimal(value) for value in per_line.values()) == Decimal("15.49")
+
+
+def test_f37b_last_line_absorbs_rounding_remainder(ctx):
+    """四舍五入残差必须由末行补齐：100 三等分 → 33.33 / 33.33 / 33.34，合计分毫不差。"""
+    csv_bytes = _same_amount_csv(
+        "ORD-ROUND", (("EXT-SKU-A", 1), ("EXT-SKU-B", 1), ("EXT-SKU-C", 1)), "100.00",
+    )
+    record, report = _merge(ctx, csv_bytes)
+    amounts = [line.gross_amount for line in record.lines]
+    assert amounts == [Decimal("33.33"), Decimal("33.33"), Decimal("33.34")]
+    assert sum(amounts) == Decimal("100.00"), "末行补齐后必须精确等于单头金额"
+    assert report.delta == Decimal("0.00")
+
+
+def test_f37c_correct_per_line_amounts_are_never_allocated(ctx):
+    """本来每行就填对的（SUM 态）一律不动 —— 规则 5「其他地方维持现状」。"""
+    record, report = _merge(ctx, THREE_SKU_CSV)
+    assert report.gross_rule == ctx.merge_mod.MERGE_RULE_SUM
+    assert [line.gross_amount for line in record.lines] == [
+        Decimal("40.00"), Decimal("30.00"), Decimal("20.00"),
+    ]
+    assert report.delta == Decimal("0.00")
+
+
+def test_f37d_single_nonzero_form_is_never_allocated(ctx):
+    """「总额挂首行、其余填 0」形态本来就是对的，绝不能分摊（否则 0 行被凭空塞钱）。"""
+    csv_bytes = _csv(
+        ("ORD-ONE", "EXT-SKU-A", 1, "90.00"),
+        ("ORD-ONE", "EXT-SKU-B", 1, "0"),
+        ("ORD-ONE", "EXT-SKU-C", 1, "0"),
+    )
+    record, report = _merge(ctx, csv_bytes)
+    assert report.gross_rule == ctx.merge_mod.MERGE_RULE_SINGLE_NONZERO
+    assert [line.gross_amount for line in record.lines] == [
+        Decimal("90.00"), Decimal("0"), Decimal("0"),
+    ]
+
+
+def test_f37e_zero_quantity_skips_allocation_and_keeps_warning(ctx):
+    """全部行数量为 0 时分母为 0 → 不分摊、绝不抛错，保持原值并留 delta 信号。"""
+    csv_bytes = _same_amount_csv(
+        "ORD-ZQ", (("EXT-SKU-A", 0), ("EXT-SKU-B", 0)), "90.00",
+    )
+    record, report = _merge(ctx, csv_bytes)
+    assert report.gross_rule == ctx.merge_mod.MERGE_RULE_SAME, "无法分摊时保持 M3 原判"
+    assert [line.gross_amount for line in record.lines] == [Decimal("90.00"), Decimal("90.00")]
+    assert report.delta == Decimal("-90.00"), "留信号给 M6，不静默"
+
+
+def test_f37f_allocation_is_deterministic_across_reupload(ctx):
+    """分摊必须确定性：同一文件重传得到同样的行金额，否则幂等失效、锚定反复重建。"""
+    csv_bytes = _same_amount_csv(
+        "ORD-DET", (("EXT-SKU-A", 2), ("EXT-SKU-B", 1), ("EXT-SKU-C", 1)), "90.00",
+    )
+    assert _upload(ctx, csv_bytes).status_code == 200
+    first = sorted(str(line.gross_amount) for line in _lines(ctx))
+    again = _upload(ctx, csv_bytes)
+    assert again.status_code == 200
+    assert again.json()["no_op"] == 1, "重传必须命中 no_op，分摊结果不得漂移"
+    second = sorted(str(line.gross_amount) for line in _lines(ctx))
+    assert first == second == ["22.50", "22.50", "45.00"]
