@@ -1809,6 +1809,12 @@ _PROFIT_ERROR_MESSAGES = {
 }
 
 
+def _safe_filename_part(value: str) -> str:
+    """把用户输入的筛选值收敛成安全的文件名片段（只留字母/数字/下划线/连字符）。"""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", (value or "").strip()).strip("-")
+    return cleaned or "filter"
+
+
 @app.get("/api/finance/profit/lines")
 def profit_detail_lines(
     request: Request,
@@ -1816,6 +1822,7 @@ def profit_detail_lines(
     as_of: date | None = Query(default=None),
     currency: str | None = Query(default=None, max_length=8),
     status: str = Query(default="all", max_length=16),
+    sku_code: str | None = Query(default=None, max_length=64),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -1826,6 +1833,8 @@ def profit_detail_lines(
     所以「卡片上的总额」与「这里每行利润之和」永远对得上——对不上就是 bug，
     而不是「口径不同」。缺省 `status=all`：下钻的意义是解释总额，藏起不可计算的行
     会让读者误以为总额覆盖了全部订单。
+
+    `sku_code` 按**内部编码**过滤（P9-S1）；命中不到返回空结果而不是 422。
     """
     principal = require_principal(request, permission="analytics.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     from app.business_dates import resolve_sales_as_of
@@ -1840,6 +1849,7 @@ def profit_detail_lines(
             window_to=as_of,
             currency=currency,
             status=status,
+            sku_code=sku_code,
             limit=limit,
             offset=offset,
         )
@@ -1850,6 +1860,71 @@ def profit_detail_lines(
             message=_PROFIT_ERROR_MESSAGES.get(code, "利润明细查询参数无效"),
             http_status=422,
         ) from exc
+
+
+@app.get("/api/finance/profit/lines/export")
+def profit_detail_export(
+    request: Request,
+    days: int = Query(default=7, ge=1, le=90),
+    as_of: date | None = Query(default=None),
+    currency: str | None = Query(default=None, max_length=8),
+    status: str = Query(default="all", max_length=16),
+    sku_code: str | None = Query(default=None, max_length=64),
+    export_format: Literal["xlsx", "csv"] = Query(default="xlsx", alias="format"),
+    db: Session = Depends(get_db),
+):
+    """利润明细**全量**导出（P9-S1）：xlsx（默认）/ csv。
+
+    权限谓词与明细端点**逐字一致**（`analytics.read` + admin/operations 双重条件）——
+    只写 `permission` 是不够的：readonly 与 customer_service 的权限集里都有
+    `analytics.read`，能过权限检查，全靠 `roles` 拦住。漏写 roles 就等于开一个
+    「页面挡住、接口漏出」的利润导出后门。
+
+    导出的语义是全量，因此**不带 limit/offset**：带分页会让人以为能分片导出，
+    实际每次都从头拉，反而更差。超过行数上限即截断，响应头 `X-Export-Truncated: 1`。
+    """
+    principal = require_principal(request, permission="analytics.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    from app.business_dates import resolve_sales_as_of
+    from app.finance import export_profit_lines
+    from app.import_exports import build_download
+
+    as_of = resolve_sales_as_of(db, workspace_id=principal.workspace_id, explicit_as_of=as_of)
+    window_from = as_of - timedelta(days=days - 1)
+    try:
+        headers, rows, truncated = export_profit_lines(
+            db,
+            workspace_id=principal.workspace_id,
+            window_from=window_from,
+            window_to=as_of,
+            currency=currency,
+            status=status,
+            sku_code=sku_code,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        raise DomainError(
+            code=code,
+            message=_PROFIT_ERROR_MESSAGES.get(code, "利润明细导出参数无效"),
+            http_status=422,
+        ) from exc
+
+    filename_base = f"profit-lines-{window_from:%Y%m%d}-{as_of:%Y%m%d}"
+    if currency:
+        filename_base += f"-{_safe_filename_part(currency)}"
+    if sku_code:
+        filename_base += f"-{_safe_filename_part(sku_code)}"
+
+    response = build_download(
+        filename_base=filename_base,
+        view="profit",
+        headers=headers,
+        rows=rows,
+        export_format=export_format,
+    )
+    response.headers["X-Export-Row-Count"] = str(len(rows))
+    if truncated:
+        response.headers["X-Export-Truncated"] = "1"
+    return response
 
 
 @app.get("/api/inventory", response_model=InventoryPage)

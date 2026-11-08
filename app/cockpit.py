@@ -9,8 +9,9 @@
   ``db.delete``，不读写任何配置开关，不 import fastapi。
 - **零 N+1**：每个指标用一条 SQL 聚合完成；趋势与环比基准用 ``GROUP BY 日``
   一次出「当期 + 上期」全窗口；缺货/积压明细用一条 JOIN + UNION 批量捞取后
-  内存组装。``build_cockpit`` 自有查询固定 8 条（P7-S3 新增 2 条利润聚合），
-  加 ``resolve_sales_as_of`` 的 0~2 条 as_of 解析，全程查询条数上限 10 条。
+  内存组装。``build_cockpit`` 自有查询固定 9 条（P7-S3 新增 2 条利润聚合，
+  P9-S1 再加 1 条上期利润合计），加 ``resolve_sales_as_of`` 的 0~2 条 as_of 解析，
+  全程查询条数上限 11 条。
 - **口径诚实**：多币种分组返回、绝不折算（``fx_todo`` 保留原文）；0 值与
   「没有事实」通过 ``quality`` / ``missing_days`` 区分。
 """
@@ -35,7 +36,7 @@ from app.db import (
     ProductSku,
     PurchaseRequest,
 )
-from app.finance import SALE_ORDER_STATUSES, summarize_profit
+from app.finance import SALE_ORDER_STATUSES, profit_totals, summarize_profit
 
 # 销售状态谓词的真源已上移到 app/finance.py（P7-S3）：利润与 GMV 必须用同一组谓词，
 # 否则会出现「GMV 有数、利润无数」这种对不上的账。这里只做 re-export，
@@ -92,6 +93,26 @@ def _change(current: int, previous: int) -> float | None:
     if previous == 0:
         return None
     return (current - previous) / previous
+
+
+def _money_change(current: Decimal, previous: Decimal) -> float | None:
+    """金额类环比：(cur − prev) / prev。**基数 ≤ 0 时返回 None**。
+
+    为什么不能拿 ``abs(prev)`` 当分母：负基数下没有任何比值能同时表达方向与幅度。
+
+    - 上期 −100、当期 +50（扭亏为盈）：用 prev 得 −150%（读作「下降 150%」），
+      用 abs(prev) 得 +150%（方向对了，但「亏损 100 涨到盈利 50」说成「增长 150%」
+      仍然会让人误读成利润规模变大）。
+    - 上期 −100、当期 −50（亏损收窄）：用 prev 得 −50%（读作「下降 50%」），
+      用 abs(prev) 得 +50%（读作「增长了 50%」——实际是亏损减半）。
+
+    所以基数 ≤ 0 一律不给百分比，由调用方用 ``change_basis`` 说明原因。
+    """
+    if current is None or previous is None:
+        return None
+    if previous <= 0:
+        return None
+    return float((current - previous) / previous)
 
 
 def _iso(value) -> str:
@@ -457,13 +478,36 @@ def build_cockpit(
     orders_change = _change(order_total, prev_orders_total)
 
     # ------------------------------------------------------------------
-    # 查询 7 / 8：预估利润（P7-S3）
+    # 查询 7 / 8 / 9：预估利润（P7-S3 + P9-S1）
     #   窗口与 GMV 完全一致（同一组销售状态谓词、同一个右开日期区间），
     #   否则「GMV 100 万、利润算的是另一批订单」这种口径错位极难被发现。
     #   利润只算可计算行（成本已锚定），missing/unmapped 单独计数进黄色提示。
+    #   查询 9 是上期利润合计（1 条，profit_totals），专供环比用——不为一个
+    #   比值再调一次 summarize_profit（那会让驾驶舱从 8 条涨到 10 条）。
     # ------------------------------------------------------------------
     profit = summarize_profit(db, workspace_id=workspace_id, window_from=window_from, window_to=window_to)
     profit_currencies = [item["currency"] for item in profit["by_currency"]]
+    prev_profit_totals = profit_totals(
+        db, workspace_id=workspace_id, window_from=prev_from, window_to=prev_to
+    )
+
+    # 利润环比：多币种不折算（无单一可比基数）、当期不可计算与上期基数 ≤ 0 一律不给百分比。
+    profit_change_ratio: float | None = None
+    profit_change_basis: str | None = None
+    if profit["multi_currency"]:
+        profit_change_basis = "多币种无法折算单一环比"
+    elif profit["total_profit"] is None:
+        profit_change_basis = f"当期利润不可计算：{profit['reason']}" if profit["reason"] else "当期利润不可计算"
+    else:
+        profit_currency = profit_currencies[0] if profit_currencies else "CNY"
+        previous_profit = prev_profit_totals.get(profit_currency, Decimal("0"))
+        if previous_profit > 0:
+            profit_change_ratio = _money_change(Decimal(profit["total_profit"]), previous_profit)
+            profit_change_basis = "上一等长窗口"
+        elif previous_profit == 0:
+            profit_change_basis = "上一窗口利润为 0，无基数"
+        else:
+            profit_change_basis = "上一窗口利润为负，环比无经济意义"
 
 
     # ---------------- 库存分类 + 积压明细 ----------------
@@ -748,8 +792,8 @@ def build_cockpit(
             # 而「显示一个错的总额」比「显示 —」危险得多。
             "value": profit["total_profit"],
             "unit": profit_currencies[0] if len(profit_currencies) == 1 else None,
-            "change_ratio": None,
-            "change_basis": None,
+            "change_ratio": profit_change_ratio,
+            "change_basis": profit_change_basis,
             "quality": profit["quality"],
             "reason": profit["reason"],
             "source": "external_order_lines 锚定成本 × 锚定费率（只读、按需计算，不落库）",

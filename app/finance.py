@@ -19,7 +19,9 @@
 - **多币种不折算**：按币种分组返回；跨币种合计无经济意义（`fx_todo` 属财务模块）。
 
 查询预算：``summarize_profit`` 固定 **2 条**（1 条分组聚合 + 1 条缺失订单去重计数），
-``list_profit_lines`` 2 条（明细 + 总数）。驾驶舱整体上限因此从 8 条抬到 10 条。
+``list_profit_lines`` 2 条（明细 + 总数），``profit_totals`` **1 条**（P9-S1 利润环比用），
+``export_profit_lines`` **1 条**（P9-S1 明细导出，多取 1 行判截断）。驾驶舱整体上限
+因此从 8 条抬到 9 条。
 """
 from __future__ import annotations
 
@@ -46,6 +48,10 @@ COMPUTABLE_STATUSES = (COST_STATUS_RESOLVED, COST_STATUS_BACKFILLED)
 RANKING_LIMIT = 10
 DETAIL_LIMIT_MAX = 200
 DETAIL_LIMIT_DEFAULT = 50
+
+# P9-S1：利润明细导出的行数上限。导出是全量语义，超过上限即截断并回响应头，
+# 避免一个大窗口把内存和用户的 Excel 一起撑爆。
+PROFIT_EXPORT_MAX_ROWS = 20000
 
 # 明细/排行的状态过滤白名单（对外参数，非法值一律 422）。
 DETAIL_STATUS_FILTERS = ("all", "computed", COST_STATUS_MISSING, COST_STATUS_UNMAPPED)
@@ -459,6 +465,7 @@ def list_profit_lines(
     window_to: date,
     currency: str | None = None,
     status: str = "all",
+    sku_code: str | None = None,
     limit: int = DETAIL_LIMIT_DEFAULT,
     offset: int = 0,
 ) -> dict:
@@ -466,6 +473,9 @@ def list_profit_lines(
 
     ``status``：all / computed / missing / unmapped。缺省 all —— 下钻的目的是让人看懂
     「为什么总额是这个数」，把不可计算的行藏起来只会让总额显得更没依据。
+
+    ``sku_code``：按**内部编码**过滤（P9-S1）。命中不到时返回空结果而非 422 ——
+    SKU 被删、拼写错误都该表现为「没有数据」，不该把用户挡在门外。
     """
     if not workspace_id:
         raise ValueError("WORKSPACE_CONTEXT_REQUIRED")
@@ -482,10 +492,19 @@ def list_profit_lines(
         filters.append(ExternalOrderLine.cost_status.in_(COMPUTABLE_STATUSES))
     elif status in (COST_STATUS_MISSING, COST_STATUS_UNMAPPED):
         filters.append(ExternalOrderLine.cost_status == status)
+    if sku_code:
+        # 内部编码过滤（与 /orders?sku= 的预填一致）。outerjoin + where 等价于
+        # innerjoin 语义：SKU 不存在时命中不到任何行，返回空结果而不是 422。
+        filters.append(ProductSku.sku_code == sku_code)
 
     base = (
         select(ExternalOrderLine, ExternalOrder)
         .join(ExternalOrder, ExternalOrder.id == ExternalOrderLine.external_order_id)
+        .outerjoin(
+            ProductSku,
+            (ProductSku.id == ExternalOrderLine.internal_sku_id)
+            & (ProductSku.workspace_id == ExternalOrderLine.workspace_id),
+        )
         .where(*filters)
     )
     total = int(
@@ -493,6 +512,11 @@ def list_profit_lines(
             select(func.count(ExternalOrderLine.id))
             .select_from(ExternalOrderLine)
             .join(ExternalOrder, ExternalOrder.id == ExternalOrderLine.external_order_id)
+            .outerjoin(
+                ProductSku,
+                (ProductSku.id == ExternalOrderLine.internal_sku_id)
+                & (ProductSku.workspace_id == ExternalOrderLine.workspace_id),
+            )
             .where(*filters)
         )
         or 0
@@ -541,3 +565,175 @@ def list_profit_lines(
         "page_computed": len(computed),
         "limitations": list(PROFIT_LIMITATIONS),
     }
+
+
+# ---------------------------------------------------------------------------
+# P9-S1：利润环比取数 + 利润明细全量导出
+# ---------------------------------------------------------------------------
+
+# 导出列定义（顺序写死，前端与测试都对齐这张表）。
+PROFIT_EXPORT_HEADERS = (
+    "订单号", "下单时间", "SKU", "币种", "净数量",
+    "实付净额", "成本", "平台费", "利润", "成本状态",
+)
+
+# 成本状态 → 导出用的中文标签。缺费率是兜底分支：状态已锚定但单价/费率缺失，
+# 此时利润不可计算，得让看表的人知道「缺的是费率」而不是「缺成本」。
+COST_STATUS_LABELS = {
+    COST_STATUS_RESOLVED: "已锚定",
+    COST_STATUS_BACKFILLED: "已锚定",
+    COST_STATUS_MISSING: "缺成本",
+    COST_STATUS_UNMAPPED: "未映射 SKU",
+}
+COST_STATUS_LABEL_FALLBACK = "缺费率"
+
+
+def _computable_expression():
+    """可计算谓词：成本已锚定 + 单价与费率都有值（三者缺一，利润就是「不知道」）。"""
+    return (
+        ExternalOrderLine.cost_status.in_(COMPUTABLE_STATUSES)
+        & ExternalOrderLine.unit_cost.is_not(None)
+        & ExternalOrderLine.fee_rate.is_not(None)
+    )
+
+
+def profit_totals(
+    db: Session,
+    *,
+    workspace_id: int,
+    window_from: date,
+    window_to: date,
+) -> dict[str, Decimal]:
+    """按币种返回窗口内的预估利润合计（**1 条查询**，只含可计算行）。
+
+    存在的理由：环比只需要「每币种的利润合计」，不需要 by_currency 的完整结构、
+    不需要排行、不需要 missing 计数。为了这一个数再调一次 ``summarize_profit``
+    会让驾驶舱查询从 8 条涨到 10 条（它固定 2 条），而这里 1 条就够。
+
+    口径与 ``summarize_profit`` **逐字同源**：成本 = 单价 × 净数量、
+    平台费 = round(实付净额 × 费率, 2) 逐行舍入后汇总、利润 = 实付净额 − 成本 − 平台费。
+    窗口内无可计算行时返回空 dict（不是 ``{"CNY": 0}``）——「没有行」与「利润是 0」
+    在报表上是两件事。
+    """
+    if not workspace_id:
+        raise ValueError("WORKSPACE_CONTEXT_REQUIRED")
+
+    filters = _window_filters(workspace_id, window_from, window_to)
+    qty_expr = _qty_expression()
+    revenue_expr = _revenue_expression()
+    computable = _computable_expression()
+    cost_expr = case((computable, ExternalOrderLine.unit_cost * qty_expr), else_=0)
+    fee_expr = case((computable, func.round(revenue_expr * ExternalOrderLine.fee_rate, 2)), else_=0)
+    profit_expr = revenue_expr - cost_expr - fee_expr
+
+    rows = db.execute(
+        select(
+            func.coalesce(ExternalOrderLine.currency, "CNY").label("currency"),
+            func.sum(profit_expr).label("profit"),
+        )
+        .select_from(ExternalOrderLine)
+        .join(ExternalOrder, ExternalOrder.id == ExternalOrderLine.external_order_id)
+        .where(*filters, computable)
+        .group_by(func.coalesce(ExternalOrderLine.currency, "CNY"))
+    ).all()
+
+    if not rows:
+        return {}
+    return {(row.currency or "CNY"): _cent(row.profit) for row in rows}
+
+
+def _export_cost_status_label(line: ExternalOrderLine, *, computed: bool) -> str:
+    """成本状态中文标签。"""
+    if computed:
+        return COST_STATUS_LABELS.get(line.cost_status or COST_STATUS_MISSING, COST_STATUS_LABEL_FALLBACK)
+    status = line.cost_status or COST_STATUS_MISSING
+    if status in (COST_STATUS_MISSING, COST_STATUS_UNMAPPED):
+        return COST_STATUS_LABELS[status]
+    return COST_STATUS_LABEL_FALLBACK
+
+
+def export_profit_lines(
+    db: Session,
+    *,
+    workspace_id: int,
+    window_from: date,
+    window_to: date,
+    currency: str | None = None,
+    status: str = "all",
+    sku_code: str | None = None,
+    max_rows: int | None = None,
+) -> tuple[list[str], list[list[str]], bool]:
+    """利润明细全量导出（**1 条查询**，最多 ``max_rows`` 行）。
+
+    返回 ``(headers, rows, truncated)``。
+
+    两条硬规则：
+
+    1. **不可计算行的金额列留空**，绝不填 0 —— 导出文件会被拿去 SUM，填 0 等于把
+       「不知道」污染成「不赚钱」，这正是 F-51 锁死的行为。
+    2. **导出是全量语义**，不带分页参数。导出带分页会产生「导出第 2 页」这种
+       没人用的功能，却让人以为可以分片取全量。
+
+    多取 1 行用于判断是否截断（``limit(max_rows + 1)``），不做第二条 count 查询。
+    ``max_rows`` 缺省读模块常量（哨兵 None 而不是把常量写进默认值，
+    这样上限值可被测试与运维在运行时改写）。
+    """
+    if not workspace_id:
+        raise ValueError("WORKSPACE_CONTEXT_REQUIRED")
+    if status not in DETAIL_STATUS_FILTERS:
+        raise ValueError("INVALID_PROFIT_STATUS")
+    if max_rows is None:
+        max_rows = PROFIT_EXPORT_MAX_ROWS
+    if max_rows < 1:
+        raise ValueError("INVALID_PAGINATION")
+
+    filters = _window_filters(workspace_id, window_from, window_to)
+    if currency:
+        filters.append(func.coalesce(ExternalOrderLine.currency, "CNY") == currency)
+    if status == "computed":
+        filters.append(ExternalOrderLine.cost_status.in_(COMPUTABLE_STATUSES))
+    elif status in (COST_STATUS_MISSING, COST_STATUS_UNMAPPED):
+        filters.append(ExternalOrderLine.cost_status == status)
+    if sku_code:
+        filters.append(ProductSku.sku_code == sku_code)
+
+    rows = db.execute(
+        select(ExternalOrderLine, ExternalOrder, ProductSku.sku_code)
+        .select_from(ExternalOrderLine)
+        .join(ExternalOrder, ExternalOrder.id == ExternalOrderLine.external_order_id)
+        .outerjoin(
+            ProductSku,
+            (ProductSku.id == ExternalOrderLine.internal_sku_id)
+            & (ProductSku.workspace_id == ExternalOrderLine.workspace_id),
+        )
+        .where(*filters)
+        .order_by(ExternalOrder.external_created_at.desc(), ExternalOrderLine.id.desc())
+        .limit(max_rows + 1)
+    ).all()
+
+    truncated = len(rows) > max_rows
+    rows = rows[:max_rows]
+
+    table: list[list[str]] = []
+    for line, order, sku_code_value in rows:
+        # 行金额复用 line_amounts —— 与明细下钻、测试手算共用同一份实现，
+        # 两套算法迟早会漂移，漂移的那天没人知道哪个才是对的。
+        item = line_amounts(line)
+        computed = item["profit"] is not None
+        created = order.external_created_at or order.paid_at
+        table.append(
+            [
+                order.external_order_no or "",
+                created.isoformat() if created else "",
+                sku_code_value or item["external_sku"] or "—",
+                item["currency"],
+                str(item["net_qty"]),
+                item["net_revenue"],
+                item["cost"] if computed else "",
+                item["platform_fee"] if computed else "",
+                item["profit"] if computed else "",
+                _export_cost_status_label(line, computed=computed),
+            ]
+        )
+
+    return list(PROFIT_EXPORT_HEADERS), table, truncated

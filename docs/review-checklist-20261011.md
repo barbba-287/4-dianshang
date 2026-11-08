@@ -2559,3 +2559,105 @@ C(1×20) 收入 20 成本 5 费 1 → 14.00。合计 40.50。
 ### 基线
 
 **650 passed / 0 failed**（376.73s；§38 的 645 + 5）。零新迁移、零 schema 变更。
+
+## §40 P9-S1 利润中心补完：环比 + 明细全量导出 + SKU 切片（2026-11-08）
+
+立项依据：用户 2026-11-08 裁定「下一步走方向 A」。任务书 `dev_task.p9s1-profit-enhance.md` v1.0。
+**零新迁移、零新表、零 schema 变更。**
+
+### R1 利润环比（`app/cockpit.py` + `app/finance.py`）
+
+- 新增 `finance.profit_totals()`：**1 条查询**按币种返回窗口内利润合计，口径与
+  `summarize_profit` 逐字同源（成本 = 单价 × 净数量、平台费 = `round(实付净额 × 费率, 2)`
+  逐行舍入后汇总、利润 = 实付净额 − 成本 − 平台费）。**不为环比再调一次 `summarize_profit`**
+  （那是 2 条，会把驾驶舱顶到 10 条）。
+- 新增 `cockpit._money_change()`：`prev ≤ 0` 一律返回 `None`。
+- 驾驶舱查询预算 **8 → 9 条**（F-43 锁死 ≤ 9，并单独断言 `profit_totals == 1`）。
+
+**三条「不给百分比」的分支**（负基数是财务报表最常见的误导）：
+
+| 上期利润 | 当期利润 | change_ratio | change_basis |
+|---|---|---|---|
+| `> 0` | 任意 | `(cur − prev) / prev` | `上一等长窗口` |
+| `== 0` | 任意 | `None` | `上一窗口利润为 0，无基数` |
+| `< 0` | 任意 | `None` | `上一窗口利润为负，环比无经济意义` |
+| 多币种 | — | `None` | `多币种无法折算单一环比` |
+| 当期不可计算 | — | `None` | `当期利润不可计算：{reason}` |
+
+**为什么不用 `abs(prev)` 当分母**（写死，不许「优化」）：−100 → +50 用 prev 得 −150%（读作下降），
+用 abs(prev) 得 +150%（读作「增长 150%」，会被误读成利润规模变大）；−100 → −50 用 prev 得 −50%
+（读作下降），用 abs(prev) 得 +50%（读作「增长了 50%」，而实际是亏损减半）。**符号不一致的基数
+没有任何一种比值能同时正确表达方向与幅度**，正确做法是不给百分比、让 `change_basis` 说明原因。
+
+### R2 明细全量导出（`app/main.py` + `app/finance.py` + `app/import_exports.py` 复用）
+
+- 端点 `GET /api/finance/profit/lines/export`，参数与明细端点对齐（`days` / `as_of` /
+  `currency` / `status` / `sku_code`）+ `format`（xlsx 默认 / csv）。
+- **不带 limit/offset**：导出的语义是全量，带分页会产生没人用的「导出第 2 页」。
+- 权限谓词**逐字复制**明细端点：`permission="analytics.read"` **且** `roles=(ROLE_ADMIN, ROLE_OPERATIONS)`。
+  只写 permission 是后门——`ROLE_READONLY` 与 `ROLE_CUSTOMER_SERVICE` 的权限集里**都有**
+  `analytics.read`，能过权限检查，全靠 `roles` 拦住（F-45 锁死：只读 403、客服 403、运营 200）。
+- 护栏：`PROFIT_EXPORT_MAX_ROWS = 20000`，超出即截断并回 `X-Export-Truncated: 1`；
+  始终回 `X-Export-Row-Count`；空结果仍出表头 + 0 数据行（200，不是 404/422）。
+- 文件名 `profit-lines-YYYYMMDD-YYYYMMDD[-{currency}][-{sku_code}].xlsx`（筛选值经
+  `_safe_filename_part` 收敛，防止路径/分隔符注入）。
+- **不可计算行的成本/平台费/利润三列留空，绝不填 0**（F-51）：导出文件会被拿去 SUM，
+  填 0 等于把「不知道」污染成「不赚钱」。
+- 金额复用 `finance.line_amounts`（与明细下钻、测试手算同一份实现），格式化统一走 `finance._money`。
+
+### R3 SKU 切片
+
+`list_profit_lines` / `export_profit_lines` 增 `sku_code` 过滤，走**内部编码**
+（`ExternalOrderLine.internal_sku_id` → `ProductSku.sku_code`，与 `/orders?sku=` 的预填一致）。
+命中不到返回空结果而非 422；`total` 走同一组 filters 自动正确。
+
+### 前端（`app/templates/cockpit.html`）
+
+明细面板头部加「导出 Excel / 导出 CSV」两个按钮 + 下载逻辑（blob + `Content-Disposition` 解析 +
+`URL.revokeObjectURL`），样式从 `sources.html` 的 `.export-btn` 复制，**全部用 `var(--…)`，未新建色值**；
+未加 `.num{text-align:right}`（P5-S2 全站左对齐裁定不可违背）。**环比前端零改动**——
+`renderKpis` 已能渲染 `change_ratio`；`formatChange` 的 `null` 分支**保持现状不改**
+（改成「ratio 为 null 但 basis 有值也渲染」会让另外 6 个 KPI 全冒噪音行）。
+
+### 测试（`tests/test_p9s1_profit_enhance.py`，14 个用例）
+
+夹具直接复用 `tests/test_p7s3_profit_engine.py` 的 `ctx`（`sku_a`/`sku_b`/`sku_c` +
+`_snapshot`/`_ingest`/`_order` + cockpit 客户端），未另造一套。
+
+| 闸 | 场景 | 判定 |
+|---|---|---|
+| F-39 | 上期 40.00 / 当期 50.00 | `change_ratio == 0.25`；`change_basis == "上一等长窗口"` |
+| F-40 | 上期 −40.00 / 当期 +50.00（扭亏） | `change_ratio is None`；basis 含「为负」；显式反向锁死 ≠ −2.25 |
+| F-40b | 上期 −40.00 / 当期 −20.00（亏损收窄） | `change_ratio is None`（不得算成 +50%） |
+| F-41 | 上期无订单 | `change_ratio is None`；basis 含「无基数」 |
+| F-42 | CNY + USD 并存 | `multi_currency is True`；`value is None`；`change_ratio is None`；`by_currency` 两组 |
+| F-43 | 驾驶舱 SELECT 计数 | `≤ 9`；`profit_totals` 自身 `== 1` |
+| F-44 | 250 行明细 | 导出 `X-Export-Row-Count == 250`；明细端点 `total == 250` 但 `items` 只有 200 |
+| F-45 | 只读 / 客服 / 运营调导出 | 403 / 403 / 200 |
+| F-46 | `format=csv` | `text/csv`；body 以 `\xef\xbb\xbf` 开头 |
+| F-47 | 空窗口导出 | 200；`X-Export-Row-Count == 0`；xlsx 第 1 行 10 个表头 |
+| F-48 | `PROFIT_EXPORT_MAX_ROWS` 改 5、导 8 行 | `X-Export-Truncated == "1"`；`X-Export-Row-Count == 5` |
+| F-49 | `sku_code=SKU-A` | 明细 `total` 只算 A；`items` 的 `sku_code` 全为 A；导出同样只含 A；未知 SKU 返回空而非 422 |
+| F-50 | 环比窗口边界 | 当期 `[as_of-6, as_of]`、上期 `[as_of-13, as_of-7]`，边界订单各归各窗，窗口外的订单两边都不计 |
+| F-51 | 缺成本行的导出 | 成本/平台费/利润三列**空**（CSV 严格断言空串）；状态列「缺成本」；显式 ≠ "0"/"0.00" |
+
+### 回归红线（同为绿）
+
+`test_p7s3_profit_engine.py`（20，含 `test_f24b_summarize_profit_uses_two_queries`）、
+`test_p4_cockpit.py`、`test_p8s1_order_merge.py`（29）、`test_p5s2_tables_and_empty.py`、
+`test_p5s1_tokens.py` 全绿。
+
+### 偏差声明（3 条）
+
+1. **导出 xlsx 的工作表名为「批次结果」**：`import_exports.build_download` 只认
+   `view == "rejected"`，本片传 `view="profit"`，故 sheet_title 落到默认值。改
+   `build_download` 会动 P6-S3/P6-S4 的既有行为（任务书 §5 的改动文件清单不含它），
+   本片不动，另立切片处理。
+2. **`export_profit_lines(max_rows=...)` 用 `None` 哨兵**而非把常量写进默认值，
+   以便 F-48 能在运行时改上限（默认值绑定在函数定义时，改模块常量不会生效）。行为等价。
+3. **「当期不可计算」时的 `change_basis` 写成 `当期利润不可计算：{reason}`**，
+   而不是裸 `reason`（如 `NO_COST_SNAPSHOTS`）：信息一致但可读。`change_basis` 本片不在前端渲染。
+
+### 基线
+
+**664 passed / 0 failed**（定向 14 + §39 的 650）。零新迁移、零 schema 变更。
