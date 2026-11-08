@@ -2837,3 +2837,73 @@ E-19 编号说明：任务书指定本用例为 E-15，但 `tests/test_p6s3_data
 
 **P9-S2 待复核。** R-72 关闭、R-59 收尾、ui-v2 叠色 token 化全部落地；
 三条红线（`grep -P` 清零、T-23 契约升级、禁区零改动）均未被绕过。零新迁移。
+
+---
+
+## §43 P9-S2 复核记录：667/0 独立复现，新登记 R-73（2026-11-08）
+
+复核方：WorkBuddy。**不采信 delivery 的结论，全部独立复跑**；对实现只读，不改代码。
+
+### 独立复现结果
+
+| 项 | 复核方法 | 结果 |
+|---|---|---|
+| 全量回归 | 剥垫片命令原文执行 | **667 passed / 0 failed**，352.41s（无 flaky，一次跑绿） |
+| 裸色值清零 | 自跑 `grep -P`（**不用 `-E`**，见 §42 假绿说明） | `ui-v2.css` + `main.py` **零输出，exit=1** |
+| 禁区零改动 | `git diff --stat e14ad45..HEAD` | 无 `workspace-shell.css`、无 `app/templates/` ✅ |
+| E-19 编号 | grep `test_e15/e16/e17/e18` | E-15/16/17/18 **均已占用**，顺延 E-19 正确 ✅ |
+
+### 三项穿透核验（delivery 未覆盖的角度）
+
+**1. T-23 新契约是否空壳 —— 三项反证全过**
+
+在内存里构造三种劣化版本（不动仓库文件），检查新断言是否真能抓住：
+
+| 劣化 | 新断言反应 |
+|---|---|
+| 把 1 处 `var(--color-primary)` 写回 `#2a78d6` | ✅ 红（`裸hex:['#2a78d6']`） |
+| 删掉 `<link tokens.css>` | ✅ 红（`缺link`） |
+| 把 `<link>` 挪到 `<style>` 之后 | ✅ 红（`link在style后`） |
+
+→ 新契约**不是形同虚设**，三条断言各自有效、职责不重叠。
+
+**2. 登录页 token 引用是否悬空 —— 12 个变量全部命中**
+
+提取登录页切片内所有 `var(--x)`，与 `tokens.css` 定义集比对：
+**12 个引用 / 悬空 0**（`--color-bg`、`--color-text`、`--color-surface`、`--color-on-primary`、
+`--color-border`、`--color-primary`、`--color-primary-hover`、`--color-focus-ring`、
+`--color-text-muted`、`--color-border-input`、`--shadow-color-ambient`、`--shadow-color-key`）。
+
+**3. 视觉等价是否诚实 —— 11 项逐值相等，只差它申报的那 1 处**
+
+逐项解析 token 实际值与原裸值比对：**不等价项 = 0**；
+唯一差异是 `--color-border-input: #ccd7e5`（原 `#cbd5e1`），与 delivery §3 偏差 3、
+§42「有意微调登记」**完全一致** → 交付说明在这一点上没有隐瞒。
+
+### 结论
+
+**P9-S2 复核通过。** M1/M2/M3 三项全部落地，三条红线（`grep -P` 清零、T-23 契约升级、
+禁区零改动）均未被绕过；delivery 主动报告 3 条偏差（E-19 顺延、写法差异、有意微变），
+经核对**全部属实**。零新迁移、零 schema 变更、零新依赖。
+
+### 新登记 R-73（非阻断，测试护栏缺口）
+
+**`test_t2_no_dangling_css_variable_reference` 的扫描范围不含 `app/main.py`。**
+
+- 现状（`tests/test_p5s1_tokens.py:92-108`）：只扫 `tokens.css` + `workspace-shell.css` + 10 个模板。
+- 本次 P9-S2 把登录页从「零 `var()`」改成「12 个 `var()` 引用」后，**新增了一条会静默失效的失败路径**：
+  若将来有人把 `var(--color-border)` 拼成 `var(--color-bordr)`，CSS 该属性整体失效
+  （边框消失），但 **T-2 扫不到、T-23 只查裸 hex 也扫不到 → 全量测试依旧全绿**。
+- 实测本次实现**无悬空**（12/12 命中），所以是**护栏缺口**而非现存缺陷。
+- 建议修法（留待后续切片，不占本期）：把 `app/main.py` 加入 T-2 的 `sources`，
+  或用 P9-S2 已有的 `_login_page_slice()` 单独切出登录页再查。
+- 编号合规：`grep -rn "R-73"` 全仓零命中，R-72 之后未被占用。
+
+### 两条观察项（不单独编号，记在此处备查）
+
+1. **T-7 的「22」里有 1 处是假的**：其 docstring 自述「+1 处 customer_service 的 jQuery 选择器
+   `$('#add')` 误计入」—— 根因是 `HEX_RE` 无词边界，把 id 选择器当色值。口径瑕疵，
+   不影响断言有效性（模板未改动），但后续若调整模板脚本需重算基线。
+2. **delivery §5.3 的 `git diff --stat` 记录不完整**：缺 `dev_task.p9s2-visual-debt.md`
+   与 `tests/test_p9s2_visual_debt.py` 两行（当时新文件尚未 `git add`，untracked 不显示）。
+   实际提交 `1d5c4e6` 含全部 10 个文件，改动面以 `git show --stat 1d5c4e6` 为准。
