@@ -194,6 +194,19 @@ body {
   --shadow-panel: 0 1px 2px #1018280a, 0 10px 28px -14px #1018281f;
   --shadow-panel-hover: 0 1px 2px #1018280d, 0 16px 36px -16px #10182826;
 
+  /* 卡片双层阴影的色值（分离后可按层复用，勿与 --shadow-panel 混用） */
+  --shadow-color-ambient: #1018280a;
+  --shadow-color-key: #1018282e;
+
+  /* 主色/白色系 alpha 叠色（投影、内高光、1px 内分隔）
+     —— 语义是「色值级」，可脱离具体页面复用；勿与 --shadow-panel 混用。 */
+  --shadow-tint-primary-15: #2a78d626;   /* 主色 15% 投影（卡片/按钮默认层） */
+  --shadow-tint-primary-40: #2a78d666;   /* 主色 40% 投影（hover 层） */
+  --shadow-tint-primary-50: #2a78d680;   /* 主色 50% 投影（品牌块） */
+  --sheen-on-primary-25: #ffffff40;      /* 主色底上的内高光 */
+  --hairline-on-primary-06: #ffffff0f;   /* 主色底上的 1px 内分隔 */
+  --shadow-tint-danger-15: #c53b4526;    /* 危险色 15% 投影（基色非 --color-danger） */
+
   /* 顶栏 */
   --topbar-height: 4rem;
   --color-topbar-bg: #ffffffd9;

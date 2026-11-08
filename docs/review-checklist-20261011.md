@@ -2733,3 +2733,107 @@ value = 185.00   change_ratio = None   change_basis = 上一窗口利润为负�
 
 **P9-S1 通过复核。** 三条需求全部落地，四条红线（负基数不给比值、导出双重权限、
 不可计算行留空、不改利润口径）均未被绕过。664/0，零新迁移。
+
+---
+
+## §42 P9-S2 视觉债与细节清理：R-72 表名 + R-59 收尾 + ui-v2 叠色 token 化（2026-11-08）
+
+立项依据：用户 2026-11-08 裁定「开启 P9-S2：视觉债与细节清理（纯前端 + 极小后端调整，零风险）」。
+任务书 `dev_task.p9s2-visual-debt.md` v1.0。**零新迁移、零新表、零 schema 变更、零接口契约变更。**
+
+### R-72 关闭：导出表名参数化
+
+`import_exports.build_download` 增可选参数 `sheet_title: str | None = None`：
+
+- **默认值必须是 `None`**（不是 `"导出结果"`）——给成后者会让批次导出的表名
+  从「批次结果」变成「导出结果」，属于未经裁定的行为变更。
+- `None` 时沿用原判据（`"异常明细" if view == "rejected" else "批次结果"`）。
+- 利润导出端点（`app/main.py`）显式传 `sheet_title="利润明细"`；
+  **批次导出调用点不传参数**，零影响。
+- `xlsx_download` 签名**未动**（31 字符上限截断逻辑原样保留）。
+
+| 导出 | 改动前 | 改动后 |
+|---|---|---|
+| 利润（`view="profit"`） | 批次结果 | **利润明细** |
+| 批次原始（`view="raw"`） | 批次结果 | 批次结果（不变） |
+| 批次异常（`view="rejected"`） | 异常明细 | 异常明细（不变） |
+
+### R-59 收尾：登录页 token 化
+
+登录页是单行 f-string 内联 HTML（`app/main.py`），改动前后：
+
+1. `<head>` 内、`<style>` **之前**插入 `<link rel="stylesheet" href="/static/css/tokens.css">`；
+   层级顺序对齐 T-1 约定（tokens → 组件层 → 页内 style）。`/static/` 在免鉴权白名单内，
+   未登录访问 `/login` 能正常加载，不会 303 跳登录页。
+2. **11 种裸色值 / 18 处出现**全量 `var()` 化（逐条对照任务书 §3.2 替换表）。
+3. 新增 2 个通用阴影色 token（`--shadow-color-ambient` / `--shadow-color-key`），
+   命名是**色值级**而非「登录页专用组件 token」，符合 P5-S1 G11。
+
+**登录页 DOM 结构、表单字段、文案、`/login` 的 POST 逻辑一律未动**（红线 6）。
+
+### ⚠️ 有意微调登记：`#cbd5e1 → var(--color-border-input)`
+
+任务书 §3.2 第 10 项：登录页表单控件边框原为 `#cbd5e1`，而 token
+`--color-border-input` 的值是 `#ccd7e5`（同语义、同用途的表单控件边框，灰度差 1~2 阶、
+肉眼不可辨）。**选择归并而非新增近义 token**，符合 P5-S1「单一真源」目标。
+**这是本片唯一的有意视觉微变，已在 delivery 显式登记。**
+
+### M3：ui-v2.css 叠色 token 化
+
+`app/static/css/ui-v2.css` 6 行 / 7 处出现的 6 种 alpha 叠色提成 6 个 token
+（值**逐字节一致**，含 8 位 hex 的最后两位 alpha）：
+
+| token | 值 | 用途 |
+|---|---|---|
+| `--shadow-tint-primary-15` | `#2a78d626` | 主色 15% 投影（卡片/按钮默认层） |
+| `--shadow-tint-primary-40` | `#2a78d666` | 主色 40% 投影（hover 层） |
+| `--shadow-tint-primary-50` | `#2a78d680` | 主色 50% 投影（品牌块） |
+| `--sheen-on-primary-25` | `#ffffff40` | 主色底上的内高光 |
+| `--hairline-on-primary-06` | `#ffffff0f` | 主色底上的 1px 内分隔 |
+| `--shadow-tint-danger-15` | `#c53b4526` | 危险色 15% 投影 |
+
+**注意**：`#c53b4526` 的基色是 `#c53b45`，**不等于** `--color-danger`（`#d03b3b`）。
+未做推导替换，否则视觉会变。
+
+### T-23 契约升级（有意变更，不是改绿测试）
+
+`tests/test_p5s3_visual_skeleton.py::test_t23_p5s6_login_page_polish` 的原断言
+`m.group(1).lower() in main_py.lower()`（要求 `--color-primary` 的 hex 出现在 `main.py`）
+在 var 化后**必然为红**——那是 P5-S6 当时的过渡契约（hex 同值）。
+
+**升级理由：hex 同值只能防「值漂移」，防不住「再次分叉出第二份真源」。**
+故升级为更强契约：登录页 HTML 切片内**引 tokens.css + 用 `var(--color-primary)` +
+`<link>` 在 `<style>` 之前 + 零裸 hex**（用带边界正则，`#add-event`/`#toast-root`
+等 id 选择器不会被误判）。
+
+保留断言：`'2563eb' not in main_py`（R-59 根因永不回归）+ 全部表单契约片段。
+
+### 裸色值清零核验（必须 `grep -P`）
+
+`grep -E` 遇到 lookaround **不报错，而是静默返回零行** —— 实测同一正则 `-E` 输出为空、
+`-P` 能抓出 6 行。`-E` 会让「裸色值清零」这个闸门**永远通过**，是本片最容易造假绿的地方。
+本次核验一律 `grep -P`，并与改动前基线（ui-v2.css **6 行** / main.py **1 行**）做对照自证。
+
+### 禁区零改动自证
+
+- `app/static/workspace-shell.css`：**零改动**（O-P5S1-1 继续挂账）。
+- 10 个模板的 `<style>` / `<script>`：**零改动**（T-4/T-6/T-7 断言原样通过，
+  `<script>` 内色值仍为 22）。
+- **未格式化任何 CSS 文件**（不换行、不展开选择器、不排序属性）。
+
+### 本片新增用例（3 条）
+
+| 用例 | 落点 | 断言 |
+|---|---|---|
+| `test_f52_profit_export_sheet_title` | `tests/test_p9s1_profit_enhance.py` | 利润导出 xlsx → `sheetnames == ["利润明细"]` |
+| `test_e19_batch_export_sheet_title_unchanged` | `tests/test_p6s3_data_export.py` | 批次导出 `raw → ["批次结果"]`、`rejected → ["异常明细"]` |
+| `test_m1_no_hardcoded_color_in_ui_v2` | `tests/test_p9s2_visual_debt.py`（新建） | ui-v2 裸色值 == 0；6 个 token 已定义且值逐字节正确；且**确实被引用** |
+
+E-19 编号说明：任务书指定本用例为 E-15，但 `tests/test_p6s3_data_export.py` 已有
+`test_e15_silent_drop_is_captured`（静默丢行护栏），同文件同名函数会**互相覆盖既有用例**，
+故顺延为 E-19（已在 delivery 登记偏差）。
+
+### 结论
+
+**P9-S2 待复核。** R-72 关闭、R-59 收尾、ui-v2 叠色 token 化全部落地；
+三条红线（`grep -P` 清零、T-23 契约升级、禁区零改动）均未被绕过。零新迁移。

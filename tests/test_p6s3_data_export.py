@@ -447,3 +447,25 @@ def test_e18_persistence_not_truncated(tmp_path, monkeypatch):
     with db_mod.SessionLocal() as db:
         from app.db import ExternalImportRejection
         assert db.query(ExternalImportRejection).count() == 5
+
+
+def test_e19_batch_export_sheet_title_unchanged(tmp_path, monkeypatch):
+    """回归保护：批次导出的工作表名默认判据**不得漂移**。
+
+    P9-S2 给 build_download 加了可选 sheet_title（None = 沿用原判据），
+    利润导出显式传「利润明细」；批次导出（raw / rejected）**不传参数**，
+    仍应是「批次结果」/「异常明细」。
+
+    编号说明：任务书指定本用例为 E-15，但本文件已有 E-15（静默丢行护栏），
+    同文件同名函数会互相覆盖既有用例，故顺延为 E-19（已在 delivery 登记偏差）。
+    """
+    client, _db = _client(tmp_path, monkeypatch)
+    commit = _upload(client, content=DIRTY_CSV.encode(), allow_skipped=True)
+    assert commit.status_code == 200, commit.text
+    run_id = commit.json()["sync_run_id"]
+
+    raw_workbook = _load_xlsx(_export(client, run_id, "raw", fmt=""))
+    assert raw_workbook.sheetnames == ["批次结果"], raw_workbook.sheetnames
+
+    rejected_workbook = _load_xlsx(_export(client, run_id, "rejected", fmt=""))
+    assert rejected_workbook.sheetnames == ["异常明细"], rejected_workbook.sheetnames

@@ -192,11 +192,20 @@ def build_download(
     headers: list[str],
     rows: list[list[str]],
     export_format: str = "xlsx",
+    sheet_title: str | None = None,
 ) -> Response:
-    """统一出口：xlsx（默认，Excel 友好）/ csv（机器可读）。"""
+    """统一出口：xlsx（默认，Excel 友好）/ csv（机器可读）。
+
+    ``sheet_title``：None = 沿用原判据（「异常明细」/「批次结果」）；
+    显式传入则用传入值（P9-S2：利润导出的表名是「利润明细」，原先落到 else
+    分支显示成「批次结果」）。默认值必须是 None——若给成 "导出结果"，
+    批次导出的表名会从「批次结果」变成「导出结果」，属于未经裁定的行为变更。
+    """
     if export_format == "csv":
         return csv_download(f"{filename_base}.csv", headers, rows)
+    resolved_title = sheet_title
+    if resolved_title is None:
+        resolved_title = "异常明细" if view == "rejected" else "批次结果"
     return xlsx_download(
-        f"{filename_base}.xlsx", headers, rows,
-        sheet_title="异常明细" if view == "rejected" else "批次结果",
+        f"{filename_base}.xlsx", headers, rows, sheet_title=resolved_title,
     )

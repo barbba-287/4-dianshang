@@ -455,3 +455,25 @@ def test_f50_previous_window_is_adjacent_and_non_overlapping(ctx):
     kpi = body["kpis"]["estimated_profit"]
     assert kpi["value"] == "385.00", kpi          # 145 + 240，窗口外的 400 不在内
     assert abs(kpi["change_ratio"] - 6.7) < 1e-9, kpi   # (385 - 50) / 50
+
+
+# ---------------------------------------------------------------------------
+# F-52 导出表名（P9-S2 · R-72）
+# ---------------------------------------------------------------------------
+
+
+def test_f52_profit_export_sheet_title(ctx):
+    """利润导出的 xlsx 工作表名必须是「利润明细」。
+
+    P9-S1 的偏差：利润导出走 build_download 的 else 分支，Sheet 名落成「批次结果」。
+    P9-S2 给 build_download 加可选 sheet_title，利润导出显式传「利润明细」。
+    """
+    import openpyxl
+
+    _snapshot(ctx, ctx.sku_a, "45.00")
+    _ingest(ctx, _order(order_no="ORD-CURR", lines=[_line("EXT-SKU-A")], created=CURR_TIME, updated=CURR_TIME))
+
+    response = _export(ctx)  # 默认 format=xlsx
+    assert response.status_code == 200, response.text
+    workbook = openpyxl.load_workbook(io.BytesIO(response.content))
+    assert workbook.sheetnames == ["利润明细"], workbook.sheetnames

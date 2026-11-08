@@ -520,20 +520,47 @@ def test_t22_p5s6_toast_component():
     assert 'toast.success(' in orders, 'orders.html 缺少 toast 示范调用'
 
 
+def _login_page_slice(main_py: str) -> str:
+    """切出登录页 HTML 片段（`@app.get("/login")` 到 `return` 语句结束那一行）。
+
+    只做文件级静态切片，不启动服务。切到 `@app.post("/login")` 之前，
+    保证不会把 POST 逻辑或后续路由的字符串误判成登录页样式。
+    """
+    start = main_py.index('@app.get("/login"')
+    end = main_py.index('@app.post("/login")', start)
+    return main_py[start:end]
+
+
+# 裸色值有边界正则（PCRE / Python re 通用）：
+# 前置断言确保 `#add-event` 之类 id 选择器不会被误判成色值。
+HARDCODED_HEX_RE = re.compile(
+    r"(?<![0-9A-Za-z_-])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3})(?![0-9A-Za-z_-])"
+)
+
+
 def test_t23_p5s6_login_page_polish():
-    """T-23（P5-S6）：登录页精修 —— 消灭 #2563eb 漂移（R-59），主色与 tokens
-    --color-primary 同值；保留表单契约字段。"""
+    """T-23（P5-S6，**P9-S2 升级契约**）：登录页精修。
+
+    P5-S6 原契约要求「登录页主色 hex 与 tokens --color-primary 同值」，
+    该契约在 P9-S2 把登录页 token 化（改用 var(--color-primary)）后必然为红。
+    P9-S2 将其升级为更强的契约：**引 tokens.css + 用 var() 引用 + 零裸 hex**。
+
+    升级理由：hex 同值只能防「值漂移」，防不住「再次分叉出第二份真源」。
+    """
     main_py = _read(ROOT / 'app' / 'main.py')
     assert '2563eb' not in main_py, 'main.py 登录页仍残留 #2563eb（R-59）'
-    tokens = _read(TOKENS)
-    m = re.search(r'--color-primary:\s*(#[0-9a-fA-F]{6})', tokens)
-    assert m, 'tokens.css 缺少 --color-primary'
-    assert m.group(1).lower() in main_py.lower(), \
-        '登录页主色必须使用 --color-primary 的同值 hex'
     # 表单契约不被样式重构破坏
     for frag in ("name='login'", "name='password'", "name='workspace'",
                  "id='message'", "<h1>员工登录</h1>", "action='/login'"):
         assert frag in main_py, f'登录页缺少契约片段 {frag}'
+
+    login_html = _login_page_slice(main_py)
+    assert 'href="/static/css/tokens.css"' in login_html, '登录页必须引入 tokens.css'
+    assert 'var(--color-primary)' in login_html, '登录页主色必须引用 var(--color-primary)'
+    assert login_html.index('tokens.css') < login_html.index('<style>'), \
+        'tokens.css 的 <link> 必须在页内 <style> 之前（层级：tokens → 组件层 → 页内 style）'
+    hits = HARDCODED_HEX_RE.findall(login_html)
+    assert not hits, f'登录页仍残留裸色值 {hits}'
 
 
 # ---------------------------------------------------------------- P5-S7
