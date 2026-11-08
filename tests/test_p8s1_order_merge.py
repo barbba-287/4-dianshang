@@ -392,13 +392,21 @@ def test_f31c_mock_mode_records_are_never_merged(ctx):
 
 
 def test_f32_missing_external_line_id_gets_unique_ids(ctx):
-    """CSV 没有 external_line_id 列 → 每行都是 line:0 → 合并必须重编号，否则撞唯一约束。"""
+    """CSV 没有 external_line_id 列 → 每行都是 line:0 → 合并必须重编号，否则撞唯一约束。
+
+    P9-S3（dev_task.p9s3-order-upsert.md §2 D2 / §6 T-R68-5）：**入库后的行 id 形态变了**——
+    合成 id 已从 `line:N` 改为稳定指纹 `csv:{sku_token}|{seq}`。
+    本用例的意图（组内 id 互不相同、不撞唯一约束）**一字未改**，只是断言跟着新规则改写。
+    注：聚合层（`aggregate_order_records`）的 id 仍是 `line:0..`——见 F-32b，那条未动。
+    """
     response = _upload(ctx, THREE_SKU_CSV)
     assert response.status_code == 200, response.text
     lines = _lines(ctx)
     assert len(lines) == 3
     assert len({line.external_line_id for line in lines}) == 3, "组内 id 必须互不相同"
-    assert all(line.external_line_id.startswith("line:") for line in lines)
+    assert sorted(line.external_line_id for line in lines) == [
+        "csv:EXT-SKU-A|0", "csv:EXT-SKU-B|0", "csv:EXT-SKU-C|0",
+    ]
 
 
 def test_f32b_unique_ids_are_preserved(ctx):

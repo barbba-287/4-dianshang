@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TOKENS = ROOT / 'app' / 'static' / 'css' / 'tokens.css'
 SHELL = ROOT / 'app' / 'static' / 'workspace-shell.css'
 TPL_DIR = ROOT / 'app' / 'templates'
+# P9-S3 §3（M0 / R-73）：T-2 的扫描源此前**漏了 app/main.py**，
+# 而登录页的 var() 引用恰恰写在 main.py 里 —— 这就是 R-73 的根因。
+APP_MAIN = ROOT / 'app' / 'main.py'
 
 TEMPLATES = sorted(TPL_DIR.glob('*.html'))
 
@@ -42,6 +45,16 @@ def _defined_vars(css: str):
     for m in re.finditer(r'(--[A-Za-z0-9_-]+)\s*:\s*([^;{}]+)', css):
         out[m.group(1)] = m.group(2).strip()
     return out
+
+
+def _dangling_in(text: str, defined) -> list:
+    """返回 text 中**没有定义**的 var(--x) 变量名（去重、排序）。
+
+    抽成独立函数是为了让 R-73 的反证用例能直接复用同一份判定逻辑：
+    「人为把 var(--color-border) 改成 var(--color-bordr) 时 T-2 必须变红」
+    这条反证，不许另写一份判定（两套实现会让反证失去意义）。
+    """
+    return sorted({v for v in VAR_RE.findall(text) if v not in defined})
 
 
 # ---------------------------------------------------------------- T-1
@@ -90,22 +103,41 @@ def test_t1_token_completeness():
 # ---------------------------------------------------------------- T-2
 
 def test_t2_no_dangling_css_variable_reference():
-    """T-2（核心）：tokens.css + workspace-shell.css + 10 个模板中
-    所有 var(--x) 引用的变量都必须有定义。"""
+    """T-2（核心）：tokens.css + workspace-shell.css + app/main.py + 10 个模板中
+    所有 var(--x) 引用的变量都必须有定义。
+
+    P9-S3 §3（M0 / R-73）：扫描源新增 `app/main.py`。
+    登录页的 var() 引用写在 main.py 里，此前 T-2 **根本没扫到它** ——
+    把 `var(--color-border)` 改成 `var(--color-bordr)` 这类悬空引用不会被 T-2 拦下。
+    """
     defined = set(_defined_vars(_read(TOKENS)))
     defined |= set(_defined_vars(_read(SHELL)))
 
     dangling = {}
-    sources = [('tokens.css', _read(TOKENS)), ('workspace-shell.css', _read(SHELL))]
+    sources = [
+        ('tokens.css', _read(TOKENS)),
+        ('workspace-shell.css', _read(SHELL)),
+        # P9-S3 §3：R-73 修复 —— app/main.py 进入扫描源。
+        ('main.py', _read(APP_MAIN)),
+    ]
     for path in TEMPLATES:
         sources.append((path.name, _read(path)))
 
     for name, text in sources:
-        missing = sorted({v for v in VAR_RE.findall(text) if v not in defined})
+        missing = _dangling_in(text, defined)
         if missing:
             dangling[name] = missing
 
     assert not dangling, '存在悬空 CSS 变量引用：%s' % dangling
+
+    # 配套断言：main.py 必须**真的**被扫到，且扫到了 var() 引用。
+    # 否则「把 main.py 加进 sources」可能只是加了个空文件进去（假覆盖）。
+    main_vars = sorted(set(VAR_RE.findall(_read(APP_MAIN))))
+    assert main_vars, 'app/main.py 里没有任何 var(--x) 引用，加进 sources 是空转'
+    assert '--color-border' in main_vars, (
+        'app/main.py 应当仍引用 --color-border（登录页边框色），'
+        '实为 %s' % main_vars
+    )
 
 
 # ---------------------------------------------------------------- T-3

@@ -2958,3 +2958,53 @@ E-19 编号说明：任务书指定本用例为 E-15，但 `tests/test_p6s3_data
    用户只看到「跳过 N 条」。这是 R-69 修复里最容易被漏、后果最直接的一条。
 3. **`payload_hash` 已核实不受 id 规则影响**（`connectors.py:255` 取原始映射行，不含 `external_line_id`）
    → 存量重传不会从 `no_op` 变 `updated`，R-65 判重分组不变。**不要为此改 hash 计算。**
+
+---
+
+## §45 P9-S3 阶段 A 落地：行指纹 + R-68 修复 + R-73 关闭 + `line_mode` 预埋（2026-11-08）
+
+**实施方落地登记。复核以 `.testtmp/delivery.p9s3a.md` + 原始测试输出为准。**
+任务书：`dev_task.p9s3-order-upsert.md` v1.0；分支 `feat/warehouse-mvp`，**未 push**。
+
+### 实施范围（严格按任务书 §9 第一轮）
+
+| 做了 | 明确没做 |
+|---|---|
+| §3 M0（R-73：`app/main.py` 进入 T-2 扫描源 + 配套断言 + 反证） | §4B 阶段 B（SAVEPOINT / 跨批 MERGE / 前端勾选框） |
+| §4 A-1（旧 `ingest_orders` **原样**冻结为 `_ingest_orders_legacy`，逐行自证相等） | §2 D5 的四个连带问题（单头重算 / stale 下沉 / 批次部分成功） |
+| §4 A-2（`app/order_line_identity.py` 指纹模块 + 4 条纯函数单测） | `ingest_orders` 的**签名**变更（`line_mode` 仍是端点参数，阶段 B 才进函数签名） |
+| §4 A-3（锚定继承改指纹 + 双索引兼容，旧行 seq 从 id 解析） | 前端任何改动（`sources.html` 零改动） |
+| §4 A-4（`tests/_p9s3_probe.py` 探针 + 三组对拍） | 任何 `app/db.py` 改动（零迁移） |
+| §4 A-5（`line_mode` 预埋 + `incremental` 明确 422 `LINE_MODE_NOT_ENABLED`） | |
+
+### 关键结论（复核必查）
+
+1. **R-73 关闭**：T-2 的扫描源新增 `app/main.py`。实测 `main.py` 有 **12 个唯一 `var()` 引用，12/12 全部有定义**；
+   反证用例把 `var(--color-border)` 改成 `var(--color-bordr)` 后判定**必须报红**
+   （`tests/test_p9s3_order_upsert.py::test_t_r73_main_py_css_variable_coverage`）。
+2. **R-68 的修复落在「锚定继承」而不是「id 规则」**：五件套继承改为「**指纹 → 旧 id → as-of**」三级匹配；
+   `external_line_id` 的新规则只改**存储形态**，不触碰锚定结论。
+3. **R-3 红线未破**：命中后仍是原样继承五件套，`anchored_at` **一个字节都不动**
+   （原始值取证见 delivery §5.2）。
+4. **`payload_hash` 语义零变化**：规范化被放在「**聚合之后、R-65 判重之前**」，且**绝不重算 hash**
+   → 存量重传仍 `no_op`、R-65 判重分组不漂移（组 3 已断言两侧订单头 `payload_hash` 逐条相同）。
+5. **旧行 seq 不依赖查询返回顺序**：旧 id `csv:SKU|seq` 直接解析、`line:N` 按 N 数值升序排序后按 SKU 计数，
+   抽成唯一函数 `legacy_seq_map`（A-3 与探针**共用同一份**）。
+
+### 偏差（4 条，详见 delivery §3）
+
+1. **任务书 §5.2 第 7 条 / 台账 §44 第 3 条判据的依据不实**：orders 路径的**行级与记录级 `payload_hash`
+   其实都含 `external_line_id`**（`connectors.py:314/320`、`:330-332/340`；任务书引用的 `connectors.py:255`
+   属 inventory 路径）。实现用「规范化位置 + 不重算 hash」规避，**行为结论仍成立**（no_op 与判重分组均未漂移）。
+2. **`kind=costs` 在 `/api/external/imports` 不可达**（该端点 kind 白名单只有 `inventory`/`orders`，既有设计）
+   → T-LM-2 的「非订单 kind 忽略该参数」改在 **inventory 分支**与**成本快照端点**两处验证。
+3. **`tests/test_p8s1_order_merge.py` 的 F-32 断言随 id 新规则改写**（用例意图「组内 id 互不相同、
+   不撞唯一约束」一字未改；F-32b 断言的是聚合层 id，未动）。
+4. **`payload_json` 保留规范化之前的原始载荷**（含 `line:N`）→ 组 1 的订单头**逐字节一致**；
+   只有 `external_order_lines.external_line_id` 一列是新规则。
+
+### 编号
+
+- **R-73 关闭**（T-2 覆盖 `app/main.py`）。
+- **R-74 保持挂账**（阶段 B 关闭）。
+- **R-68 在阶段 A 已修**（指纹继承 + 双索引）；**R-69** 留待阶段 B。

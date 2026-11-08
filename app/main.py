@@ -4421,6 +4421,8 @@ async def external_import_commit(
     warehouse_ref: str | None = Form(default=None),
     column_mapping: str | None = Form(default=None),
     allow_skipped: bool = Form(default=False),
+    # P9-S3 D3/A-5：line_mode 预埋（**默认 full = 与今天逐字节等价**）。
+    line_mode: str = Form(default="full"),
 ):
     """报表导入入库：建来源批次 → 幂等写入外部事实层。
 
@@ -4432,6 +4434,24 @@ async def external_import_commit(
     `allow_skipped=true`（用户勾选「跳过异常行」）时才剔除坏行入库并落隔离表。
     """
     principal = require_principal(request, permission="catalog.write")
+    # P9-S3 阶段 A（A-5）：line_mode 预埋校验。**这是临时契约**——
+    # incremental 的真正语义（保留旧行）在阶段 B 才实现，此处一律 422 明确拒绝，
+    # 避免「商家勾了却按 full 删行重建」的假开关（任务书 §2 D4、§7 红线 9）。
+    # 阶段 B 会删除 LINE_MODE_NOT_ENABLED 分支。
+    # 仅对 kind == "orders" 校验；inventory / costs 分支**忽略**该参数（不报错）。
+    if kind == "orders":
+        if line_mode not in ("full", "incremental"):
+            raise DomainError(
+                code="LINE_MODE_INVALID",
+                message="line_mode 仅支持 full / incremental",
+                http_status=422,
+            )
+        if line_mode == "incremental":
+            raise DomainError(
+                code="LINE_MODE_NOT_ENABLED",
+                message="增量导入尚未启用，请使用全量模式",
+                http_status=422,
+            )
     outcome = await _import_parse(
         file=file, platform=platform, kind=kind,
         account_ref=account_ref, store_ref=store_ref, warehouse_ref=warehouse_ref,

@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.connectors import ExternalOrderRecord
 from app.config import resolve_fee_rate
 from app.order_aggregation import aggregate_order_records, log_merge_reports
+from app.order_line_identity import legacy_seq_map, normalize_csv_line_ids
 from app.db import (
     CostSnapshot,
     DailySkuSale,
@@ -335,7 +336,7 @@ def _anchor_pending_lines(
             line.cost_status = COST_STATUS_RESOLVED
 
 
-def ingest_orders(
+def _ingest_orders_legacy(
     db: Session,
     records: list[ExternalOrderRecord],
     *,
@@ -461,6 +462,203 @@ def ingest_orders(
                 )
                 db.add(row)
                 previous = inherited.get(line.external_line_id)
+                if internal_id is None:
+                    # 没有内部 SKU → 成本无从谈起，也不能算"缺失成本"（归因分离，Q6 裁定）。
+                    row.cost_status = COST_STATUS_UNMAPPED
+                    row.fee_rate = resolve_fee_rate(record.platform)
+                    row.anchored_at = datetime.utcnow()
+                elif (
+                    previous
+                    and previous[1] in ANCHORED_COST_STATUSES
+                    and previous[0] == line.external_sku
+                ):
+                    # ★ 红线 R-3：已锚定 → 原样继承五件套，绝不重新 as-of。
+                    # 若在这里重查成本表，「今天补录的成本」就会改写一笔三天前更新过的订单的
+                    # 历史利润——这是本切片唯一不可救的架构级错误，宁可保留旧结论。
+                    # 附带比对 external_sku：外部行标识若换了商品，旧锚定锚的是别的 SKU 的成本，
+                    # 沿用等于用错成本，那种情况落到下面的重新抓取分支。
+                    row.cost_snapshot_id = previous[2]
+                    row.unit_cost = previous[3]
+                    row.fee_rate = previous[4]
+                    row.cost_status = previous[1]
+                    row.anchored_at = previous[5]
+                else:
+                    # 新行 / 上次未命中（missing）/ 从 unmapped 升级为 mapped → 走 as-of。
+                    pending.append((row, internal_id, sale_time, record.platform))
+                touched.add((account.id, line.external_sku))
+            stats.affected_dates.append(record.external_created_at.date().isoformat())
+        # 成本锚定必须在 flush 之前：此时行对象仍处于 pending 状态、字段可直接赋值，
+        # 且整批只发 1 条快照查询（红线 R-2）。
+        _anchor_pending_lines(db, pending, workspace_id=workspace_id)
+        db.flush()
+        for account_id, external_sku in touched:
+            _rebuild_key(db, workspace_id=workspace_id, external_account_id=account_id, external_sku=external_sku)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    stats.affected_dates = sorted(set(stats.affected_dates or []))
+    return stats
+
+
+def ingest_orders(
+    db: Session,
+    records: list[ExternalOrderRecord],
+    *,
+    workspace_id: int,
+    sync_run_id: str | None = None,
+) -> SalesImportStats:
+    if not workspace_id:
+        raise ValueError("WORKSPACE_CONTEXT_REQUIRED")
+    # R-66：展平报表预聚合。必须发生在 R-65 判重**之前**——否则「一行一个 SKU」的合法
+    # CSV（同一订单号跨多行）会在判重处就被 422 拦死，永远走不到合并。
+    # 聚合是纯内存变换：只对 source_mode == "csv" 生效，无 DB 访问，失败即原样返回。
+    original_total = len(records)
+    records, merge_reports = aggregate_order_records(records)
+    if merge_reports:
+        log_merge_reports(merge_reports)
+    # P9-S3 D2：行 id 稳定化。规范化位置必须在**聚合之后、R-65 判重之前**，
+    # 且对所有 source_mode == "csv" 的记录统一处理（单行订单不走 merge，
+    # 否则同一订单「3 行聚合」与「1 行」会得到两套 id 规则）。
+    # 只改写 external_order_lines.external_line_id 这一个字段；
+    # payload_json / payload_hash 仍取规范化之前的原始载荷（组 1 对拍要求逐字节一致）。
+    normalized_records = normalize_csv_line_ids(records)
+    # R-65：判重必须在任何写入之前。整批要么全部进入，要么一条都不动——
+    # 半批入库 + 500 会让「订单事实」与批次历史对不上，人工排查成本远高于直接拒绝。
+    # 输入是**聚合后**的记录：可合并的已经合并，剩下的才是真冲突。
+    duplicates = find_duplicate_order_numbers(records)
+    if duplicates:
+        order_no, count = duplicates[0]
+        raise BatchDuplicateOrderError(order_no, count, duplicate_count=len(duplicates))
+    stats = SalesImportStats(
+        total=original_total,
+        sync_run_id=sync_run_id,
+        affected_dates=[],
+        merged_orders=len(merge_reports),
+        merged_rows=sum(report.row_count for report in merge_reports),
+    )
+    touched: set[tuple[int, str]] = set()
+    # P7-S2：待锚定行先攒着，循环外一次性预取快照（红线 R-2：新增查询 ≤1）。
+    pending: list[tuple[ExternalOrderLine, int, datetime, str]] = []
+    try:
+        for record, norm_record in zip(records, normalized_records):
+            account = ensure_external_account(
+                db, workspace_id=workspace_id, platform=record.platform,
+                account_ref=record.account_ref, store_ref=record.store_ref,
+                source_mode=record.source_mode, simulated=record.simulated,
+            )
+            existing = db.scalar(select(ExternalOrder).where(
+                ExternalOrder.workspace_id == workspace_id,
+                ExternalOrder.external_account_id == account.id,
+                ExternalOrder.external_order_no == record.external_order_no,
+            ))
+            # (external_sku, cost_status, cost_snapshot_id, unit_cost, fee_rate, anchored_at)
+            inherited: dict[str, tuple[str, str, int | None, Decimal | None, Decimal | None, datetime | None]] = {}
+            # P9-S3 D2：双索引兼容——指纹索引（新规则）+ 旧 id 索引（存量兜底）。
+            inherited_by_fp: dict[tuple[str, int], tuple[str, str, int | None, Decimal | None, Decimal | None, datetime | None]] = {}
+            if existing is not None:
+                newer = (record.event_version is not None and (existing.event_version is None or record.event_version > existing.event_version)) or (
+                    record.event_version is None and _utc_naive(record.external_updated_at) > _utc_naive(existing.external_updated_at)
+                )
+                if existing.payload_hash == record.payload_hash:
+                    stats.no_op += 1
+                    continue
+                if not newer:
+                    stats.stale += 1
+                    continue
+                old_lines = db.scalars(
+                    select(ExternalOrderLine).where(ExternalOrderLine.external_order_id == existing.id)
+                ).all()
+                # 先把锚定五件套抄成普通元组再删行——挂着的 ORM 对象随 DELETE 失效，
+                # 直接引用会在重建时读到脏状态（这正是「成本神秘丢失」的经典成因）。
+                inherited = {
+                    line.external_line_id: (
+                        line.external_sku,
+                        line.cost_status or COST_STATUS_MISSING,
+                        line.cost_snapshot_id,
+                        line.unit_cost,
+                        line.fee_rate,
+                        line.anchored_at,
+                    )
+                    for line in old_lines
+                }
+                # P9-S3 D2：指纹索引。旧行的 seq **从 id 解析**，不依赖 select 的返回
+                # 顺序（该 select 没有 ORDER BY，按返回位置推断会让行为随数据库漂移）。
+                _legacy_seq = legacy_seq_map(old_lines)
+                inherited_by_fp = {
+                    _legacy_seq[line.external_line_id]: (
+                        line.external_sku,
+                        line.cost_status or COST_STATUS_MISSING,
+                        line.cost_snapshot_id,
+                        line.unit_cost,
+                        line.fee_rate,
+                        line.anchored_at,
+                    )
+                    for line in old_lines
+                    if line.external_line_id in _legacy_seq
+                }
+                touched.update((account.id, line.external_sku) for line in old_lines)
+                db.execute(delete(ExternalOrderLine).where(ExternalOrderLine.external_order_id == existing.id))
+                order = existing
+                stats.updated += 1
+                touched.update((account.id, line.external_sku) for line in record.lines)
+            else:
+                order = ExternalOrder(
+                    workspace_id=workspace_id, external_account_id=account.id,
+                    platform=record.platform, account_ref=record.account_ref, store_ref=record.store_ref,
+                    external_order_no=record.external_order_no, order_status=record.order_status,
+                    external_created_at=record.external_created_at, paid_at=record.paid_at,
+                    external_updated_at=record.external_updated_at, event_version=record.event_version,
+                    gross_amount=record.gross_amount, refund_amount=record.refund_amount, currency=record.currency,
+                    payload_json=json.dumps(record.as_dict(), ensure_ascii=False, sort_keys=True),
+                    payload_hash=record.payload_hash, idempotency_key=record.idempotency_key,
+                    source_mode=record.source_mode, simulated=record.simulated, sync_run_id=sync_run_id,
+                    data_completeness=record.data_completeness, status_reason=record.status_reason,
+                )
+                db.add(order)
+                db.flush()
+                stats.inserted += 1
+            order.order_status = record.order_status
+            order.external_created_at = record.external_created_at
+            order.paid_at = record.paid_at
+            order.external_updated_at = record.external_updated_at
+            order.event_version = record.event_version
+            order.gross_amount = record.gross_amount
+            order.refund_amount = record.refund_amount
+            order.payload_json = json.dumps(record.as_dict(), ensure_ascii=False, sort_keys=True)
+            order.payload_hash = record.payload_hash
+            order.idempotency_key = record.idempotency_key
+            order.sync_run_id = sync_run_id
+            order.data_completeness = record.data_completeness
+            order.status_reason = record.status_reason
+            sale_time = _utc_naive(record.external_created_at)
+            # P9-S3 D2：seq 在「重建循环」里对本订单已见过的同 SKU 行数累加（Counter）。
+            sku_counter: Counter[str] = Counter()
+            for line, norm_line in zip(record.lines, norm_record.lines):
+                mapping = db.scalar(select(ExternalProductMapping).where(
+                    ExternalProductMapping.workspace_id == workspace_id,
+                    ExternalProductMapping.external_account_id == account.id,
+                    ExternalProductMapping.external_sku == line.external_sku,
+                ))
+                internal_id = mapping.internal_sku_id if mapping and mapping.mapping_status == "mapped" else None
+                row = ExternalOrderLine(
+                    workspace_id=workspace_id, external_order_id=order.id,
+                    external_line_id=norm_line.external_line_id, external_sku=line.external_sku,
+                    internal_sku_id=internal_id, ordered_qty=line.ordered_qty,
+                    cancelled_qty=line.cancelled_qty, refunded_qty=line.refunded_qty,
+                    gross_amount=line.gross_amount, refund_amount=line.refund_amount,
+                    currency=line.currency, mapping_status="mapped" if internal_id else "unmapped",
+                    data_completeness=record.data_completeness, payload_hash=line.payload_hash,
+                )
+                db.add(row)
+                # P9-S3 D2：匹配顺序 = 指纹 → 旧 id → as-of。
+                previous = None
+                if record.source_mode == "csv":
+                    _seq = sku_counter[line.external_sku]
+                    sku_counter[line.external_sku] += 1
+                    previous = inherited_by_fp.get((line.external_sku, _seq))
+                if previous is None:
+                    previous = inherited.get(norm_line.external_line_id)
                 if internal_id is None:
                     # 没有内部 SKU → 成本无从谈起，也不能算"缺失成本"（归因分离，Q6 裁定）。
                     row.cost_status = COST_STATUS_UNMAPPED
