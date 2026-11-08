@@ -2661,3 +2661,75 @@ C(1×20) 收入 20 成本 5 费 1 → 14.00。合计 40.50。
 ### 基线
 
 **664 passed / 0 failed**（定向 14 + §39 的 650）。零新迁移、零 schema 变更。
+
+## §41 P9-S1 复核记录（2026-11-08，WorkBuddy 独立复核）
+
+复核方式：**不采信交付说明的自报数字**，全部自己重跑 + 独立探针验证关键口径。
+
+### 独立实测
+
+| 项 | 命令 | 实测 |
+|---|---|---|
+| 定向 | `pytest tests/test_p9s1_profit_enhance.py` | **14 passed / 0 failed**（11.20s） |
+| 全量 | `pytest -q`（剥 `PYTHONPATH`/`PYTHONHOME`） | **664 passed / 0 failed**（385.65s，基线 650 + 14） |
+| 台账/任务书入库 | `git show --stat f91ed95` | 7 个文件全在（含任务书 + §40），工作区干净 |
+
+### 三项独立探针（不依赖交付方的测试，自写自跑后已删）
+
+**① 口径一致性 —— 本片最大的隐含风险**
+
+环比分子来自 `summarize_profit.total_profit`、分母来自 `profit_totals`。两者只要差一分钱，
+百分比就是错的且会长期静默。构造混合场景（2 行可计算 + 1 行缺成本 + 1 行未映射，跨 2 个 SKU）：
+
+```
+summary.total_profit = 44.00
+profit_totals        = {'CNY': '44.00'}     ← 逐分相等
+手算核对：A 50−10×3−2.50 = 17.50；B 70−20×2−3.50 = 26.50；合计 44.00 ✅
+```
+
+**② 全窗口只有缺成本行**：`total_profit = None`、`quality = insufficient`、
+`profit_totals = {}`（**不是 `{"CNY": 0}`**）。「没有行」与「利润是 0」在报表上是两件事，
+返回 `0` 会让环比算出「本期暴跌 100%」这种假信号 ✅
+
+**③ 负基数反向锁**：上期亏 70（30 收入 − 100 成本）、当期赚 200（300 − 100 − 15）：
+
+```
+value = 185.00   change_ratio = None   change_basis = 上一窗口利润为负，环比无经济意义
+```
+
+若实现成 `(185 − (−70)) / (−70)` 会得到 −3.64、若用 `abs` 会得 +3.64，两者都会显示成
+「增长/下降三百多个百分点」。实测为 `None` ✅
+
+### 代码逐条抽查（不只看测试通过）
+
+| 检查点 | 位置 | 结论 |
+|---|---|---|
+| 负基数判据 | `cockpit.py:98-124` `_money_change` | `previous <= 0` 返回 None，docstring 写明不用 `abs` 的两条反例 ✅ |
+| 环比四分支 | `cockpit.py:487-508` | 多币种 / 当期不可计算 / prev>0 / prev==0 / prev<0 全覆盖，无遗漏分支 ✅ |
+| 导出权限 | `main.py:1886` | `permission="analytics.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS)` 逐字复制，无后门 ✅ |
+| 查询预算 | `finance.py:628` / `finance.py:698` | 两个新函数各只有 1 个 `db.execute`（静态核对），驾驶舱 9 条 ✅ |
+| 不可计算行留空 | `finance.py:731-733` | `item["cost"] if computed else ""`，三列同款，无 `0` 兜底 ✅ |
+| SKU 过滤租户隔离 | `finance.py:497` / `finance.py:704` | outerjoin 带 `ProductSku.workspace_id == ExternalOrderLine.workspace_id`，`total` 与明细同过滤 ✅ |
+| 前端色值 | `cockpit.html:14-15` | `.export-btn` 全用 `var(--…)`，**未新建 token、未硬编码**（不撞 P5-S1） ✅ |
+| 左对齐裁定 | `cockpit.html` | `.num{text-align:right}` **0 处**（P5-S2 裁定未被破坏） ✅ |
+| 截断提示 | `cockpit.html:57` | 读 `X-Export-Truncated === '1'` → `toast.warning`，非静默 ✅ |
+| 空结果导出 | `cockpit.html:55` | 空结果分支**保留导出按钮**（「导出空表」是合法需求） ✅ |
+
+### 发现 1 个非阻断瑕疵（登记，未修）
+
+导出的 xlsx 工作表名是**「批次结果」**而不是「利润明细」。根因：`import_exports.build_download`
+内部写死 `sheet_title="异常明细" if view == "rejected" else "批次结果"`，本片传 `view="profit"`
+落到 else 分支。用户打开 Excel 底部 tab 看到「批次结果」会困惑。
+
+- 交付说明已如实报告（偏差 1），判断「不动 `import_exports.py`」是对的（任务书禁区）；
+- **本片不做**，正式登记如下（编号接 R-71 之后，连续不跳号、不复用）。
+
+| 编号 | 问题 | 影响 | 处置 | 建议时机 |
+|---|---|---|---|---|
+| **R-72** | `import_exports.build_download` 的 `sheet_title` 写死为 `"异常明细" if view == "rejected" else "批次结果"`，无外部可控参数。P9-S1 传 `view="profit"` 落到 else → 利润导出 xlsx 的工作表名是「批次结果」 | 纯展示：Excel 底部 tab 名与内容不符，用户会困惑；**数据与文件名均正确** | 给 `build_download` 加可选 `sheet_title: str | None = None`，None 时保持现有 `rejected`/`批次结果` 逻辑，P6 两处调用零影响；利润端点传 `sheet_title="利润明细"` | P9-S2 或视觉债切片顺手收 |
+
+
+### 结论
+
+**P9-S1 通过复核。** 三条需求全部落地，四条红线（负基数不给比值、导出双重权限、
+不可计算行留空、不改利润口径）均未被绕过。664/0，零新迁移。
