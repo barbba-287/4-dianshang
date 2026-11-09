@@ -139,7 +139,7 @@ GET  /api/finance/cost-snapshots
 
 ```bash
 GET /api/dashboard/cockpit?days=7&as_of=2026-11-06   # profit 段：KPI / by_currency / ranking / 缺失计数
-GET /api/finance/profit/lines?days=7&sku_code=SKU-A  # 明细下钻（上限 200 行）
+GET /api/finance/profit/lines?days=7&sku_code=SKU-A&limit=50&offset=50  # 明细下钻（分页，每页 50/100/200）
 POST /api/finance/cost-backfill                       # 回填缺失成本（默认 dry_run=true）
 ```
 
@@ -326,12 +326,10 @@ python -m app.cli init-db     # 已有 legacy 库（自动识别并 stamp 后修
 | R-45 | 数据质量门禁为**观察态**，`failed` 不拦截入库 |
 | R-48 / R-49 | 死信无跨进程调度，重放靠人工触发；补偿上限 3 与退避 30s 是拍板值非 SLA |
 | R-52 | 采购单**无金额/单价/供应商报价**字段，审批无法体现「批多少钱」 |
-| R-59 | `/login` 主色 `#2563eb` 与全站主色 `#2a78d6` 不一致（登录页是 `main.py` 内联 HTML，改它须先解 P1-1 冻结） |
-| R-66 / R-67 / R-71 | 已关闭：预聚合、商品金额分摊、退款分摊 |
-| R-68 | 合并后 `external_line_id` 按**位置**重编号，商家调整行序会导致锚定错位 |
-| R-69 | 同一订单的行**分散在两个文件**时不会合并，需「订单级 UPSERT + 行级 MERGE」 |
-| — | 利润明细单页上限 200 行，无全量导出（已接受，留后续切片） |
-| — | 利润**无环比**；只读客服角色看不到利润（有意为之，未来单开 `finance.read`） |
+| R-59 / R-66 / R-67 / R-71 | 已关闭：登录页主色 token 化、预聚合、商品金额分摊、退款分摊 |
+| R-68 / R-69 | 已关闭：行指纹 + 订单级 UPSERT + 行级 MERGE（P9-S3） |
+| — | 利润明细页面分页（每页 50/100/200，单页上限 200）；导出为全窗口，上限 20000 行（超出时 `X-Export-Truncated=1`） |
+| — | 只读客服角色看不到利润（有意为之，未来单开 `finance.read`） |
 
 ### 其他限制
 
