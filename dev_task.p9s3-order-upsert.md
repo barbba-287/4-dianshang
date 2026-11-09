@@ -509,9 +509,13 @@ def snapshot(db) -> dict:
    - 并强制断言**双射**：两侧归一化后的 id 集合必须**大小相同且一一对应**（不是「随便映射一下」）。
 6. **比对前必须排序**：两侧快照按 `(external_sku, seq)` 排序后逐行比 —— `:395-397` 的 select
    **没有 `ORDER BY`**，返回顺序不受保证，按位置比会随机红。
-7. **`payload_hash` 已核实不受影响**（`connectors.py:255` 的 `_payload_hash(row)` 取的是**原始映射行**，
-   不含 `external_line_id`）→ 改 id 规则**不会**让存量重传从 `no_op` 变 `updated`，
-   也不会影响 R-65 的判重分组。**所以不要为了这个去改 `payload_hash` 的计算**。
+7. **`payload_hash` **含** `external_line_id`，所以「位置」与「不重算」两条必须同时满足**
+   （2026-11-09 复核更正：初版写的「不含 id」**是错的**，引用的 `connectors.py:255` 属 inventory 路径）：
+   - 行级：`connectors.py:313-320` —— `line_payload = {**line, "external_line_id": line_id}` → `_payload_hash(line_payload)`；
+   - 记录级：`:330-332` canonical 的 `lines` 取 `line.__dict__`（含 `external_line_id`）→ `:340` `_payload_hash(canonical)`。
+   → **结论仍成立，但理由变了**：`payload_hash` 是**上游载荷**的指纹（来自 CSV 的 `line:N`，不读库），
+   所以只要「规范化放在聚合之后」且「**绝不重算 hash**」，存量重传仍是 `no_op`、R-65 分组不漂移。
+   **若把规范化提前到聚合之前、或顺手重算 hash，`no_op` 立刻失效** —— 阶段 B 必须守住这两条。
 
 ### §5.3 切换许可
 

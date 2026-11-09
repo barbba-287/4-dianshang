@@ -3008,3 +3008,86 @@ E-19 编号说明：任务书指定本用例为 E-15，但 `tests/test_p6s3_data
 - **R-73 关闭**（T-2 覆盖 `app/main.py`）。
 - **R-74 保持挂账**（阶段 B 关闭）。
 - **R-68 在阶段 A 已修**（指纹继承 + 双索引）；**R-69** 留待阶段 B。
+
+---
+
+## §46 P9-S3 阶段 A 复核记录：682/0 独立复现 + 我自己的判断错误已更正（2026-11-09）
+
+复核方：WorkBuddy。**不采信 delivery 结论，全部独立复跑**；对实现只读，不改代码。
+
+### 独立复现
+
+| 项 | 复核方法 | 结果 |
+|---|---|---|
+| 全量回归 | 剥垫片命令原文执行 | **682 passed / 0 failed**，388.45s（无 flaky，一次跑绿） |
+| A-1「一个字符都不许改」 | **自写 AST + 逐行比对**（不用它的脚本）：`git show 535a217:app/external_orders.py` 的 `ingest_orders` vs 现 `_ingest_orders_legacy` | 163 行 body **逐行零差异**；`ast.dump` 体**完全相同**；只有 `def` 行函数名不同 ✅ |
+| 零迁移 / 前端零改动 | `git show --stat e6763e9` | 8 文件，**无 `app/db.py`、无 `app/templates/`** ✅ |
+| 对拍双射实现 | 读 `tests/_p9s3_probe.py:319-379` | 双射是真的：先查「归一化后撞键」（`:343-345`），再查「键集合相等」（`:346-348`），不是只比大小 ✅ |
+| `anchored_at` 口径 | 读 `_anchored_state`（`:296-315`）+ `LINE_FIELDS`（`:64-75`） | `LINE_FIELDS` 不含 `anchored_at`，由 `present` / `preserved` 单独判 —— 符合 §5.2 第 3 条 ✅ |
+| T-LM-1/2 | 读用例 | T-LM-1 断言 422 + code + **零写入**；T-LM-2 非法值 422 + inventory 忽略 + 成本端点多余字段忽略 ✅ |
+| T-R73 | 读用例（`:685-701`） | 真做变异（`--color-border`→`--color-bordr`）+ 断言判定报红，**不是口头反证** ✅ |
+| T-2 防假覆盖 | 读 `test_p5s1_tokens.py:100-138` | 除加入 `main.py` 外，另加「`main.py` 必须真扫到 `var()`」「必须含 `--color-border`」两条配套断言 ✅ |
+
+### ★ 三项穿透反证（delivery 未做的角度）
+
+用临时 pytest 插件把 `app.external_orders.normalize_csv_line_ids` 换成**恒等函数**（= 未修复 R-68 的状态），
+再跑 R-68 系列用例，看是否真能抓住回归：
+
+| 用例 | 恒等化后 | 说明 |
+|---|---|---|
+| **T-R68-3**（id 稳定） | 🔴 **红** | `['line:0','line:1','line:2'] != ['csv:…']` |
+| **T-R68-4**（存量兼容） | 🔴 **红** | 同上 |
+| **T-R68-5**（同 SKU 多行） | 🔴 **红** | 同上 |
+| **T-R68-1**（锚定五件套） | 🟢 **仍绿** | ← **这条是重点，见下** |
+
+**T-R68-1 仍绿不是缺陷，而是揭示了本片的真实结构**：
+
+> **R-68 的修复本体是「指纹索引」（`inherited_by_fp` 用 `legacy_seq_map(old_rows)` 得 `(sku, seq)`，
+> 匹配时用 `sku_counter` 算本批 `(sku, seq)`），与 `external_line_id` 的新规则完全解耦。**
+> D2 的 id 稳定化服务的是另一个目标：**id 集合稳定**（跨批可对齐、可作对账锚）。
+> 两者是并联的两件事，不是一件事的两个部分。
+
+台账 §45 的结论 2 已说对（「修复落在锚定继承而不是 id 规则」），与实测一致；
+但**任务书 §2 D2 的表述容易让人以为是 id 规则修好了 R-68**，阶段 B 请勿按这个理解去动 id 规则。
+
+### ⚠️ 复核方（我）的一处判断错误，已更正
+
+**错误**：任务书 §5.2 第 7 条与台账 §44 第 3 条判据写「`payload_hash` 不含 `external_line_id`，
+所以改 id 规则不会让存量重传从 `no_op` 变 `updated`」，依据是 `connectors.py:255`。
+
+**事实（已独立核实）**：`:255` 属 **inventory** 路径。orders 路径**含** `external_line_id`：
+- 行级 `connectors.py:313-320`：`line_payload = {**line, "external_line_id": line_id}` → `_payload_hash(line_payload)`；
+- 记录级 `:330-332`（canonical 的 `lines` 取 `line.__dict__`）→ `:340` `_payload_hash(canonical)`。
+
+**结论仍然成立，但理由完全不同**：`payload_hash` 是**上游载荷**的指纹（来自 CSV 的 `line:N`，**不读库**），
+所以「规范化放在聚合之后」+「绝不重算 hash」两条同时满足时，存量重传仍 `no_op`。
+实现正是这么做的，行为正确 —— **但依据写错会误导后来者**（会有人以为「hash 无关，所以随便重算没事」）。
+
+→ 任务书 §5.2 第 7 条已就地改写为正确依据；§44 的对应判据以本条为准。
+**这是我方（复核/规划）的缺陷，不计入实施方偏差。**
+
+### 交付规范偏差（实施方）
+
+1. **`e6763e9` 的 commit message 为空**（`git log -1 --format=%s` 返回空串）。
+   文件改动本身完整（8 文件 / +1568 −8），但历史里出现无名提交，将来 `git log` 无法追溯本片。
+   **未擅自 amend**（改写他人提交不在复核方权限内）→ 建议 push 前用
+   `git commit --amend -m "feat(P9-S3a): 行指纹 + R-68 修复 + R-73 关闭 + line_mode 预埋"` 补齐。
+2. 其余 4 条偏差（`payload_hash` 依据、`kind=costs` 不可达、F-32 改写、`payload_json` 保留原始载荷）
+   经核对**全部属实且处置正确**；F-32 的改法是**加强**断言（保留「id 互不相同」意图 + 加新规则字面值），
+   属有意契约变更，不是把测试改绿。
+
+### 一条复核方法学坑（供以后复用）
+
+`tests/test_p8s1_order_merge.py:52` 的 `ctx` fixture 里有 **`importlib.reload(app.external_orders)`**。
+所以在 `pytest_configure` 里打的 monkeypatch **会被 reload 冲掉**（我因此得到过一次「反证全绿」的假结论）。
+**正确时机是 `pytest_runtest_call`**（fixture setup 之后、测试体执行之前）。
+
+### 结论
+
+**P9-S3 阶段 A 复核通过。** 组 1 全一致 / 组 2 按预期不同且 new 正确 / 组 3 全不变，三组对拍满足切换许可；
+11 条红线逐条守住（R-3、R-2、R-65 422、零迁移、双索引、`legacy` 保留、未放宽比对字段、未提前挂前端开关）。
+**R-73 关闭**（并已确认不是空转覆盖）。**R-74 仍挂账**（阶段 B）。
+
+阶段 B 准入条件已具备。开跑前必须带上本记录的三条提醒：
+① 修复本体是指纹索引，别去动 id 规则；② `payload_hash` 含 id，**绝不重算**；
+③ `_rebuild_key` 与 `touched` **不许改**（§44 已记）。
