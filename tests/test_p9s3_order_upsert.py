@@ -702,20 +702,34 @@ def test_t_r73_main_py_css_variable_coverage():
 
 
 # ===========================================================================
-# T-LM-1 / T-LM-2（line_mode 预埋护栏）
+# T-LM-1 / T-LM-2（line_mode 护栏 → 阶段 B：真实现上线）
 # ===========================================================================
 
-def test_t_lm_1_incremental_rejected_in_stage_a(ctx):
-    """T-LM-1：kind=orders 带 line_mode=incremental → 422 LINE_MODE_NOT_ENABLED。
+def test_t_lm_1_incremental_effective_in_stage_b(ctx):
+    """T-LM-1（**阶段 B 契约变迁**）：kind=orders 带 line_mode=incremental → 200 且**生效**。
 
-    **不许** 200、**不许**静默当 full 执行（那是「假开关」，比没有开关更危险）。
+    阶段 A 的断言是「422 LINE_MODE_NOT_ENABLED」（防"假开关"的临时护栏）。
+    阶段 B 按任务书 B-5 落地了 incremental 的真实现，护栏已删除，
+    断言必须改成「**生效**」——否则这条用例还在保护一个已经不存在的契约。
+
+    生效的判据不是"只看 200"：增量模式下**本批未出现的旧行必须原样保留**。
+    先全量导入 ORD-ABC 的三行，再增量导入只含 A 的文件 → 库里应仍是 3 行。
     """
-    response = _upload(ctx, ABC_CSV, line_mode="incremental")
-    assert response.status_code == 422, response.text
-    body = response.json()
-    assert body["detail"]["code"] == "LINE_MODE_NOT_ENABLED", response.text
-    # 必须零写入
-    assert _lines(ctx) == []
+    first = _upload(ctx, ABC_CSV)
+    assert first.status_code == 200, first.text
+    assert len(_lines(ctx)) == 3, _lines(ctx)
+
+    only_a = (
+        f"{HEADER}\n"
+        f"ORD-ABC,account-a,store-a,paid,{SALE_TIME},{UPDATED2},EXT-SKU-A,2,40.00\n"
+    ).encode()
+    second = _upload(ctx, only_a, line_mode="incremental")
+    assert second.status_code == 200, second.text
+    body = second.json()
+    assert body["sync_status"] == "succeeded", second.text
+    rows = _lines(ctx)
+    assert len(rows) == 3, rows
+    assert sorted(row.external_sku for row in rows) == ["EXT-SKU-A", "EXT-SKU-B", "EXT-SKU-C"]
 
 
 def test_t_lm_2_invalid_value_and_non_order_kind(ctx):

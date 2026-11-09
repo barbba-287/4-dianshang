@@ -3091,3 +3091,70 @@ E-19 编号说明：任务书指定本用例为 E-15，但 `tests/test_p6s3_data
 阶段 B 准入条件已具备。开跑前必须带上本记录的三条提醒：
 ① 修复本体是指纹索引，别去动 id 规则；② `payload_hash` 含 id，**绝不重算**；
 ③ `_rebuild_key` 与 `touched` **不许改**（§44 已记）。
+
+---
+
+## §47 P9-S3 阶段 B 落地：SAVEPOINT 跨批 MERGE + `incremental` 真实现 + 前端开关（2026-11-09）
+
+**实施方落地登记。复核以 `.testtmp/delivery.p9s3b.md` + 原始测试输出为准。**
+任务书：`dev_task.p9s3-order-upsert.md` v1.0 §4B（B-1~B-5）/ §6 / §7；分支 `feat/warehouse-mvp`，**未 push**。
+基线：阶段 A 收口 **682 passed / 0 failed**（`8762447`）→ 本片 **692 passed / 0 failed**（净增 10 条）。
+
+### 实施范围（严格按任务书 §4B）
+
+| 做了 | 明确没做 |
+|---|---|
+| B-1 `ingest_orders` 加 `line_mode`（默认 `full`），**5 个调用点只改 1 个**（`main.py:4499`） | 其余 4 个调用点（`main.py:2684/3039/3469`、`platform_sync.py:65`）**一个字符都没改** |
+| B-2 `incremental` 并列新分支（不 DELETE / 双索引继承 / stale 下沉到行粒度 / 单头按库里全部行重算 / `_rebuild_key` 与 `touched` 填充零改动） | 不做 `line_mode` 自动推断（方案 C）；`incremental` 不提供删行能力 |
+| B-3 每笔订单包一层 `with db.begin_nested():` + 失败笔从 `pending`/`touched`/计数剔除并计入 `rejected_orders` | 不把 `rejected_orders` 等计数加进响应 schema（`ExternalImportCommitResponse` 仍是 11 键） |
+| B-4 `sources.html` 勾选框 + hint + JS + kind 联动，**零新增样式**（复用 `.import-skip`/`.import-warn`） | 不动 `import-allow-skipped` 的既有行为与文案 |
+| B-5 删掉 `LINE_MODE_NOT_ENABLED`（保留 `LINE_MODE_INVALID`）；T-LM-1 改写为断言「生效」 | 不改 `full` 分支的 stale 判定 / DELETE / 单头赋值（红线 11） |
+| 批次部分成功语义：`complete_sync_run` 新增 `partial` 判断 + 响应 `sync_status=run.status` | 不动 `id` 生成规则（红线 1）；**绝不重算 `payload_hash`**（红线 2） |
+
+### B-3 强制前置：`begin_nested()` 的实测结论（探针 P1–P7，原始输出 `.testtmp/_p9s3b_txn_probe.out`）
+
+1. **Session 由 `get_db` 的 `SessionLocal()` 创建，入口 `in_transaction() == False`**（`autoflush=False`）→ `begin_nested()` 自开根事务；
+2. **`begin_nested()` 在发出 SAVEPOINT 之前会隐式 flush 挂起对象** → 前序各笔的落库不受本笔回滚影响；
+3. **savepoint 回滚把本笔新建的 ORM 对象 expunge 成 transient** → 给它赋值**不报错但静默丢失**（§1.6 坑 1 的根因）
+   ⇒ `pending`/`touched`/计数**必须手工回退**；
+4. **savepoint 能吸收 flush 阶段的 DB 约束冲突**（`ROLLBACK TO SAVEPOINT` 后根事务存活、批次可继续）
+   ⇒ **每笔的 `db.flush()` 必须在 savepoint 内**，否则打穿根事务、整批陪葬；
+5. 回滚不误伤前序已 RELEASE 的 savepoint 数据；前序**未 flush** 的对象会被下次 `begin_nested()` 提前 flush。
+
+### 关键结论（复核必查）
+
+1. **R-74 关闭**：`incremental` 的单头金额/退款**按库里该订单全部行重算**（flush 之后），T-R69-4 断言单头 70.00 == 行之和；
+   且**传入的 record 单头不被改写**（仍 30.00）。
+2. **R-69 关闭**：跨批补行落地 —— 第一批只有 A、第二批（incremental）只有 B → 订单 2 行，A 的五件套逐字段不变（R-3），
+   同文件重传仍判 `no_op`（`payload_hash` 未重算）。T-R69-5 反向守住：旧版本批次**不拦**新行、
+   但**不得覆盖**已有行的载荷（`stale=0` / `skipped_lines=1` / `inserted_lines=1`）。
+3. **R-2 未破**：`test_f34b_snapshot_query_still_one` 重跑通过（SAVEPOINT + 每笔 flush 未打破"整批 1 条 cost_snapshots 查询"）。
+4. **`partial` 在订单导入路径原本不可达**（`begin_sync_run` 不写分资源条目 → `complete_sync_run` 无条件 `succeeded`）
+   → 阶段 B 新增判断（`run.status = "partial" if stats.rejected else "succeeded"`），
+   响应 `sync_status` 由硬编码改为 `run.status`。
+5. **三组对拍**：① 跨批合并 vs 一次性导入（两个外部账号并存在同一个库，行集合/单头/日销**逐值相等**）；
+   ② 行序倒置重传（id 集合不变、零新增行、五件套逐字段不变）；③ 单笔失败隔离（flush 阶段触发器强制 ABORT →
+   该笔零残留、其余笔照常、`sync_status == "partial"`、`pending` 里没有失败笔的行）。
+
+### 偏差（8 条，详见 delivery §8）
+
+1. `full` 分支循环体搬进 `_ingest_order_full()`（`continue`→`return`），语义逐字保留，仅新增 2 行纯计数；
+2. `incremental` 下单头**只在 `newer` 时**覆盖版本字段，`sync_run_id` 始终更新；
+3. `incremental` 下单头金额/退款**始终**按库里全部行重算（金额是派生量、不变量，不是版本事实）；
+4. `incremental` 下 `stats.stale` 改为"本批 0 行生效"，行级跳过改用 `skipped_lines` 表达；
+5. `touched` 的回滚用 `intersection_update`（回退到本笔之前）**而不是 `remove`**——同批两笔可能触及同一 SKU；
+6. 新增 `SalesImportStats.inserted_lines/updated_lines/skipped_lines`（**不进响应 schema**）；
+7. `complete_sync_run` 新增 `partial` 判断（原路径不可达）；
+8. `ImportStats` 新增 `rejected` 字段（`getattr` 兼容既有 4 个构造点）。
+
+### 编号
+
+- **R-74 关闭**（单头按库里全部行重算，T-R69-4）。
+- **R-69 关闭**（跨批补行落地，T-R69-1/3/5/6）。
+- **R-73 保持关闭**（阶段 A 关闭，回归仍绿）。
+- **T-LM-1 契约变迁已登记**（阶段 A 断言 422 → 阶段 B 断言"生效"，有意变更，非回归；台账 §47 与 delivery §6 双向留痕）。
+
+### 回归
+
+- 定向：**69 passed / 0 failed**（新增文件 + 阶段 A 文件 + `test_p8s1_order_merge.py` + `test_p7s2_cost_anchoring.py`）。
+- 全量：**692 passed / 0 failed**（334.06s，一次跑绿，无 flaky）。

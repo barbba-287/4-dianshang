@@ -4434,22 +4434,16 @@ async def external_import_commit(
     `allow_skipped=true`（用户勾选「跳过异常行」）时才剔除坏行入库并落隔离表。
     """
     principal = require_principal(request, permission="catalog.write")
-    # P9-S3 阶段 A（A-5）：line_mode 预埋校验。**这是临时契约**——
-    # incremental 的真正语义（保留旧行）在阶段 B 才实现，此处一律 422 明确拒绝，
-    # 避免「商家勾了却按 full 删行重建」的假开关（任务书 §2 D4、§7 红线 9）。
-    # 阶段 B 会删除 LINE_MODE_NOT_ENABLED 分支。
+    # P9-S3 阶段 B（B-5）：line_mode 的**真实现**已上线——`incremental` 走
+    # `ingest_orders` 的并列分支（跨批补行 + 单头按库里全部行重算）。
+    # 阶段 A 的临时护栏 `LINE_MODE_NOT_ENABLED` 已删除（那是防"假开关"的，
+    # 语义落地后必须撤掉，否则勾了也不生效）。
     # 仅对 kind == "orders" 校验；inventory / costs 分支**忽略**该参数（不报错）。
     if kind == "orders":
         if line_mode not in ("full", "incremental"):
             raise DomainError(
                 code="LINE_MODE_INVALID",
                 message="line_mode 仅支持 full / incremental",
-                http_status=422,
-            )
-        if line_mode == "incremental":
-            raise DomainError(
-                code="LINE_MODE_NOT_ENABLED",
-                message="增量导入尚未启用，请使用全量模式",
                 http_status=422,
             )
     outcome = await _import_parse(
@@ -4499,8 +4493,11 @@ async def external_import_commit(
             if any(record.account_ref != batch_account_ref or record.store_ref != batch_store_ref for record in records):
                 raise ValueError("MIXED_EXTERNAL_ACCOUNT")
             run = begin_sync_run(db, workspace_id=principal.workspace_id, platform=platform, sync_type="orders", account_ref=batch_account_ref, store_ref=batch_store_ref, source_mode="csv")
-            result = ingest_orders(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id)
-            stats = ImportStats(total=result.total, inserted=result.inserted, updated=result.updated, no_op=result.no_op, conflict=result.conflict, stale=result.stale)
+            # P9-S3 阶段 B（B-1）：**只有** CSV 提交这一个调用点传 line_mode；
+            # 其余四个调用点（shopify 同步 / 续跑 / JSON 批量 / 平台同步）一个字符都不改，
+            # 它们走默认的 full（与今天逐字节等价）。
+            result = ingest_orders(db, records, workspace_id=principal.workspace_id, sync_run_id=run.run_id, line_mode=line_mode)
+            stats = ImportStats(total=result.total, inserted=result.inserted, updated=result.updated, no_op=result.no_op, conflict=result.conflict, stale=result.stale, rejected=result.rejected_orders)
         complete_sync_run(db, run, stats)
     except ValueError as exc:
         if run is not None:
@@ -4523,7 +4520,9 @@ async def external_import_commit(
     return ExternalImportCommitResponse(
         platform=platform, kind=kind, total=stats.total, inserted=stats.inserted,
         updated=stats.updated, no_op=stats.no_op, conflict=stats.conflict,
-        sync_run_id=run.run_id, sync_status="succeeded", detected_encoding=outcome.encoding,
+        # P9-S3 阶段 B（B-3）：部分成功必须写成 `partial`，不许一律 `succeeded`。
+        # run.status 由 complete_sync_run 决定（有失败笔 → partial）。
+        sync_run_id=run.run_id, sync_status=run.status, detected_encoding=outcome.encoding,
         rejected_count=rejected_saved,
     )
 

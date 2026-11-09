@@ -156,6 +156,10 @@ class ImportStats:
     sync_run_id: str | None = None
     sync_status: str | None = None
     affected_dates: list[str] | None = None
+    # P9-S3 阶段 B（B-3）：单笔 SAVEPOINT 失败后，一批里可能有失败的笔。
+    # >0 表示**部分成功**——批次 run 的状态必须是 `partial`，不许写成 `succeeded`。
+    # 注意：`ExternalImportCommitResponse` 的 11 个键**不变**，这个计数只用于批次状态。
+    rejected: int = 0
 
 
 def _resource_entry(*, status: str = "pending", execution: str = "attempted") -> dict:
@@ -679,7 +683,12 @@ def complete_sync_run(db: Session, run: ExternalSyncRun, stats: ImportStats) -> 
     if resource_names:
         # Resource-aware callers already recorded per-resource statistics.
         return finalize_resource_run(db, run)
-    run.status = "succeeded"
+    # P9-S3 阶段 B（B-3）：**部分成功语义**。
+    # 订单 CSV 导入路径不走分资源条目（`begin_sync_run` 只写 schema_version），
+    # 所以 `partial` 在这条路径上**原本不可达**——`calculate_overall_status` 没有
+    # 分资源条目时直接返回 run.status，而这里又无条件写 `succeeded`。
+    # 现在按 `stats.rejected`（失败笔数）新增判断：有失败笔就是 `partial`。
+    run.status = "partial" if getattr(stats, "rejected", 0) else "succeeded"
     run.finished_at = datetime.utcnow()
     run.heartbeat_at = run.finished_at
     run.total = stats.total
