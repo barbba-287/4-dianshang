@@ -3158,3 +3158,124 @@ E-19 编号说明：任务书指定本用例为 E-15，但 `tests/test_p6s3_data
 
 - 定向：**69 passed / 0 failed**（新增文件 + 阶段 A 文件 + `test_p8s1_order_merge.py` + `test_p7s2_cost_anchoring.py`）。
 - 全量：**692 passed / 0 failed**（334.06s，一次跑绿，无 flaky）。
+
+---
+
+## §48 P9-S3 阶段 B 复核记录：692/0 独立复现 + 三项反证 + 新登记 R-75（2026-11-09）
+
+复核方：WorkBuddy。**不采信 delivery 结论，全部独立复跑**；对实现只读，不改代码（临时反证改动均已还原，`git diff` 为空）。
+
+### 独立复现
+
+| 项 | 复核方法 | 结果 |
+|---|---|---|
+| 全量回归 | 剥垫片命令原文执行，**干净工作区** | **692 passed / 0 failed**，420.22s（基线 682，净增 10） |
+| 全量回归（对照） | 另有一次运行（见下方「方法学坑 2」） | 692 passed / 0 failed，427.05s —— 两次同结论 |
+| 定向（新增+阶段A+R-2+成本锚定） | 5 个测试文件 | **59 passed / 0 failed**（+ `test_p9s3b` 10 条 = 69，与 delivery 一致） |
+| R-2 守卫 | `pytest -k f34b` 单独跑 | **1 passed** —— SAVEPOINT + 每笔 flush 未打破「整批 1 条快照查询」 |
+| `_rebuild_key` 零改动 | `git diff \| grep -c _rebuild_key` | **0**（B-2 第 5 条守住） |
+| `payload_hash` 不重算 | `git diff \| grep payload_hash` | 全部是**搬移**（`-` 与 `+` 同内容），无任何新计算 |
+| 其余 4 个调用点 | `git diff \| grep ingest_orders` | 只有 CSV 提交一处 `+line_mode`；`platform_sync.py` **零改动** |
+| 响应键集 | `ExternalImportCommitResponse` | 仍是 **11 个键**（`schemas.py:861-875`），未新增 |
+
+### ★ 核心核验一：「`full` 分支循环体原样搬出」是否属实 —— 属实
+
+自写 AST + `difflib` 比对（**不用 delivery 的脚本**）：
+
+- 基准 = `8762447:app/external_orders.py` 的 **`ingest_orders` 循环体**（阶段 A 收口版）；
+- 对照 = 现 `_ingest_order_full` 的函数体；
+- 归一化：`state.x` → `x`、`return` → `continue`（`continue` 已改 `return`）、剔除 2 行新增计数；
+- 结果：**142 行 vs 142 行，`unified_diff` 零差异** ✅
+
+> ⚠️ **我第一次比对了错误基准**：拿 `_ingest_orders_legacy` 当基准，得到 32 行差异。
+> 原因：`_ingest_orders_legacy` 是**阶段 A 冻结的原始版**（不含 R-68 指纹索引），而 `full` 分支
+> 是从**阶段 A 的新 `ingest_orders`** 搬来的。基准选错会把「阶段 A 的既有改动」误判成本阶段违规。
+
+### ★ 核心核验二：三项穿透反证（delivery 未做的角度）
+
+用**临时改源码 + 立即还原**的方式劣化（`Session.begin_nested` 的类属性 patch 不可靠，见「方法学坑 1」）：
+
+| 反证 | 劣化方式 | 预期 | 实测 |
+|---|---|---|---|
+| **A 去掉 SAVEPOINT** | `with db.begin_nested():` → `with nullcontext():` | T-SP-1/2 红 | 🔴 **T-SP-1 红（500 / `orders: []` 整批陪葬）、T-SP-2 红（`PendingRollbackError`）** ✅ |
+| **B `incremental` 走 `full`** | 分支里改调 `_ingest_order_full` | R-69 系列红 | 🔴 **T-R69-1 / 3 / 4 / 5 红**；T-R69-2（本身就是 full 用例）、T-R69-6 绿 ✅ |
+| **C R-74 未修** | 单头回写成 `record.gross_amount` | T-R69-4 红 | 🔴 **`assert Decimal('30.00') == Decimal('70.00')`** ✅ |
+
+**反证 A 的额外收获（独立证实 delivery §2.4 的 P4 结论）**：无 savepoint 时不只是"失败笔未被隔离"，
+而是 **HTTP 返回 500 `EXTERNAL_SYNC_FAILED`、`orders: []`、`lines: []`——整批零落库**。
+这就是「flush 打穿根事务、整批陪葬」的现场，`partial` 根本走不到。
+
+**反证 B 的职责澄清**：T-R69-6（行序倒置）在 `incremental→full` 下**依然绿**——因为它测的是
+**R-68 的指纹继承**（full 也有双索引），不是 R-69 的"不删行"。两者职责不同，不可互相替代。
+未来若有人想"合并这两条用例"，会同时丢掉一个维度。
+
+### ★ 核心核验三：`SAVEPOINT` 的隔离边界是靠"实际日志"确定的，不是靠读代码
+
+诊断脚本抓 `before_cursor_execute`，正常实现下的真实轨迹（3 笔）：
+
+```
+SAVEPOINT sa_savepoint_1 → RELEASE  ...第 1 笔
+SAVEPOINT sa_savepoint_2 → ROLLBACK TO → ...第 2 笔失败
+SAVEPOINT sa_savepoint_3 → RELEASE  ...第 3 笔继续
+```
+
+**与 delivery §2.3/§2.4 的 P3/P4 完全吻合**：根事务活着、第 3 笔能继续。
+
+### 新登记 R-75（非阻断，测试护栏缺口）
+
+**`touched` 的回滚方式没有任何测试看守。**
+
+- 现状（`external_orders.py:971`）：`touched.intersection_update(_touched_mark)`。这个写法**是正确的**——
+  它只撤销本笔新增的条目，保留前序笔的信号。
+- 交付偏差 5 的理由也正确（同一批两笔可能触及同一 SKU，直接 `remove` 会抹掉前一笔的重建信号）。
+  **但没有任何用例锁住它。**
+- 实测反证：把该行劣化成「本笔 `record.lines` 涉及的 SKU 一律 `discard`」——
+  - 构造场景：`ORD-1(A, 2件, 40.00)` 成功、`ORD-2(A, 1件, 20.00)` 在 flush 阶段失败（按订单号装触发器）；
+  - 正确实现：日销 = `{'EXT-SKU-A': (2件, 40.00)}` ✅
+  - 劣化实现：日销 = **`{}`**（整条消失，第 1 笔的销售额凭空蒸发）
+  - **而 `tests/test_p9s3b_order_upsert.py` 的 10 条用例全绿**（T-SP-1/2 用的是 A/B/C 三个**不同** SKU，
+    永远碰不到"同批两笔同 SKU"的路径）。
+- 影响：将来若有人把 `intersection_update` 改成 `remove`/`discard` 式，**日销表静默丢数、全量测试全绿**。
+- 建议修法（不占本期）：在 `test_p9s3b` 增一条 T-SP-3——同批两笔同 SKU、第 2 笔失败，断言日销等于第 1 笔。
+- 编号合规：`grep -rn "R-75"` 全仓零命中，R-74 之后未占用。
+
+### 交付 8 条偏差逐条核对
+
+| # | 偏差 | 核实结论 |
+|---|---|---|
+| 1 | `full` 循环体搬进 `_ingest_order_full`，仅加 2 行计数 | ✅ **142 行归一化零差异**，属实 |
+| 2 | `incremental` 下单头只在 `newer` 时覆盖版本字段、`sync_run_id` 始终更新 | ✅ 代码属实（`external_orders.py:795-806`）；理由（旧批次不许改回新状态）正当 |
+| 3 | `incremental` 下单头金额/退款**始终**按库里全部行重算 | ✅ 属实（`:877-889`，在 `db.flush()` 之后）；「金额是派生量不是版本事实」的论证成立 |
+| 4 | `incremental` 下 `stale` 改为「本批 0 行生效」 | ✅ 属实（`:890-893`）；与 D5 问题 2「整笔 stale 概念取消」一致 |
+| 5 | `touched` 用 `intersection_update` | ✅ 实现正确，**但无测试看守 → 见 R-75** |
+| 6 | 新增 `inserted_lines/updated_lines/skipped_lines` | ✅ 属实；确认不进响应 schema |
+| 7 | `complete_sync_run` 新增 `partial` 判断 | ✅ 属实。其「`partial` 原本不可达」的论证经核对成立（`begin_sync_run` 只写 `schema_version`，无分资源条目 → 走无分资源分支 → 原本无条件 `succeeded`） |
+| 8 | `ImportStats.rejected` + `getattr` 兼容 | ✅ 属实；inventory/costs 路径不传该字段 → 默认 0 → 行为不变 |
+
+### 两条复核方法学坑（供以后复用）
+
+**坑 1：`pytest_runtest_call` 里 patch `sqlalchemy.orm.session.Session.begin_nested` 不可靠。**
+我把它替换成返回 `nullcontext()` 的 lambda，**诊断打印确认类属性已替换**，但抓 SQL 仍看到
+`SAVEPOINT sa_savepoint_1/2/3` —— 说明实际调用没有走我的 lambda（推测是 `Session` 在实例化/
+内部 `_transaction` 路径上另取绑定，未深究）。**因此得到过一次假反证（T-SP-1 仍绿）**，
+差点误判「T-SP-1 是空壳」。**正确做法：临时改源码 + 备份/还原**，并以 `git diff` 为空自证还原。
+→ 与 §46 记录的「`ctx` fixture 里 `importlib.reload` 会冲掉 `pytest_configure` 的 patch」是同一类坑：
+**patch 生效的判据不能只看赋值成功，要看被观测行为真的变了。**
+
+**坑 2：反证期间跑了全量回归，结论不可直接采信。**
+我在一次全量运行中途改了源码做反证。虽然 Python 已 import 的模块不受影响，但带
+`importlib.reload` 的 fixture（`test_p8s1` / `test_p9s3b` 的 `ctx`）会读盘。该次结果恰为 692/0，
+与干净工作区那次一致，**但这是"侥幸一致"不是"证明"** → 结论只采用**还原后干净工作区**那次（420.22s）。
+**规矩：反证与全量必须串行，不能交叠。**
+
+### 结论
+
+**P9-S3 阶段 B 复核通过。** 三项反证全部按预期变红，delivery 的 8 条偏差逐条属实，
+红线逐条守住（不动 id 生成、不重算 `payload_hash`、`_rebuild_key` 与 `touched` 填充零改动、
+`full` 语义逐行等价、响应仍 11 键、其余 4 个调用点零改动）。
+
+- **R-69 关闭**（跨批补行落地，A 的五件套逐字段不变，同文件重传仍 `no_op`）。
+- **R-74 关闭**（单头 == 库里全部行之和 70.00，且传入 record 的单头未被改写）。
+- **R-2 未破**（整批 1 条快照查询）。
+- **新登记 R-75**（`touched` 回滚无护栏，劣化后日销静默消失而全量全绿）。
+- 阶段 A 十五条例用 + 阶段 B 十条，共 25 条专项用例覆盖本片。
