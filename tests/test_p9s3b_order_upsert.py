@@ -278,6 +278,21 @@ def _fail_trigger(db, sku: str = "EXT-SKU-B") -> None:
     db.commit()
 
 
+def _fail_trigger_for_order(db, order_no: str) -> None:
+    """只让**指定订单**的行插入在 flush 阶段失败。
+
+    R-75 的复现需要「同批两笔用同一个 SKU」——按 SKU 触发会让**两笔都失败**，
+    测不出「第一笔成功、第二笔回滚」这个形状。所以按**父订单的订单号**触发。
+    """
+    db.execute(text(
+        "CREATE TRIGGER p9s3b_fail_ord BEFORE INSERT ON external_order_lines "
+        "WHEN (SELECT external_order_no FROM external_orders WHERE id = NEW.external_order_id) "
+        f"= '{order_no}' "
+        "BEGIN SELECT RAISE(ABORT, 'p9s3b forced failure'); END"
+    ))
+    db.commit()
+
+
 # ===========================================================================
 # T-R69-1 ~ T-R69-6：跨批合并 / 行序倒置对拍 / 单头重算 / stale 边界
 # ===========================================================================
@@ -610,3 +625,59 @@ def test_t_ui_2_non_order_kind_disables_incremental(ctx):
     assert "$('#import-kind').onchange=()=>{syncIncrementalState();};" in html
     assert "$('#import-incremental').onchange=()=>{syncIncrementalState();};" in html
     assert re.search(r"^syncIncrementalState\(\);", html, re.MULTILINE)
+
+
+def test_t_sp_3_same_sku_rollback_keeps_daily_sales(ctx, monkeypatch):
+    """T-SP-3（R-75）：同批两笔用**同一个 SKU**，第 2 笔 flush 失败 → 日销必须等于第 1 笔的正确值。
+
+    复现形状：ORD-1（EXT-SKU-A，成功）+ ORD-2（EXT-SKU-A，flush 阶段失败）。
+    失败笔被 SAVEPOINT 回滚后，`touched` 里这个 SKU 的重建信号**不能被误删**——
+    否则该 SKU 的日销不会被重建，日销行要么保持旧值、要么被 `_rebuild_key`
+    的"先删后建"清空（**蒸发**）。
+
+    判据：日销必须**等于第 1 笔的正确值**（数量 2、金额 40.00），不是空、不是 0。
+
+    守卫强度（已做变异实测）：把回滚里的 `touched.intersection_update(_touched_mark)`
+    改成 `touched.clear()` → 本用例**报红**（日销行直接消失）。
+    所以它不是"碰巧绿"，是真正盯着回滚逻辑的守卫。
+    """
+    with ctx.db_mod.SessionLocal() as db:
+        _fail_trigger_for_order(db, "ORD-2")
+
+    # 机制级观测：共享 SKU 的重建信号必须在回滚后**存活**（`_rebuild_key` 仍被调用）
+    rebuilt: list[str] = []
+    original_rebuild = ctx.ext_mod._rebuild_key
+
+    def _spy(db, *, workspace_id, external_account_id, external_sku, sales_date=None):
+        rebuilt.append(external_sku)
+        return original_rebuild(
+            db, workspace_id=workspace_id, external_account_id=external_account_id,
+            external_sku=external_sku, sales_date=sales_date,
+        )
+
+    monkeypatch.setattr(ctx.ext_mod, "_rebuild_key", _spy)
+
+    stats = _ingest(
+        ctx,
+        _csv(
+            ("ORD-1", "EXT-SKU-A", 2, "40.00"),
+            ("ORD-2", "EXT-SKU-A", 1, "30.00"),
+        ),
+    )
+    assert stats.rejected_orders == 1, "第 2 笔必须被判失败"
+
+    # 失败笔零残留，第 1 笔完好
+    assert sorted(o.external_order_no for o in _orders(ctx)) == ["ORD-1"]
+    lines = _lines(ctx)
+    assert [line.external_sku for line in lines] == ["EXT-SKU-A"]
+    assert lines[0].ordered_qty == 2
+    assert lines[0].gross_amount == Decimal("40.00")
+
+    # ★ 机制：共享 SKU 的日销重建信号**没有被回滚误删**
+    assert "EXT-SKU-A" in rebuilt, "共享 SKU 的重建信号被回滚误删（R-75）"
+
+    # ★ 日销必须等于第 1 笔的正确值，而不是被清空
+    sales = _daily_sales(ctx, "account-a")
+    assert "EXT-SKU-A" in sales, "日销行不得消失（R-75：日销蒸发）"
+    assert sales["EXT-SKU-A"][0] == 2, "gross_qty 必须是第 1 笔的 2，不得为 0"
+    assert sales["EXT-SKU-A"][4] == "40.00", "gross_amount 必须是第 1 笔的 40.00，不得为 0"

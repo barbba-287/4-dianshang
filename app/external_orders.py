@@ -967,6 +967,15 @@ def ingest_orders(
                 # §1.6 坑 1：回滚后必须把该笔从共享状态里剔除干净。
                 # `touched` 用"回退到本笔之前"而不是 `remove`——同一批里两笔订单
                 # 可能触及同一个 SKU，直接 remove 会把前一笔的重建信号一起抹掉。
+                #
+                # R-75 专项（2026-11-09 复核提出）：**同批同 SKU** 时这条路径尤其关键。
+                # 本笔失败回滚后，该 SKU 的日销重建信号必须**存活**（本笔之前的前序笔
+                # 已经为它付过成本），否则该 SKU 的 `daily_sku_sales` 不会被重建，
+                # 轻则日销停在旧值、重则被 `_rebuild_key` 的"先删后建"清空（**蒸发**）。
+                # `intersection_update` 恰好满足：只删本笔**新增**的条目，
+                # 前序笔已经登记的同一个 SKU 条目原样保留。
+                # 守卫用例：`tests/test_p9s3b_order_upsert.py::test_t_sp_3_same_sku_rollback_keeps_daily_sales`
+                # （变异实测：把本行改成 `touched.clear()` → 该用例报红）。
                 del pending[_pending_mark:]
                 touched.intersection_update(_touched_mark)
                 _stats_restore(stats, _stats_mark)

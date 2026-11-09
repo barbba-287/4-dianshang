@@ -3279,3 +3279,70 @@ SAVEPOINT sa_savepoint_3 → RELEASE  ...第 3 笔继续
 - **R-2 未破**（整批 1 条快照查询）。
 - **新登记 R-75**（`touched` 回滚无护栏，劣化后日销静默消失而全量全绿）。
 - 阶段 A 十五条例用 + 阶段 B 十条，共 25 条专项用例覆盖本片。
+
+---
+
+## §49 R-75 关闭：T-SP-3 落地 + 13 变体不可复现 + 变异测试证明守卫有效（2026-11-09）
+
+实施方：Claude Code。指令来源：阶段 B 复核通过后用户追加指令（新增 T-SP-3 / 若逻辑确有问题则修复 / 定向+全量回归 / 连同前 3 笔提交一起 push / 台账关闭 R-75）。
+
+> ⚠️ 先澄清 R-75 的性质：§48 登记时写的是「**`touched` 回滚无护栏**，劣化后日销静默消失而全量全绿」——
+> 指的是**去掉 `touched` 回滚逻辑后**症状成立（劣化实验），而非当前实现就存在该缺陷。
+> 本次按此定义追查，结论如下。
+
+### 1. 结论：R-75 在当前实现下不可复现，生产逻辑**无需修改**（指令第 2 条前置条件不成立）
+
+| 追查动作 | 方法 | 结果 |
+|---|---|---|
+| 原始形状 | 按复核描述直接写 T-SP-3（同批 2 笔同 SKU、第 2 笔 flush 失败） | **直接通过** |
+| 形状覆盖度 | 临时探针文件构造 **13 个变体**（full/incremental × 前置批次 × no_op/stale 早退 × 失败在订单行插入/明细行插入 × 失败在前笔/后笔 × 首笔更新已有订单 × 按 SKU 计数触发 × HTTP 路径） | **13/13 全部正确** |
+| 生产代码改动 | `git diff --stat app/external_orders.py` | **逻辑 0 行**（仅加注释） |
+
+机制推演（三条同时成立 → 症状不可能出现）：
+
+1. **`touched` 回滚语义正确。** `touched.intersection_update(_touched_mark)` 只剔除本笔**新增**条目；同批前序笔已登记的同一 SKU 条目**原样保留**。复核担心的写法是 `remove`——**代码里本就不是 `remove`**（§48 的劣化实验正是把它劣化掉，才出现症状）。
+2. **「日销蒸发」的唯一机制不成立。** `_rebuild_key` 的「先 `delete(DailySkuSale)` 再 `add()`」确实会在"该 SKU 库里无任何存活行"时留下空缺；但被回滚的那笔其订单行**必然不在库里**，**库里还有前序笔的存活行** → `groups` 非空 → 日销行被重建。
+3. **`pending`（长度水位）与计数（`_stats_snapshot/_stats_restore`）与 `touched` 同构**，无共享状态泄漏。
+
+### 2. 但 T-SP-3 是**真守卫**（变异测试证据，非"碰巧绿"）
+
+把生产代码 `touched.intersection_update(_touched_mark)` **故意变异**为 `touched.clear()`：
+
+```
+FAILED tests/test_p9s3b_order_upsert.py::test_t_sp_3_same_sku_rollback_keeps_daily_sales
+FAILED tests/test_p9s3b_order_upsert.py::test_t_sp_2_...
+2 failed, 9 passed
+```
+
+→ 变异后报红，证明 T-SP-3 **能抓住复核担心的那个 bug**；变异已还原（还原后 `git diff --stat` 为空）。
+
+### 3. 落地的改动
+
+| # | 文件 | 改动 |
+|---|---|---|
+| 1 | `tests/test_p9s3b_order_upsert.py` | **新增 T-SP-3**：同批 2 笔同 SKU，第 2 笔 flush 失败。触发器按**父订单号**判定（`WHEN (SELECT external_order_no FROM external_orders WHERE id = NEW.external_order_id) = 'ORD-2'`）——按 SKU 触发会两笔都失败，无法构造"只第 2 笔失败"。断言：`rejected_orders == 1` / 库内只剩 `ORD-1`（qty=2, 金额=40.00）/ **机制级** spy `_rebuild_key` 断言共享 SKU 仍在重建名单 / **结果级** 断言 `daily_sku_sales` 中该 SKU 行**存在**且 qty=2、金额=40.00（不得蒸发） |
+| 2 | `app/external_orders.py` | 回滚处理器**只加注释**：说明为何必须 `intersection_update` 而非 `remove`、为何会导致日销蒸发、指向守卫用例与变异证据。**逻辑 0 行改动** |
+| 3 | `tests/test_zz_r75_probe.py` | **删除**（临时排查脚本，不入版本库） |
+
+### 4. 回归结果（原始输出）
+
+定向（新增 + 阶段 A + R-2 + 成本锚定，4 个文件）：
+
+```
+70 passed, 4101 warnings in 41.44s (0:00:41)
+```
+
+全量：
+
+```
+=============== 693 passed, 20778 warnings in 380.58s (0:06:20) ===============
+```
+
+**693 passed / 0 failed ✅**（目标达成；较 §48 基线 692 净增 1 = T-SP-3）
+
+> 全量前两次跑出现 `tests/test_api_jobs.py::test_enqueue_returns_job_id_immediately` 失败（1 failed, 692 passed），**单跑该用例通过、整文件跑通过** → 后台线程时序 flaky，与本次改动无关（`app/external_orders.py` 逻辑 0 行改动）。第三次全量 693 全绿。
+
+### 5. 状态
+
+- **R-75 关闭**（当前实现不可复现；补齐真守卫用例 T-SP-3 并留注释护栏，回归 693/0）。
+- R-74、R-69、R-2 维持 §48 的关闭状态，未受影响。
