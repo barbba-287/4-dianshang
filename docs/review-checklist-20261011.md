@@ -3702,3 +3702,102 @@ T7 只断言 `status_code == 422`，不检查 body 的 `detail.code`。
 - **§5.5 主动做了 T8 反证**（删传参 → T8 红）——这是任务书要求之外的自证，加分项。
 - 唯一实质问题是 R-77 竞态，而**任务书没要求**，责任在我。
 - 偏差登记 7 条，**无一隐瞒**，且有两条（偏差 6、7）是我在探针里才确认其必要性的细节。
+
+---
+
+## §54 P10-S2b 复核：712/0 独立复现 + 五项反证（4 有效 / 1 落空）+ 新登记 O-7（2026-11-10）
+
+交付 `6dd4025`（3 文件 / +391 −2：`cockpit.html` **+2 −2**、`tests/test_p10s2b_race_guard.py` 新建 131 行、
+`dev_task.p10s2b-race-guard.md` 258 行入库）。基线 708 → **712**。R-77 **关闭**。
+
+### 54.1 全量与改动面（全部我自跑）
+
+| 项 | 实测 |
+|---|---|
+| 全量 | **712 passed / 0 failed**，394.73s（`env -u PYTHONPATH -u PYTHONHOME` 剥垫片，工作区干净） |
+| 定向 T-R77-1~4 | 4 passed |
+| 护栏 `test_p5s1_tokens` + `test_p5s3_visual_skeleton` | 34 passed，**两文件零改动** |
+| 改动面 | `git diff 3c41355 6dd4025 -- app/templates/cockpit.html` = **恰好 2 行替换**（`:54` 声明、`:69` 三处插入），其余字符逐字未动 |
+| 后端 | `app/*.py` 零改动属实 |
+
+### 54.2 行为证据：用**修复前写的那份**探针做对照
+
+`.testtmp/_wb_p10s2_race_probe.js` 是 2026-11-10 15:34（P10-S2 复核时、修复之前）写的，
+本次只补了两处：接受模板路径参数、从模板核对 `profitTrendSeq` 声明后等值 stub（防探针与模板漂移）。
+**同一脚本、同一场景，只换模板**：
+
+| 模板 | 最终 meta | x 轴 | `setOption` 次数 |
+|---|---|---|---|
+| `3c41355`（修复前） | `"1 期 · 每期 7 天"` | `["7天-期"]` | **2** |
+| 工作区（修复后） | `"1 期 · 每期 30 天"` | `["30天-期"]` | **1** |
+
+→ 交付说明 §5 的三条判据**全部成立**，且差异只能来自那 2 行改动。
+
+> 探针第一版直接报 `profitTrendSeq is not defined` —— 说明新增全局确实进了被测作用域。
+> 补 stub 时**没有手写 `let profitTrendSeq=0`**，而是先断言模板含 `let profitSeq=0,profitTrendSeq=0;`
+> 再 stub 等值变量；模板声明一改，探针立刻报错而不是静默测一个不存在的变量。
+
+### 54.3 ★ 五项变异反证：四条有牙齿，一条**落空**
+
+每次改源码 → 只跑 `tests/test_p10s2b_race_guard.py` → `git checkout` 还原 →
+`git hash-object` == `git rev-parse HEAD:app/templates/cockpit.html`（`f577c0e9…`，跑前跑后一致）。
+
+| # | 变异 | 结果 | 结论 |
+|---|---|---|---|
+| A | 删 `catch(error){if(seq!==profitTrendSeq)return;` 里的守卫 | **T-R77-3 红**（守卫数 2→1），其余 3 绿 | 有效 |
+| B | 守卫**挪到 `dispose` 之后**（`catch(error){if(profitTrendChart){dispose…}if(seq!==…)return;chartEmpty…}`） | **4 条全绿** | **落空** → O-7 |
+| C | 函数体内加 `let profitTrendSeq=0;`（每次调用重置序号） | **T-R77-1 红** | 有效 |
+| D | 递增挪到 `await response.json()` 之后 | **T-R77-2 红** | 有效 |
+| E | 删 `load()` 的 catch 守卫（`sequence!==requestSequence` 2→1） | **T-R77-4 红** | 有效 |
+
+### 54.4 ★ O-7：T-R77-3 的**自述**与**断言**不符（测试能力缺口）
+
+`test_p10s2b_race_guard.py` 的 T-R77-3 docstring 自述可抓三种坏法，第 ③ 条写的是
+「catch 里先 `dispose` 再守（图已经被清掉了）」。但断言只有：
+
+```python
+empty_at = body.index("chartEmpty(")
+assert pos[1] < empty_at, "catch 里的守卫必须在 chartEmpty 之前"
+```
+
+`dispose()` 在 `chartEmpty()` **之前**，所以「先 dispose 再守」时 `pos[1] < empty_at` **依然成立**
+→ 变异 B 全绿（见 54.3）。
+
+**这不是理论风险，我用探针实测了危害**（`.testtmp/_wb_p10s2b_fail_race_probe.js`，
+场景：A=days=7 慢 200ms **且失败**、B=days=30 快 10ms 成功）：
+
+| 实现 | `dispose` 次数 | B 的实例是否活着 |
+|---|---|---|
+| 变异 B（守卫在 dispose 之后） | **1** | **false** |
+| 正确实现（守卫在 dispose 之前） | 0 | true |
+
+原因：`profitTrendChart` 是**共享全局**，A 的 catch 里 `dispose()` 干掉的是 **B 刚建好的那个实例**，
+随后 `profitTrendChart=null`。用户看到的是一块空白画布，而 meta 仍写着「1 期 · 每期 30 天」
+—— **界面比竞态本身更具误导性**（有文字、没图）。
+
+**修复成本：1 行**。在 T-R77-3 里 `empty_at` 之后补：
+
+```python
+assert pos[1] < body.index("dispose()"), "catch 里的守卫必须在 dispose 之前（否则会顺手把新实例 dispose 掉）"
+```
+
+**责任归属**：**规划方（我）**。任务书 §3 T-R77-3 给的断言原文就只到 `chartEmpty`，
+实施方照抄且 docstring 也照抄了「抓 dispose」的说法 —— 它没错，是我的断言设计漏了一层。
+同类第四次（前三次：`payload_hash`、P10-S1 的 M1-2 矛盾、R-77 本身）。
+
+### 54.5 偏差裁定：**无偏差**（交付方登记「无」，我核实属实）
+
+- `git diff --stat` 只有 cockpit.html 一行 —— 属实（另两文件提交时是 untracked，入库后才计入）。
+- 红线自检表 11 项逐项与我的实测吻合：`<style>` hex=0/rgba=0、`<script>` 色值=8、
+  `echarts.init`=3/`'wb')`=3、`void loadProfitTrend()`=1、后端零改动。
+- §2.2 三处插入逐处定位证据**可复现**（我按同样字符串切了一遍，位置完全一致）。
+- 主动做的基线自证（改代码前先跑 → 3 failed/1 passed）与我 §53.5 的预期表一致，**加分项**。
+- commit subject 非空（`fix(P10-S2b): …`），O-3 的「必须带 -m」本片第二次生效（`6dd4025`）。
+
+### 54.6 交付质量评价
+
+- 改动面控制得**极准**：2 行替换，`renderProfitTrend` / `load` / `loadProfitDetail` 一字未动，
+  连我任务书里警告的「不许拆行格式化」都遵守了。
+- §5 的探针**自己做了对照实验**（`git show HEAD:` 取旧模板），这个手法比我预期的更好；
+  §5.3 那句「同一份探针、仅换模板，差异只能来自模板改动」是合格的因果论证。
+- 唯一的错在我这边（O-7 断言少一层），**不计实施方偏差**。
