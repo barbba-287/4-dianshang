@@ -3566,3 +3566,139 @@ git log --format="%h [%s]" -3
 - 唯一的实质性错误是 §2 那句「少了兜底键 set 立刻 ≠ 120」——**结论正确（该保留兜底键）、理由错误
   （Q4 抓不到）**。已在本节更正，并在 O-5 记明**不得再引用**。
 - 后端零改动、模板保持单物理行、`<style>` 零 hex 全部属实。
+
+---
+
+## §53 P10-S2 复核：708/0 独立复现 + 三项反证 + 新登记 R-77（请求竞态）与 O-6（2026-11-10）
+
+交付 `e32f73f`（5 文件 / +416 −8：`app/finance.py` +103、`app/main.py` +45、`cockpit.html` +16/−8、
+`tests/test_p10s2_profit_trend.py` 新建 255 行、`tests/test_p5s3_visual_skeleton.py` 5 行契约升级）。
+基线 700 → **708**。M1（导出跟随 SKU 筛选）+ M2（利润趋势折线）**均已交付**。
+
+### 53.1 全量与护栏（全部我自跑）
+
+| 项 | 实测 |
+|---|---|
+| 全量 | **708 passed / 0 failed**，386.77s（`env -u PYTHONPATH -u PYTHONHOME` 剥垫片，跑前工作区干净） |
+| 定向 T1~T8 | 8 passed（与自报一致） |
+| `<style>` hex / `rgba(` | **0 / 0**（我按段抽取正则统计） |
+| `<script>` 色值合计（cockpit） | **8**（全站仍 22，新折线只引用 `colors.blue`，未新增 `areaStyle`） |
+| `echarts.init(` / `'wb')` | **3 / 3**（每个实例都带主题） |
+| `areaStyle` 出现次数 | **1**（仅 `renderSalesTrend` 原有那处，趋势图未加） |
+| 驾驶舱查询数 ≤9 | 仍绿（趋势是独立端点，未并入 `cockpit`） |
+
+### 53.2 契约升级裁定：`test_p5s3_visual_skeleton.py` 计数 2 → 3 —— **接受**
+
+`test_t20_p5s6_echarts_theme_registered` 硬编码断言 `cockpit.html` 的 `echarts.init(` == 2。
+本片新增第三个实例（利润趋势），该断言**必然变红**。交付方把常量抬到 3 并写明理由。
+
+**我独立核验了它声称的等价守卫是否真的存在**（这是接受与否的唯一判据）：
+
+```python
+assert t.count("echarts.init(") == t.count("'wb')"), \
+    f'{name} 存在未带 \'wb\' 主题的 echarts.init 调用'
+```
+
+该断言与计数断言**在同一个测试函数内**、紧跟其后。实测 `3 == 3` 成立。
+→ 原断言的**意图**（所有 init 都带主题）**未失效**，只是数量快照随合法新增同步。
+性质等同 P9-S2 的 T-23 契约升级。**不计实施方偏差。**
+
+> 风险提示（写给我自己）：这类「数量快照」断言每次合法新增都会红，长期看是维护税。
+> 若未来继续加图表，应考虑把它换成「≥N 且 count 相等」，而不是每次改常量。
+
+### 53.3 我补做的验证：前端渲染分支（交付方只做了静态断言）
+
+T8 是**文本断言**（模板里有没有那些字符串），`renderProfitTrend` / `loadProfitTrend` 的
+**运行行为从未被执行过**。我写 `.testtmp/_wb_p10s2_trend_probe.js`
+（原样抽函数 + DOM/ECharts stub，可触发事件），**36/36 全绿**：
+
+| 场景 | 实测结论 |
+|---|---|
+| S1 正常 6 期（2 期缺失） | init 1 次、主题 `wb`、**init 前容器已清空**、`series.data=[null,null,10.5,20,66,104]`、`connectNulls=false`、`animation=false`、`lineStyle=colors.blue`、**无 areaStyle**、note 三句限定齐全 |
+| S2 多币种 | **不 init**、空态含「多币种」、meta「多币种」 |
+| S3 全期 null | 不 init、空态「所选窗口内没有可计算利润的订单行」、meta「暂无数据」 |
+| S4 `points=[]` 且非多币种 | 不 init、走空态（边界不漏） |
+| S5 空态 → 正常 | 第二次 init 时容器已清空（偏差 6 的 `innerHTML=''` 确有必要，否则 ECharts 挂在带子节点的容器上） |
+| S6 正常 → 正常 | 旧实例 **dispose 1 次**、`setOption` 2 次 |
+| S7 请求失败 | **不弹 toast、不写 `#message`、不碰 `cockpit-error`**、趋势图走空态、meta「加载失败」→ 任务书陷阱 7 **确实落实** |
+| S8 成功路径 | URL 为 `/api/finance/profit/trend?days=7&points=6`（参数正确） |
+
+### 53.4 三项变异反证（全部有效）
+
+| 反证 | 变异 | 结果 |
+|---|---|---|
+| T8 切片有效性 | 只删 `exportProfitLines` **函数体内**的 `if(profitPage.sku)params.set('sku_code',...)` | **红**：`exportProfitLines 函数体内未传 sku_code` |
+| 缺失期不是 0 | `else None` → `else "0.00"` | **红**：`无数据期应为 null，实际 '0.00'` |
+| 多币种守卫 | `if len(currencies) >= 2:` → `if False and ...` | **红**：`两个币种并存时必须声明多币种` |
+
+> **反证踩到一个细节**：该 `params.set('sku_code', ...)` 字符串在模板里出现 **2 次**
+> （`exportProfitLines` 本片新增 + `loadProfitDetail` P10-S1 写的）。`count==1` 断言直接失败。
+> 必须**按位置**删（从 `async function exportProfitLines` 之后找第一处），否则会误删明细页那处、
+> 反证结论失真。**实施方做这条反证时也应如此**（它的 delivery §5.5 没说明用的是哪种删法）。
+
+还原自证：`git hash-object app/finance.py` == `git rev-parse e32f73f:app/finance.py`（`1e4d3520…`）；
+`cockpit.html` 同理（`94c49704…`）。按 §52.6 的方法学，未使用裸 `md5sum` 作判据。
+
+### 53.5 ★ 新登记 R-77：利润趋势请求**无竞态守卫**（我实测复现，属规划方缺陷）
+
+**事实**：`load()` 有 `requestSequence` 守卫，`loadProfitDetail()` 有 `profitSeq` 守卫，
+但本片新增的 `loadProfitTrend()` **没有任何守卫** —— 它是独立 fire-and-forget。
+
+**我写了 `.testtmp/_wb_p10s2_race_probe.js` 实测复现**：
+
+```
+第一次请求 days=7，延迟 200ms；用户立刻切到 days=30，第二次请求延迟 10ms
+→ 页面 #days = 30
+→ 最终渲染 meta = "1 期 · 每期 7 天"      ← 先发的慢请求覆盖了后发的快请求
+→ 最终 x 轴 = ["7天-期"]
+→ setOption 次数 = 2（两次都画了，最后一次图标是旧的）
+```
+
+**后果**：用户切换统计窗口后，可能看到**与页面控件不一致的趋势粒度**——
+页面写着「近 30 天」，趋势图实际是 7 天一拍。这是**口径错误**，不是纯视觉问题：
+财务/报表产品里「显示的粒度与控件不一致」会直接导致误读。
+
+**责任归属：规划方缺陷（我的）**。任务书 §4 的 12 条陷阱里**没有这一条**，
+实施方按任务书实现，没有任何可指摘处。同类第三次（前两次：P9-S3 的 `payload_hash` 判据、
+P10-S1 的 M1-2 任务书自相矛盾）。
+
+**修复成本**：约 3 行 —— 新增 `let profitTrendSeq=0;`，`loadProfitTrend` 开头 `const seq=++profitTrendSeq;`，
+`renderProfitTrend` 调用前 `if(seq!==profitTrendSeq)return;`。
+
+**处置建议**：作为 P10-S2 补丁当场修（不必新开切片），并补一条**能真正复现竞态的**测试
+（用延迟可控的 stub，参考我的探针 S7/S8 手法）。
+
+### 53.6 观察项 O-6：`INVALID_TREND_PARAMS` 的错误码映射**无测试覆盖**
+
+端点签名用 `Query(default=6, ge=1, le=12)` / `Query(default=7, ge=1, le=90)`，
+越界参数在 **FastAPI 参数校验层**就被拦成 422，根本进不到 `profit_trend()` 里。
+`profit_trend()` 的 `if points < 1 or ... : raise ValueError("INVALID_TREND_PARAMS")`
+在 HTTP 路径上是**死代码**（作为库函数自防御仍有价值）。
+
+后果：`_PROFIT_ERROR_MESSAGES["INVALID_TREND_PARAMS"]` 那条文案**写得对不对没人验证**。
+T7 只断言 `status_code == 422`，不检查 body 的 `detail.code`。
+→ 建议后续补一条直接调 `profit_trend()` 的单元测试（绕过 HTTP 层）断言该 ValueError，
+或让 T7 同时断言响应体的 `code` 字段属于已知集合。**价值低，挂账即可。**
+
+### 53.7 偏差裁定：7 条中 6 条不计偏差，1 条为流程疏漏
+
+| # | 交付方登记 | 我的裁定 |
+|---|---|---|
+| 1 | T-20 计数常量 2→3 | **接受**（契约升级，等价守卫已独立核验存在，见 §53.2） |
+| 2 | toast 三态（任务书只给两模板） | 接受，属任务书语义的完整落实 |
+| 3 | note 用拼接而非改写 | 接受，无筛选时片段为空串，不留多余字样 |
+| 4 | `profit_trend` 不含 `computed` | 接受，任务书已裁定「不要该字段」 |
+| 5 | 多币种判定取「所有期币种并集」 | 接受，且**比单期判定更保守**（跨期币种不同也不画），方向正确 |
+| 6 | `renderProfitTrend` 重绘前 `innerHTML=''` | 接受，我的探针 S5 **实测证明这一步必要** |
+| 7 | 驾驶舱失败时趋势也进空态 | 接受，与陷阱 7 不冲突（陷阱 7 约束的是**趋势自身**失败时的行为） |
+
+**流程疏漏（不计入技术偏差，但需补）**：`dev_task.p10s2-profit-trend.md` **未入库**
+（`git status` 显示 `??`）。历次惯例是任务书随交付一起提交（`dev_task.p9s1/p9s3/p10s1` 都在库内）。
+
+### 53.8 交付质量评价
+
+- 交付说明 **§2/§3/§4 三项必填证据齐备且可验证**：真实 JSON 含 4 期 `null`、
+  T3 给出「趋势 104.00 vs 直调 104.00」的对拍、T6 给出 403 响应体原文。
+- **§5.5 主动做了 T8 反证**（删传参 → T8 红）——这是任务书要求之外的自证，加分项。
+- 唯一实质问题是 R-77 竞态，而**任务书没要求**，责任在我。
+- 偏差登记 7 条，**无一隐瞒**，且有两条（偏差 6、7）是我在探针里才确认其必要性的细节。
