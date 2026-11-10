@@ -477,7 +477,10 @@ def test_t20_p5s6_echarts_theme_registered():
         assert m.group(1).lower() in theme.lower(), \
             f'echarts-theme.js palette 缺少 {var} 的值 {m.group(1)}'
     # 两页接入
-    for name, init_n in (('dashboard.html', 3), ('cockpit.html', 2)):
+    # P10-S2 契约升级：cockpit 新增「利润趋势」折线（第三个 ECharts 实例），
+    # 故 cockpit 的 init 计数由 2 抬到 3；本断言的**意图**是「所有 init 都带
+    # 'wb' 主题」，该意图仍由下面 `count("'wb')")` 的等值断言继续守护。
+    for name, init_n in (('dashboard.html', 3), ('cockpit.html', 3)):
         t = _read(ROOT / 'app' / 'templates' / name)
         assert '/static/echarts-theme.js' in t, f'{name} 未引入 echarts-theme.js'
         assert t.count('echarts.init(') == init_n, f'{name} echarts.init 数量异常'

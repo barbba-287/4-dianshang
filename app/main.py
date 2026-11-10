@@ -1806,6 +1806,7 @@ _PROFIT_ERROR_MESSAGES = {
     "INVALID_PAGINATION": "分页参数无效：limit 需在 1~200、offset 需 ≥ 0",
     "INVALID_PROFIT_STATUS": "利润明细状态无效：仅支持 all / computed / missing / unmapped",
     "WORKSPACE_CONTEXT_REQUIRED": "缺少 Workspace 上下文",
+    "INVALID_TREND_PARAMS": "趋势参数无效：days 需在 1~90、points 需在 1~12",
 }
 
 
@@ -1926,6 +1927,50 @@ def profit_detail_export(
     if truncated:
         response.headers["X-Export-Truncated"] = "1"
     return response
+
+
+@app.get("/api/finance/profit/trend")
+def profit_trend_endpoint(
+    request: Request,
+    days: int = Query(default=7, ge=1, le=90),
+    points: int = Query(default=6, ge=1, le=12),
+    as_of: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """利润趋势（只读）：最近 `points` 个等长窗口的利润合计序列。
+
+    口径与 `/api/finance/profit/lines` **逐字同源**（都走 `app/finance.py` 的
+    `profit_totals`），因此趋势与驾驶舱 KPI 卡上的「利润环比」永远对得上——
+    两者是同一个函数的同一次调用，不是两套聚合。
+
+    权限谓词与明细端点**逐字一致**（`analytics.read` + admin/operations 双重条件）：
+    只写 `permission` 是不够的——readonly 与 customer_service 的权限集里都有
+    `analytics.read`，能过权限检查，全靠 `roles` 拦住。漏写 roles 就等于开一个
+    「页面挡住、接口漏出」的利润后门。
+
+    独立端点而非并入 `/api/dashboard/cockpit`：驾驶舱有 ≤9 条查询的既有上限，
+    趋势最多 12 条聚合查询，混进去必然超限。
+    """
+    principal = require_principal(request, permission="analytics.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
+    from app.business_dates import resolve_sales_as_of
+    from app.finance import profit_trend
+
+    as_of = resolve_sales_as_of(db, workspace_id=principal.workspace_id, explicit_as_of=as_of)
+    try:
+        return profit_trend(
+            db,
+            workspace_id=principal.workspace_id,
+            as_of=as_of,
+            days=days,
+            points=points,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        raise DomainError(
+            code=code,
+            message=_PROFIT_ERROR_MESSAGES.get(code, "利润趋势查询参数无效"),
+            http_status=422,
+        ) from exc
 
 
 @app.get("/api/inventory", response_model=InventoryPage)

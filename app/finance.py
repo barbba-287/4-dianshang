@@ -642,6 +642,109 @@ def profit_totals(
     return {(row.currency or "CNY"): _cent(row.profit) for row in rows}
 
 
+PROFIT_TREND_MAX_POINTS = 12
+
+
+def profit_trend(
+    db: Session,
+    *,
+    workspace_id: int,
+    as_of: date,
+    days: int,
+    points: int,
+) -> dict:
+    """最近 ``points`` 个等长窗口的利润合计序列（每窗口 1 条查询）。
+
+    窗口语义与驾驶舱本期/上期**逐字一致**（见 app/cockpit.py 的推导）：
+    第 i 期（i=0 最新）= [as_of - i*days - (days-1), as_of - i*days]，UTC 日界右开。
+    相邻窗口首尾相接、不重叠。
+
+    口径与 ``profit_totals`` **逐字同源**（不重写成本/平台费/利润的聚合），
+    因此趋势与利润环比永远对得上——两者用的是同一个函数。
+
+    返回结构::
+
+        {
+          "as_of": "2026-11-09",
+          "days": 7,
+          "points": [
+             {"from": "2026-10-29", "to": "2026-11-04", "label": "11-04",
+              "profit": "123.45", "has_data": true},
+             ...
+          ],
+          "currency": "CNY" | None,
+          "multi_currency": false,
+          "reason": None | "多币种无法折算单一趋势",
+        }
+
+    ``points`` 数组**按时间正序**（最早在前、最新在后），前端 x 轴直接用。
+
+    三条关键语义（与 ``profit_totals`` 的 docstring 一致）：
+
+    1. **缺失期是 ``None``，不是 ``"0.00"``**：``profit_totals`` 返回空 dict 时该期
+       没有可计算行，「没有行」与「利润是 0」是两件事，折线必须断开而不是扎到 0。
+    2. **多币种不折算**：出现 ≥2 个币种时返回 ``multi_currency=True`` 且 ``points=[]``，
+       宁可不给曲线，也不画一个不存在的数。
+    3. **金额不落 float**：Decimal → 两位小数字符串。
+    """
+    if not workspace_id:
+        raise ValueError("WORKSPACE_CONTEXT_REQUIRED")
+    if points < 1 or points > PROFIT_TREND_MAX_POINTS or days < 1 or days > 90:
+        raise ValueError("INVALID_TREND_PARAMS")
+
+    # 逐期调用 profit_totals（每窗口 1 条查询），不做单条拼接 SQL：
+    # 分桶表达式会与 _window_filters 的右开日界产生第二套口径，两套口径迟早漂移。
+    series: list[dict] = []
+    currencies: set[str] = set()
+    for index in range(points):
+        window_to = as_of - timedelta(days=index * days)
+        window_from = window_to - timedelta(days=days - 1)
+        totals = profit_totals(
+            db,
+            workspace_id=workspace_id,
+            window_from=window_from,
+            window_to=window_to,
+        )
+        currencies.update(totals.keys())
+        series.append({
+            "from": window_from.isoformat(),
+            "to": window_to.isoformat(),
+            "label": f"{window_to.month:02d}-{window_to.day:02d}",
+            "_totals": totals,
+        })
+
+    if len(currencies) >= 2:
+        # 多币种：无法折算成一根线，直接不画。
+        return {
+            "as_of": as_of.isoformat(),
+            "days": days,
+            "points": [],
+            "currency": None,
+            "multi_currency": True,
+            "reason": "多币种无法折算单一趋势",
+        }
+
+    currency = next(iter(currencies), None)
+    points_out: list[dict] = []
+    for item in reversed(series):   # 正序输出：最早在前，最新在后
+        totals = item.pop("_totals")
+        value = totals.get(currency) if currency else None
+        points_out.append({
+            **item,
+            "profit": f"{value:.2f}" if value is not None else None,
+            "has_data": value is not None,
+        })
+
+    return {
+        "as_of": as_of.isoformat(),
+        "days": days,
+        "points": points_out,
+        "currency": currency,
+        "multi_currency": False,
+        "reason": None,
+    }
+
+
 def _export_cost_status_label(line: ExternalOrderLine, *, computed: bool) -> str:
     """成本状态中文标签。"""
     if computed:
