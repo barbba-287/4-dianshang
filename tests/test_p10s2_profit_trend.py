@@ -213,10 +213,15 @@ def test_t6_trend_requires_same_roles_as_profit_lines(ctx):
 
 
 def test_t7_invalid_trend_params_return_422(ctx):
-    """T7：points=0/13、days=0/91 → 422，不得 500。"""
+    """T7：points=0/32、days=0/91 → 422，不得 500。
+
+    ★ P10-S3 契约升级：上限由 12 提到 31，边界样例同步从 ``points=13`` 改为
+    ``points=32``（32 是 31 的越界值，仍在「守新边界」的同一数量级上）。
+    其余三条参数样例（points=0 / days=0 / days=91）保持不动。
+    """
     for params in (
         "days=7&points=0&as_of=2026-09-10",
-        "days=7&points=13&as_of=2026-09-10",
+        "days=7&points=32&as_of=2026-09-10",
         "days=0&points=6&as_of=2026-09-10",
         "days=91&points=6&as_of=2026-09-10",
     ):

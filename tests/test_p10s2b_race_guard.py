@@ -98,7 +98,7 @@ def test_r77_3_guard_on_both_success_and_failure_paths_before_render():
     抓的坏法：
     ① 只守成功路径、漏 catch；
     ② 守卫写在 `renderProfitTrend(...)` 之后（渲染完才 return，等于没守）；
-    ③ catch 里先 `dispose` 再守（图已经被清掉了）。
+    ③ catch 里先 `dispose` 再守（会 dispose 掉新请求刚建好的实例）。
     """
     tpl = _template()
     body = _fn_body(tpl, "loadProfitTrend")
@@ -110,6 +110,8 @@ def test_r77_3_guard_on_both_success_and_failure_paths_before_render():
     empty_at = body.index("chartEmpty(")
     assert pos[0] < render_at, "成功路径的守卫必须在 renderProfitTrend 之前"
     assert pos[1] < empty_at, "catch 里的守卫必须在 chartEmpty 之前"
+    assert pos[1] < body.index("dispose()"), \
+        "catch 里的守卫必须在 dispose 之前（否则会顺手把新请求建好的实例 dispose 掉）"
     assert body.index("await response.json()") < pos[0], "守卫应在 json() 之后（json 也是 await 点）"
     assert body.index("catch(error)") < pos[1], "第 2 处守卫必须在 catch 块内"
 
@@ -124,8 +126,16 @@ def test_r77_4_existing_guards_untouched():
 
     抓的坏法：把三个函数的守卫合并重构成一个公共 `guard()`，或误删
     `load()` 的 catch 守卫。
+
+    ★ P10-S3 契约升级：原先 `tpl.count("void loadProfitTrend()") == 1` 是**全文**
+    计数，P10-S3 按 M3-3 新增了 `$('#profit-trend-window').onchange=()=>{void loadProfitTrend();}`
+    （趋势窗口切换要重载趋势），全文计数必然变成 2 → 必红。
+    该断言的**原意**是「`load()` 里恰好一处趋势调用」（不是「全站恰好一处」）。
+    故改为按 `load()` 函数体切片计数——语义更准，且与任务书 §4 陷阱 5
+    「不要全文 count，要按函数体切片」一致。
     """
     tpl = _template()
     assert _fn_body(tpl, "load").count("sequence!==requestSequence") == 2
     assert _fn_body(tpl, "loadProfitDetail").count("seq!==profitSeq") == 2
-    assert tpl.count("void loadProfitTrend()") == 1
+    assert _fn_body(tpl, "load").count("void loadProfitTrend()") == 1, \
+        "load() 里应恰好有一处 void loadProfitTrend()（驾驶舱刷新路径只调一次趋势）"

@@ -642,7 +642,8 @@ def profit_totals(
     return {(row.currency or "CNY"): _cent(row.profit) for row in rows}
 
 
-PROFIT_TREND_MAX_POINTS = 12
+PROFIT_TREND_MAX_POINTS = 31
+PROFIT_TREND_MAX_SPAN_DAYS = 90
 
 
 def profit_trend(
@@ -661,6 +662,11 @@ def profit_trend(
 
     口径与 ``profit_totals`` **逐字同源**（不重写成本/平台费/利润的聚合），
     因此趋势与利润环比永远对得上——两者用的是同一个函数。
+
+    **两条上限（P10-S3 放宽）**：
+    1. ``points`` 上限 ``PROFIT_TREND_MAX_POINTS``（31）——每期 1 条查询，期数即查询次数。
+    2. 总跨度 ``points × days`` 上限 ``PROFIT_TREND_MAX_SPAN_DAYS``（90 天）——跨参数组合
+       约束，FastAPI 的 ``Query`` 拦不住，只能在这里拦，错误码 ``INVALID_TREND_SPAN``。
 
     返回结构::
 
@@ -691,6 +697,8 @@ def profit_trend(
         raise ValueError("WORKSPACE_CONTEXT_REQUIRED")
     if points < 1 or points > PROFIT_TREND_MAX_POINTS or days < 1 or days > 90:
         raise ValueError("INVALID_TREND_PARAMS")
+    if points * days > PROFIT_TREND_MAX_SPAN_DAYS:
+        raise ValueError("INVALID_TREND_SPAN")
 
     # 逐期调用 profit_totals（每窗口 1 条查询），不做单条拼接 SQL：
     # 分桶表达式会与 _window_filters 的右开日界产生第二套口径，两套口径迟早漂移。

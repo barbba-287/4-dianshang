@@ -1806,7 +1806,8 @@ _PROFIT_ERROR_MESSAGES = {
     "INVALID_PAGINATION": "分页参数无效：limit 需在 1~200、offset 需 ≥ 0",
     "INVALID_PROFIT_STATUS": "利润明细状态无效：仅支持 all / computed / missing / unmapped",
     "WORKSPACE_CONTEXT_REQUIRED": "缺少 Workspace 上下文",
-    "INVALID_TREND_PARAMS": "趋势参数无效：days 需在 1~90、points 需在 1~12",
+    "INVALID_TREND_PARAMS": "趋势参数无效：days 需在 1~90、points 需在 1~31",
+    "INVALID_TREND_SPAN": "趋势跨度无效：每期天数 × 期数不得超过 90 天",
 }
 
 
@@ -1933,7 +1934,7 @@ def profit_detail_export(
 def profit_trend_endpoint(
     request: Request,
     days: int = Query(default=7, ge=1, le=90),
-    points: int = Query(default=6, ge=1, le=12),
+    points: int = Query(default=6, ge=1, le=31),
     as_of: date | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
@@ -1949,7 +1950,7 @@ def profit_trend_endpoint(
     「页面挡住、接口漏出」的利润后门。
 
     独立端点而非并入 `/api/dashboard/cockpit`：驾驶舱有 ≤9 条查询的既有上限，
-    趋势最多 12 条聚合查询，混进去必然超限。
+    趋势最多 31 条聚合查询，混进去必然超限。
     """
     principal = require_principal(request, permission="analytics.read", roles=(ROLE_ADMIN, ROLE_OPERATIONS))
     from app.business_dates import resolve_sales_as_of
