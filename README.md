@@ -1,5 +1,7 @@
 # 电商商品与客服工作台
 
+> **V1.0 已发布**（2026-11-22，tag `v1.0.0`）：数据看板与财务核算阶段（P1～P10）全部收官。
+>
 > 单机可复现的电商运营中台：本地 fixture / 真实平台只读接入 → 校验标准化 → 事实落库 →
 > FastAPI 查询 → 网页工作台。覆盖**仓储协同、外部订单事实、报表导入、成本核算、利润看板、
 > 补货闭环、商品页生产与客服知识**。
@@ -10,12 +12,79 @@
 
 | 项 | 当前值 |
 |---|---|
-| 阶段 | **P8-S1 收口**（对应 P1～P8 八个阶段，详见「当前能力」） |
+| 版本 | **V1.0.0**（`v1.0.0`，2026-11-22）；P10-S3 收口，覆盖 P1～P10 十个阶段 |
 | 分支 | `feat/warehouse-mvp` |
 | Alembic head | `0025_cost_snapshots` |
-| 全量回归 | **650 passed / 0 failed**（`376.73s`，2026-11-06） |
-| 规模 | 63 个 `app` 模块 / 约 2.65 万行 `app` 目录代码 / 82 个测试文件 / 142 个端点 / 10 个工作台页面 |
+| 全量回归 | **724 passed / 0 failed**（`442.79s`，2026-11-22 复核方独立复跑） |
+| 规模 | 64 个 `app` 模块 / 约 2.76 万行 `app` 目录代码 / 89 个测试文件 / 151 个端点 / 10 个工作台页面 |
 | 依赖 | FastAPI + SQLAlchemy + Alembic + SQLite（可切 MySQL）；无消息队列、无外部向量库 |
+
+## V1.0 发布背书
+
+这一节只陈述可复核的事实：测试跑得出来、口径查得到、界面看得见。
+
+### 724 个全绿测试
+
+```bash
+env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 \
+  python -m pytest -q -p no:cacheprovider
+# 724 passed, 23568 warnings in 442.79s（2026-11-22，干净工作区）
+```
+
+| 维度 | 事实 |
+|---|---|
+| 用例规模 | **89 个测试文件 / 724 个用例**，从 693（P9-S3）→ 700 → 708 → 712 → **724** 逐片推进，零回归 |
+| 覆盖层次 | 单元（金额分摊、指纹继承）、集成（导入 → 锚定 → 利润对拍）、HTTP 契约（权限 / 422 / 响应键）、前端渲染（Node 探针实跑事件与图表）、视觉护栏（色值 / 实例计数） |
+| 金额纪律 | 一律 `Decimal` / 两位小数字符串，**任何路径不许落 float**；逐行 round 后再 SUM，保证「明细逐行之和 == KPI 总额」 |
+| 事务隔离 | 订单级 UPSERT 用 SAVEPOINT（`begin_nested`），单笔失败只回滚该笔，整批其余订单照常落库 |
+| 新旧对拍 | 高风险改动（订单聚合、UPSERT）用探针同时跑新旧实现，比对行数 / 金额 / 锚定 ID，分组判定「必须一致 / 必须不同 / 必须不变」 |
+| 变异反证 | 每条关键断言都做过「改坏源码 → 测试必须变红 → 还原并用 `git hash-object` 自证」，不做只看字符串是否存在的空壳断言 |
+| 视觉护栏 | `<style>` 内裸 hex 与 `rgba(` 恒为 0；`<script>` 内色值合计恒为 **22**；每个 `echarts.init` 必须带 `'wb'` 主题；驾驶舱 SQL 查询 ≤ 9 条 |
+| 审计台账 | `docs/review-checklist-20261011.md` §1～§55，append-only，逐片记录实测数字、反证结果、偏差裁定与残留编号 |
+
+> 复核纪律：**不采信交付方自报数字**，全量由复核方在干净工作区独立复跑；
+> 失败不许改测试迁就实现，确属契约升级时必须在台账写明「等价守卫存在」。
+
+### 财务核算引擎
+
+从一行平台报表到一个可下钻的利润数字，中间每一层都有独立口径，不靠查询时重算：
+
+| 层 | 模块 | 关键机制 |
+|---|---|---|
+| ① 标准化 | `connectors.py` / `importers/` | 中文列头映射、两步预览、行级容错与脏行隔离；坏行不静默丢弃 |
+| ② 展平报表预聚合 | `order_aggregation.py` | 「一行一 SKU」合成「一单 N 明细」；金额三态（SAME / SINGLE_NONZERO / SUM）；按数量分摊且末行补齐；商品与退款各自独立判定 |
+| ③ 订单级 UPSERT | `external_orders.py` | 行指纹 `(SKU, 同 SKU 序号)` 继承锚定，行序倒置重传不断裂；`line_mode=full/incremental` 显式开关，禁止自动推断；单头金额按库内全部行重算 |
+| ④ 成本 as-of 锚定 | `costs.py` / `finance.py` | `cost_snapshots` **append-only**；写入时按 `effective_time <= 销售时间` 取最近快照，把成本五件套冗余固定到订单行；历史利润不因「今天进货」而变化 |
+| ⑤ 利润引擎 | `finance.py` | 净数量 / 实付净额 / 成本 / 平台费逐行计算；**「不可计算 ≠ 0 利润」**，`missing`/`unmapped` 只计数不进汇总，可算行数为 0 时 KPI 为 `null` |
+| ⑥ 分析与下钻 | `cockpit.py` / `finance.py` | 利润环比（本期 vs 上一等长窗口）；多期趋势（1～31 期，每期 1～90 天，总跨度 ≤ 90 天）；**多币种不折算、直接不画**；缺失期为 `null` 让折线断开，不冒充 0 |
+| ⑦ 明细与导出 | `finance.py` / `import_exports.py` | 分页（50/100/200，单页上限 200）+ SKU 筛选 + 全窗口导出（上限 20000 行，超出置 `X-Export-Truncated=1`）；导出跟随筛选条件，文件名带 SKU 后缀 |
+
+红线贯穿整条链路：**金额不落 float、历史利润不可被后续成本改写、无数据返回空态而非 0、
+多币种不折算成一个不存在的数字**。利润数据不对只读客服角色开放。
+
+主要端点：`GET/POST /api/finance/cost-snapshots`（含 `/preview`、`/import`）、
+`POST /api/finance/cost-backfill`、`GET /api/finance/profit/lines`、
+`GET /api/finance/profit/lines/export`、`GET /api/finance/profit/trend`、
+`GET /api/dashboard/cockpit`。设计细节见下方「关键设计」。
+
+### 界面
+
+下列为项目**真实界面截图**（2026-09 采集，使用 `seed-demo` 生成的虚构演示数据，画面中 `[虚构]` 前缀即演示标记），
+展示工作台形态与统一设计系统：深色侧边栏、卡片化 KPI、图表与表格、空态文案。
+
+| 经营驾驶舱 | 运营工作台 |
+|---|---|
+| ![经营驾驶舱](展示图片/运营驾驶舱.png) | ![运营工作台](展示图片/运营工作台.png) |
+| KPI 卡、销售趋势、库存风险 Top 10 | 商品资料卡片、检索、待办区 |
+
+| 仓库收货 | AI 运营助手 |
+|---|---|
+| ![仓库收货](展示图片/仓库收货.png) | ![AI 运营助手](展示图片/ai运营助手.png) |
+| 授权仓库选择、待收入库单、实收反馈 | 只读工具白名单、查询与结构化结果 |
+
+> **口径说明**：这批截图摄于 V1.0 之前，展示的是当时的工作台形态。
+> V1.0 新增的**利润趋势折线、趋势窗口选择器、利润明细分页与 SKU 筛选**不在画面中，
+> 相应能力以上文与端点索引为准，不用旧图冒充新版本。
 
 ## 当前能力
 
@@ -42,6 +111,8 @@
 | **P6 报表导入与导出** | 多平台 CSV/JSON 导入、中文列头智能映射、两步预览、行级容错与脏行隔离、结果/异常 xlsx 导出、统一 xlsx 导出美化 |
 | **P7 成本与利润** | 入库单价 + 成本 CSV 双入口、append-only 成本快照、订单行 as-of 成本锚定、缺失回填、利润引擎与看板下钻 |
 | **P8 展平报表预聚合** | 同名订单多行自动合成 1 单 N 明细、金额三态判定、按数量分摊（商品与退款）、明细行级成本独立锚定 |
+| **P9 利润分析增强** | 利润环比、全量导出、SKU 切片、视觉债清理、**订单级 UPSERT**（行指纹锚定继承 + SAVEPOINT 隔离 + 跨批补行 + 单头金额按库内全行重算） |
+| **P10 看板体验收官（V1.0）** | 利润明细分页 + SKU 筛选、导出跟随筛选、多期利润趋势折线（缺失期断开、多币种不折算）、趋势窗口选择器与跨度护栏、请求竞态守卫 |
 
 > **一句话业务闭环**：平台报表（一行一个 SKU）→ 自动聚合成订单 → 明细行各自 as-of 锚定成本 →
 > 利润引擎按行算钱 → 驾驶舱看单品赚亏 → 下钻到订单事实。整条链路可离线跑通，不依赖真实店铺。
@@ -237,7 +308,7 @@ POST /api/finance/cost-backfill                       # 回填缺失成本（默
 | 外部事实与同步 | `/api/external/accounts`、`/product-mappings`、`/orders/preview`、`/orders/ingest`、`/sales/daily`、`/sync/runs`（`/retry`、`/resume`、`/cancel`）、`/sync/dead-letters`（`/replay`、`/ignore`）、`/snapshots/freshness`、`/reconciliation/{id}` |
 | 连接器 | `/api/external/connectors`、`/taobao/capabilities`、`/taobao/preview`、`/shopify/capabilities`、`/shopify/preview`、`/shopify/sync` |
 | 报表导入 | `POST /api/external/imports`、`POST /api/external/imports/preview`、`POST /api/external/imports/{run_id}/export` |
-| 成本与利润 | `GET/POST /api/finance/cost-snapshots`、`/cost-snapshots/preview`、`/cost-snapshots/import`、`POST /api/finance/cost-backfill`、`GET /api/finance/profit/lines` |
+| 成本与利润 | `GET/POST /api/finance/cost-snapshots`、`/cost-snapshots/preview`、`/cost-snapshots/import`、`POST /api/finance/cost-backfill`、`GET /api/finance/profit/lines`（分页 + SKU 筛选）、`/lines/export`（全窗口，跟随筛选）、`GET /api/finance/profit/trend`（多期，1～31 期 × 1～90 天，总跨度 ≤ 90 天） |
 | 补货与采购 | `/api/replenishment/suggestions`（`/generate`、`/{id}/decision`）、`/api/purchase-requests`（`/drafts`、`/submit`、`/approve`、`/reject`、`/cancel`、`/inbound-orders`、`/receipt-progress`） |
 | 看板与分析 | `GET /api/dashboard/cockpit`、`GET /api/dashboard/summary`、`/api/analytics/sales`、`/inventory-health`、`/product-quadrant`、`/replenishment-evaluation`、`/replenishment-decisions` |
 | 运营与导出 | `GET /api/operations/today`、`/today/export.xlsx`、`GET /api/orders`、`/api/orders/fulfillment-proposal.xlsx` |
@@ -257,11 +328,12 @@ env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 \
 **必须剥掉 `PYTHONPATH` / `PYTHONHOME`**：仓库内 `cli/vendor/shim` 的 `sitecustomize.py` 会在
 pytest 清理阶段 `SystemExit(1)`，表现为全量出现 error 而非断言失败。
 
-当前基线：**650 passed / 0 failed**（`376.73s`）。定向运行把测试路径附在命令末尾即可。
+当前基线：**724 passed / 0 failed**（`442.79s`，2026-11-22 复核方独立复跑；89 个测试文件）。
+定向运行把测试路径附在命令末尾即可。逐片基线与反证记录见「V1.0 发布背书」及复核台账。
 
 ### 口径与注意事项
 
-- **存在 flaky**：约 1/3 概率出现 1 个随机 frontend 错误，单跑通过。判定口径为「重跑一次全绿即过」，但**必须登记**。
+- **存在 flaky 观察项 O-1**：`tests/test_api_jobs.py::test_enqueue_returns_job_id_immediately`（后台线程谱系）偶发失败，单跑 / 整文件均通过。判定口径为「重跑一次全绿即过」，但**必须登记**；再复现 2 次升为正式缺陷编号。
 - 测试与仓库外 `.env` 已解耦：`conftest.py` 固定 Shopify 基线，不随本机 `.env` 漂移。
 - SQLite WAL 已对测试进程与子进程统一开启（`conftest.py` + `tests/_wal_bootstrap/sitecustomize.py`），把本机全量从约 39 分钟压到约 6 分钟；**仅作用于测试进程**，不改生产库配置。
 - 若运行环境存在劫持 `shutil.rmtree` 的 `sitecustomize.py`，fixture 清理会报 error（非断言失败），换干净环境复跑。也可用仓库内目录作 basetemp：
@@ -273,7 +345,7 @@ python -m pytest -q -p no:cacheprovider --basetemp=./.testtmp
 ### 测试纪律
 
 - CSS 相关测试用**无空格字面串**断言（如 `position:fixed`、`margin-left:232px`），格式化 CSS 会让测试变红。
-- `<script>` 内 ECharts 色值有 24 处硬编码并被测试锁死，改动前先确认。
+- `<script>` 内色值合计恒为 **22**（cockpit 8 + dashboard 13 + customer_service 1，后者是 `$('#add')` 的 HEX_RE 误计），由 T-7 锁死；`<style>` 内裸 hex 与 `rgba(` 必须为 0（T-6）。新增图表或改颜色前**先重算这个基线**；`echarts.init(` 数量是快照式断言，合法新增时需同步升级并保证同函数内的等价守卫存在。
 - 测试失败不许改测试迁就实现；确属契约变更时，在台账写明「有意的契约变更」。
 
 ## 数据库迁移
@@ -327,8 +399,11 @@ python -m app.cli init-db     # 已有 legacy 库（自动识别并 stamp 后修
 | R-48 / R-49 | 死信无跨进程调度，重放靠人工触发；补偿上限 3 与退避 30s 是拍板值非 SLA |
 | R-52 | 采购单**无金额/单价/供应商报价**字段，审批无法体现「批多少钱」 |
 | R-59 / R-66 / R-67 / R-71 | 已关闭：登录页主色 token 化、预聚合、商品金额分摊、退款分摊 |
-| R-68 / R-69 | 已关闭：行指纹 + 订单级 UPSERT + 行级 MERGE（P9-S3） |
-| — | 利润明细页面分页（每页 50/100/200，单页上限 200）；导出为全窗口，上限 20000 行（超出时 `X-Export-Truncated=1`） |
+| R-68 / R-69 / R-73 / R-74 / R-75 | 已关闭：行指纹 + 订单级 UPSERT + 行级 MERGE + 单头金额重算 + 回滚护栏（P9-S3 全线） |
+| R-72 / R-77 | 已关闭：导出工作表标题参数化（P9-S2）；利润趋势请求竞态守卫（P10-S2b） |
+| O-1 / O-5 / O-6 / O-8 / O-9 | 低价值观察项：flaky 用例、排序兜底键无测试看守、错误码映射无测试、多币种空态 note 期数、onchange 重复调用无看守（完整清单见台账 §51～§55） |
+| — | 利润明细分页（50/100/200，单页上限 200）+ SKU 筛选；导出跟随筛选，上限 20000 行（超出时 `X-Export-Truncated=1`） |
+| — | 利润趋势为独立端点，1～31 期、每期 1～90 天、总跨度 ≤ 90 天；多币种不折算，缺失期为 `null` 而非 0 |
 | — | 只读客服角色看不到利润（有意为之，未来单开 `finance.read`） |
 
 ### 其他限制
